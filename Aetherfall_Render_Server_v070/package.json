@@ -1,0 +1,21 @@
+{
+  "name": "aetherfall-online",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "node scripts/build-static.mjs",
+    "build:server": "esbuild apps/server/main.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=dist-server/main.js",
+    "inventory": "node scripts/inventory-legacy-content.mjs",
+    "test": "npm run inventory && npm run build:server && node tests/online-v210.test.cjs && node --test tests/*.test.mjs",
+    "check": "npm run inventory && node scripts/check-project.mjs",
+    "start:render": "node apps/server/render-shim.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: aetherfall-authoritative-coop
+    runtime: node
+    plan: free
+    region: frankfurt
+    rootDir: Aetherfall_Render_Server_v060
+    buildCommand: npm ci && npm run build:server
+    startCommand: npm run start:render
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: ALLOWED_ORIGINS
+        value: https://amazing-fenglisu-72d040.netlify.app

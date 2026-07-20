@@ -4,6 +4,7 @@ services:
     runtime: node
     plan: free
     region: frankfurt
+    rootDir: Aetherfall_Render_Server_v070
     buildCommand: npm ci && npm run build:server
     startCommand: npm run start:render
     healthCheckPath: /

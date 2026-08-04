@@ -1,0 +1,7 @@
+export function createRandom(seed = 1) {
+  let state = (Number(seed) >>> 0) || 1;
+  return () => {
+    state = Math.imul(1664525, state) + 1013904223 >>> 0;
+    return state / 0x100000000;
+  };
+}

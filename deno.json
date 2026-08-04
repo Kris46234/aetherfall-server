@@ -1,0 +1,10 @@
+{
+  "fmt": {
+    "lineWidth": 100,
+    "semiColons": true,
+    "singleQuote": true
+  },
+  "tasks": {
+    "server": "deno run --allow-net --allow-env apps/server/main.ts"
+  }
+}

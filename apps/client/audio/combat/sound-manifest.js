@@ -1,0 +1,22 @@
+window.AETHER_COMBAT_SOUNDS=Object.freeze({
+  fire_cast:{files:['fire_cast/01.mp3'],gain:.70,cooldown:130,rate:[.98,1.02]},
+  fire_impact:{files:['fire_impact/01.mp3','fire_impact/02.mp3','fire_impact/03.mp3','fire_impact/04.mp3'],gain:.66,cooldown:75,rate:[.97,1.04]},
+  volcanic_eruption:{files:['fire_impact/04.mp3'],gain:.80,cooldown:180,rate:[.84,.90]},
+  lightning_cast:{files:['lightning_cast/01.mp3','lightning_cast/02.mp3','lightning_cast/03.mp3','lightning_cast/04.mp3'],gain:.62,cooldown:110,rate:[.98,1.03]},
+  ice_cast:{files:['ice_cast/01.mp3','ice_cast/02.mp3','ice_cast/03.mp3','ice_cast/04.mp3'],gain:.46,cooldown:320,rate:[.98,1.02]},
+  ice_impact:{files:['ice_impact/01.mp3','ice_impact/02.mp3','ice_impact/03.mp3','ice_impact/04.mp3'],gain:.54,cooldown:140,rate:[.97,1.03]},
+  magic_launch:{files:['magic_launch/01.mp3','magic_launch/02.mp3','magic_launch/03.mp3','magic_launch/04.mp3'],gain:.44,cooldown:90,rate:[.97,1.04]},
+  dark_debuff:{files:['dark_debuff/01.mp3','dark_debuff/02.mp3','dark_debuff/03.mp3','dark_debuff/04.mp3'],gain:.50,cooldown:160,rate:[.97,1.03]},
+  magic_buff:{files:['magic_buff/01.mp3','magic_buff/02.mp3','magic_buff/03.mp3','magic_buff/04.mp3'],gain:.46,cooldown:180,rate:[.98,1.03]},
+  holy_blessing:{files:['holy_blessing/01.mp3','holy_blessing/02.mp3','holy_blessing/03.mp3'],gain:.52,cooldown:180,rate:[.98,1.02]},
+  rune_activate:{files:['rune_activate/01.mp3','rune_activate/02.mp3'],gain:.46,cooldown:260,rate:[.98,1.02]},
+  heavy_whoosh:{files:['heavy_whoosh/01.mp3'],gain:.46,cooldown:135,rate:[.96,1.04]},
+  fast_swing:{files:['fast_swing/01.mp3'],gain:.40,cooldown:95,rate:[.95,1.06]},
+  warrior_hit:{files:['warrior_hit/01.mp3','warrior_hit/02.mp3','warrior_hit/03.mp3','warrior_hit/04.mp3'],gain:.58,cooldown:85,rate:[.96,1.04]},
+  sword_hit:{files:['sword_hit/01.mp3','sword_hit/02.mp3','sword_hit/03.mp3','sword_hit/04.mp3','sword_hit/05.mp3'],gain:.50,cooldown:80,rate:[.96,1.05]},
+  dagger_hit:{files:['dagger_hit/01.mp3','dagger_hit/02.mp3','dagger_hit/03.mp3','dagger_hit/04.mp3'],gain:.46,cooldown:70,rate:[.97,1.05]},
+  shield_block:{files:['shield_block/01.mp3','shield_block/02.mp3'],gain:.50,cooldown:165,rate:[.97,1.03]},
+  hurt:{files:['hurt/01.mp3','hurt/02.mp3','hurt/03.mp3','hurt/04.mp3'],gain:.32,cooldown:520,rate:[.98,1.02]},
+  potion:{files:['potion/01.mp3','potion/02.mp3','potion/03.mp3','potion/04.mp3'],gain:.42,cooldown:900,rate:[.98,1.02]},
+  finisher:{files:['finisher/01.mp3','finisher/02.mp3','finisher/03.mp3','finisher/04.mp3'],gain:.64,cooldown:260,rate:[.97,1.03]}
+});

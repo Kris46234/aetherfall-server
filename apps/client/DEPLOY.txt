@@ -1,0 +1,20 @@
+AETHERFALL AUTHORITATIVE CO-OP 0.16.0 — CLIENT v225
+
+Protocol 20 adds Atonement-first Discipline decisions, stable short-term triage
+targets and the 20% stronger emergency Shadow Mend.
+
+Netlify hosts only the browser client. Render hosts the shared match simulation.
+
+From the repository root:
+
+  npm install
+  npm run check
+  npm test
+  npm run build
+
+Upload the generated dist/ directory to Netlify, or let netlify.toml build it.
+Deploy the matching protocol-20 server package to Render first. Its health URL
+must report "protocol":20 before the Netlify client is updated.
+
+Both players should use the Netlify URL and hard-refresh after deployment.
+Do not use a downloaded HTML file for normal play.

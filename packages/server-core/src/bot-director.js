@@ -1,5 +1,6 @@
 import { getAbility } from '../../content/src/catalogue.js';
 import { clamp, distance, hasLineOfSight } from '../../simulation/src/geometry.js';
+import { createAiHost } from './ai-host.js';
 
 const HARD_CONTROL = ['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap'];
 const DISPELLABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'root', 'slow'];
@@ -79,7 +80,7 @@ function visible(from, to, arena) {
 }
 
 export class BotDirector {
-  constructor(simulation, botIds, { decisionInterval = .22, reactionMin = .42, reactionMax = .70, interruptChance = .28 } = {}) {
+  constructor(simulation, botIds, { decisionInterval = .22, reactionMin = .42, reactionMax = .70, interruptChance = .28, usePortedAi = true, mode = '2v2' } = {}) {
     this.simulation = simulation;
     this.botIds = [...botIds].sort();
     this.decisionInterval = decisionInterval;
@@ -87,6 +88,13 @@ export class BotDirector {
     this.reactionMax = reactionMax;
     this.interruptChance = interruptChance;
     this.castLockout = new Map(this.botIds.map(id => [id, 0]));
+    /* The offline AIController, adapted onto this simulation. It is the preferred
+       brain; the routine further down is only a fallback. */
+    this.aiHost = usePortedAi === false ? null : createAiHost(simulation, {
+      mode,
+      profile: { min: reactionMin, max: reactionMax, interrupt: interruptChance, kite: .34, fakeDelay: .42 }
+    });
+    this.aiFailure = null;
     this.rngState = (this.botIds.join('|').split('').reduce((h, ch) => Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0, 2166136261) || 1) >>> 0;
     this.accumulator = decisionInterval;
     this.inputSequence = new Map(this.botIds.map(id => [id, 0]));
@@ -105,6 +113,26 @@ export class BotDirector {
   }
 
   update(elapsed) {
+    /* Preferred path: the real offline AIController, so online bots play each class the
+       way they do in single player. It carries its own reaction pacing through
+       ratingProfile(), so the simple cast lockout below is not stacked on top of it.
+       If it ever throws, drop to the built-in routine rather than freezing the bots
+       mid-match, and record the failure. */
+    if (this.aiHost) {
+      try {
+        for (const botId of this.botIds) {
+          const bot = this.simulation.state.units.get(botId);
+          if (bot && bot.alive) this.aiHost.step(bot, elapsed);
+        }
+        return;
+      } catch (error) {
+        this.aiHost = null;
+        this.aiFailure = error;
+        if (typeof console !== 'undefined' && console.error) {
+          console.error('Ported AI failed, falling back to built-in bots:', error && error.message);
+        }
+      }
+    }
     for (const botId of this.botIds) {
       this.castLockout.set(botId, Math.max(0, (this.castLockout.get(botId) || 0) - elapsed));
     }

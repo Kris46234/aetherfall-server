@@ -3,19 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Aetherfall Arena v225 — Atonement Discipline</title>
-<!-- three.js is now loaded as an ES module below so GLTFLoader is available -->
-<link rel="stylesheet" href="./styles/game.css">
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-}}
-</script>
-<script src="./spell-icons/icon-map.js"></script>
+<link rel="icon" type="image/png" href="./favicon.png?v=1" />
+<link rel="apple-touch-icon" href="./favicon.png?v=1" />
+<title>Aetherfall Arena — Online Arena</title>
+  <link rel="stylesheet" href="./styles/game.css?v=245-online-arena-1">
+<script src="./spell-icons/icon-map.js?v=245-online-arena-1"></script>
 <script src="./audio/combat/sound-manifest.js"></script>
-<script id="aether-model-data" src="./assets/model-data.js"></script>
-<script type="module" src="./src/three-bridge.js"></script>
+<script id="aether-model-data" src="./assets/model-data.js?v=239-spell-clarity-1"></script>
+<script src="./src/three-offline-bundle.js?v=239-spell-clarity-1"></script>
 </head>
 <body>
 
@@ -43,7 +38,7 @@
 
         <div class="menu-grid compact-grid">
           <div class="field"><label>Queue Type</label><select id="queueSelect"><option value="ranked" selected>Ranked</option><option value="skirmish">Skirmish</option><option value="training">Training</option></select></div>
-          <div class="field"><label>Bracket</label><select id="modeSelect"><option value="2v2">2v2</option><option value="3v3">3v3</option></select></div>
+          <div class="field"><label>Bracket</label><select id="modeSelect"><option value="1v1">1v1</option><option value="2v2">2v2</option><option value="3v3">3v3</option></select></div>
           <div class="field"><label>Bot Difficulty</label><div class="arena-current">Scales with rating</div><select id="difficultySelect" style="display:none"><option value="hard" selected>Rating-scaled</option></select></div>
           <div class="field"><label>Arena</label><select id="arenaSelect"><option value="random" selected>Random Arena</option><option value="runestone">Twilight Runestone Court</option><option value="serpent">Serpent Gate Ruins</option><option value="training">Training Grounds</option></select></div>
           <div class="field class-select-hidden"><label>Selected Class</label><select id="classSelect"><option value="flame" selected>Flame Duelist</option><option value="shadow">Shadowblade</option><option value="storm">Stormwarden</option><option value="wind">Windwalker</option><option value="soul">Soulweaver</option><option value="sage">Lifesage</option><option value="pala">Paladin</option><option value="disc">Discipline</option><option value="warrior">Warrior</option></select><div id="arenaCurrent" class="arena-current">Arena pool: Random</div></div>
@@ -80,8 +75,56 @@
 <div id="changelogModal" class="hidden">
  <div class="changelog-window glass">
   <section class="changelog-page"><div class="changelog-page-head"><div><span class="menu-topline">RELEASE HISTORY</span><strong>Aetherfall Change Log</strong><p>Balance, combat rules, bot behaviour and interface improvements, recorded by release.</p></div><button class="minor-btn" onclick="document.getElementById('changelogModal').classList.add('hidden')">Close</button></div>
-  <div class="changelog-list">
-   <article class="changelog-entry current"><div><strong>Version 2.25</strong><span>Atonement Discipline</span></div><ul>
+	  <div class="changelog-list">
+	   <article class="changelog-entry current"><div><strong>Version 2.32</strong><span>Infernal Performance</span></div><ul>
+	    <li><em>[Soulweaver]</em> Chaos Bolt now has a 12 sec cooldown. Learning it also transforms Creeping Torment into Immolate, a 1 sec cast with immediate Fire damage and an 8 sec burn.</li>
+	    <li><em>[Soulweaver]</em> Press Essence Siphon again to cancel its channel. Its Chaos Bolt interaction appears only after Chaos Bolt is learned, and Fear now has a 6 sec cooldown.</li>
+	    <li><em>[Stormwarden]</em> Frost Shock keeps its damage mark for 8 sec, while its 25% snare lasts up to 3 sec and shares root/snare diminishing returns.</li>
+	    <li><em>[Performance]</em> Infernal landing and movement no longer create dynamic point lights or sort targets every frame. Particle counts, shadow work and long-lived effect overhead were reduced without removing the Infernal model.</li>
+	    <li><em>[Interface]</em> Gear-adjusted damage is written directly into the normal spell description instead of adding an oversized estimate panel.</li>
+	    <li><em>[Visuals]</em> Imported character models retain their calibrated foot offset so their feet meet the arena floor instead of hovering.</li>
+	   </ul></article>
+	   <article class="changelog-entry"><div><strong>Version 2.31</strong><span>Chaos Reforged</span></div><ul>
+	    <li><em>[Soulweaver]</em> Chaos Bolt replaces Unstable Affliction on the Soul Drain branch. It has a 1.45 sec cast, an 18 sec cooldown, always critically strikes and gains damage from Critical Strike chance.</li>
+	    <li><em>[Soulweaver]</em> Every Essence Siphon tick reduces Chaos Bolt cooldown by 2 sec, while its self-healing is increased by 30%. Dark Pact now shields for 20% maximum health.</li>
+	    <li><em>[Shadowblade]</em> Gouge lasts 3 sec and grants 10% overall damage when learned. Crimson Vial restores 1.5% maximum health each second for 10 sec, and Evasion grants 70% melee dodge.</li>
+	    <li><em>[Shadowblade]</em> Vendetta lasts 10 sec on a 60 sec cooldown. Shiv slows for 4 sec while its poison vulnerability lasts 8 sec; Viper Cut poison also lasts 8 sec.</li>
+	    <li><em>[Interface]</em> Direct-damage tooltips now show an estimate calculated from the equipped character’s gear, talents and active modifiers, with random critical strikes identified separately.</li>
+	    <li><em>[Visuals]</em> Chaos Bolt is a large green-and-black fel projectile. Crimson Vial now shows a drinking motion followed by persistent red restorative particles.</li>
+	   </ul></article>
+	   <article class="changelog-entry"><div><strong>Version 2.30</strong><span>Fel Pursuit</span></div><ul>
+    <li><em>[Infernal]</em> Summon Infernal now uses a hulking grey-stone model with oversized armour, bright fel-green cores and cracks, and a matching fel impact. It actively chases the nearest enemy instead of standing at its landing point.</li>
+    <li><em>[Control]</em> Gouge is now an incapacitate separate from Blind, while Blind uses the disorient track. The redundant purple frame banner is removed; the compact effect and remaining duration stay visible.</li>
+    <li><em>[Soulweaver]</em> Mortal Horror and Shadowfury cost no mana; Soul Barrier, Fear and Soul Scar each cost 2 mana.</li>
+    <li><em>[Stormwarden]</em> Healing Stream Totem lasts 10 sec and heals within 18m. Frost Shock slows by 25% for 8 sec and increases Arc Spark and Forked Current damage against that target by 15% for its duration.</li>
+    <li><em>[Windwalker]</em> Rising Sun Kick performs a smooth backflip, while Cloudstep Dash uses a forward serpent-kick pose and spectral serpent trail.</li>
+    <li><em>[Interface]</em> Summon Infernal now has dedicated action-bar and talent artwork.</li>
+    <li><em>[Fix]</em> Healing Surge commits its cooldown only when the cast completes successfully; cancelling the cast by moving no longer wastes the ability.</li>
+    <li><em>[New]</em> Soulweaver can learn Summon Infernal to place a killable 10 sec summon: its landing stuns for 2 sec, it pulses nearby enemies every 2 sec and restores 4 mana every second.</li>
+    <li><em>[Shadowblade]</em> Crimson Vial restores 1% maximum health each second for 10 sec regardless of dampening. Gouge incapacitates for 2 sec, while Garrote's descriptions now clearly state that it does not silence.</li>
+    <li><em>[Balance]</em> Healer spell costs use 95% of their original values. Lifesage healing is reduced by 10%; Soulweaver maximum mana is increased by 15% and all Soulweaver damage is reduced by another 10%.</li>
+    <li><em>[Stormwarden]</em> Healing Stream Totem now has 280 health.</li>
+    <li><em>[Talents]</em> Specialisation choices now describe their exact working effects. Windwalker's obsolete Cyclone wording is replaced by Flowing Steps and Finishing Technique.</li>
+    <li><em>[Interface]</em> Action-bar arrangements are saved separately for each learned ability set, so switching builds and returning restores the correct buttons and key slots.</li>
+   </ul></article>
+   <article class="changelog-entry"><div><strong>Version 2.28</strong><span>Spell Clarity &amp; Ground Targeting</span></div><ul>
+    <li><em>[Interface]</em> Every baseline and talent spell now uses player-facing descriptions with clear targeting, timing and spell interactions instead of unexplained patch-note terms.</li>
+    <li><em>[New]</em> Meteor and Shadowfury use movable ground-placement circles confirmed with left click; right click or Escape cancels. Shadowfury now stuns enemies in its area for 3 sec.</li>
+    <li><em>[Fix]</em> Confirmed ground locations now pass safely into combat resolution, so Meteor falls and Shadowfury erupts instead of consuming their cost without producing an effect.</li>
+    <li><em>[Controls]</em> Instant Camera Response removes intentional camera smoothing so mouse turns are applied to the rendered view on the very next frame. It is enabled by default and can be switched off in Settings.</li>
+    <li><em>[Lifesage]</em> Renewal Tide empowers the next Verdant Mend by 150%. Lifesage and Paladin basic attacks are single deliberate left-click attacks instead of repeating on/off toggles.</li>
+    <li><em>[Shadowblade]</em> Umbral Pounce grants 50% melee dodge for 1.5 sec, the damage check respects the displayed chance, and both Pounce and Evasion use brighter moving evasion trails.</li>
+    <li><em>[Talents]</em> Previously inactive passive nodes now connect to combat calculations, and vague talent descriptions have been replaced with exact values.</li>
+    <li><em>[Balance]</em> Healer spell costs used 85% of their original values, a ten-point increase from the previous 75% setting.</li>
+   </ul></article>
+   <article class="changelog-entry"><div><strong>Version 2.27</strong><span>Recorded Expert AI</span></div><ul>
+    <li><em>[AI]</em> Discipline is calibrated from nine expert wins: maintain Atonement, use offensive Penance and Solace, weave Smite, reserve Shadow Mend for recovery, and answer split pressure with Radiance.</li>
+    <li><em>[AI]</em> Paladin is calibrated from thirteen recorded matches: predictive Bestow Faith and Sacrifice, self-risk checks with Divine Protection, mana-positive Judgement, dynamic Divine Toll targets and safer Holy Light casts.</li>
+    <li><em>[AI]</em> Shadowblade is calibrated from ten recorded matches: valid-cast interrupts, deliberate Blind setup, Garrote before Vendetta, defensive-aware burst and coordinated kill-target selection.</li>
+    <li><em>[Fix]</em> Repaired missing Discipline Smite and Paladin enemy-healer references that could collapse those bot decision paths into inconsistent fallback play.</li>
+    <li><em>[Difficulty]</em> Hard and high-rated bots execute the full recorded policies; lower difficulties retain slower reactions and less reliable setup conversion.</li>
+   </ul></article>
+   <article class="changelog-entry"><div><strong>Version 2.25</strong><span>Atonement Discipline</span></div><ul>
     <li><em>[AI]</em> Discipline now establishes and refreshes Atonement, then prioritises offensive Penance, Solace and Smite to heal through damage.</li>
     <li><em>[AI]</em> <span class="change-ability"><img src="./spell-icons/Necromancer/Necromancer_21.webp" alt="">Shadow Mend</span> is reserved for critical health, dangerous incoming burst, Holy-school lockouts, or a missing offensive line instead of being spammed whenever an ally is merely injured.</li>
     <li><em>[AI]</em> Healers briefly commit to one triage target unless another ally becomes substantially more urgent, reducing indecisive target swapping under split pressure.</li>
@@ -135,22 +178,24 @@
 
 <div id="worldLabels"></div><div id="floaters"></div>
 <div id="hud" class="hidden">
- <div id="topbar" class="glass"><div class="timer" id="timer">00:00</div><div class="team-count"><span class="blue" id="allyAlive">2</span> Allies &nbsp; vs &nbsp; <span class="red" id="enemyAlive">2</span> Enemies</div></div>
- <div id="damp" class="glass hidden">Dampening: <span id="dampValue">0%</span></div>
- <div class="frames left" id="allyFrames"></div><div class="frames right" id="enemyFrames"></div>
- <div id="targetFrame" class="glass hidden"></div><div id="message"></div>
- <div id="playerControlAlert" class="glass hidden"></div>
- <div id="castWrap" class="glass"><div class="cast-inner"><div id="castProgress" class="cast-progress"></div><div id="castLabel" class="cast-label"></div></div></div>
- <div id="actionbar" class="glass"></div>
+ <div id="topbar" class="glass hud-widget" data-hud-id="topbar" data-hud-label="Match timer"><div class="timer" id="timer">00:00</div><div class="team-count"><span class="blue" id="allyAlive">2</span> Allies &nbsp; vs &nbsp; <span class="red" id="enemyAlive">2</span> Enemies</div></div>
+ <div id="damp" class="glass hidden hud-widget" data-hud-id="damp" data-hud-label="Dampening">Dampening: <span id="dampValue">0%</span></div>
+ <div class="frames left hud-widget" id="allyFrames" data-hud-id="allyFrames" data-hud-label="Allied frames"></div><div class="frames right hud-widget" id="enemyFrames" data-hud-id="enemyFrames" data-hud-label="Enemy frames"></div>
+ <div id="targetFrame" class="glass hidden hud-widget" data-hud-id="targetFrame" data-hud-label="Target frame"></div><div id="message" class="hud-widget" data-hud-id="message" data-hud-label="Combat messages"></div>
+ <div id="playerControlAlert" class="glass hidden hud-widget" data-hud-id="playerControlAlert" data-hud-label="Crowd-control alert"></div>
+ <div id="castWrap" class="glass hud-widget" data-hud-id="castWrap" data-hud-label="Cast bar"><div class="cast-inner"><div id="castProgress" class="cast-progress"></div><div id="castLabel" class="cast-label"></div></div></div>
+ <div id="actionbar" class="glass hud-widget" data-hud-id="actionbar" data-hud-label="Action bar"></div>
  <div id="detailsReport" class="glass hidden"></div>
-<div id="detailsMeter" class="glass">
+<div id="detailsMeter" class="glass hud-widget" data-hud-id="detailsMeter" data-hud-label="Damage meter">
   <div class="details-head"><strong>DETAILS!</strong><span>DAMAGE DONE · CLICK ROW</span></div>
   <div id="detailsList" class="details-list"></div>
 </div>
-<div id="healingMeter" class="glass">
+<div id="healingMeter" class="glass hud-widget" data-hud-id="healingMeter" data-hud-label="Healing meter">
   <div class="details-head healing-head"><strong>DETAILS!</strong><span>HEALING DONE · CLICK ROW</span></div>
   <div id="healingList" class="details-list"></div>
 </div>
+<div id="fpsCounter" class="glass hidden hud-widget" data-hud-id="fpsCounter" data-hud-label="FPS counter" aria-live="polite">60 FPS</div>
+<div id="hudEditBar" class="glass hidden"><strong>Edit HUD</strong><span id="hudEditSelection">Select and drag a highlighted element</span><label class="hud-element-scale">Element scale <input type="range" id="hudElementScale" min="50" max="180" step="5" value="100"><b id="hudElementScaleLabel">100%</b></label><button id="resetHudLayout" class="minor-btn">Reset layout</button><button id="finishHudEdit" class="main-btn">Done</button></div>
 
 </div>
 <div id="abilityTooltip" class="glass hidden"></div>
@@ -175,7 +220,7 @@
     <div class="talent-layout">
       <aside id="talentTabs" class="talent-tabs"></aside>
       <main class="talent-tree-wrap"><div id="talentTree" class="talent-tree"></div></main>
-      <aside class="talent-info"><div id="talentInfo"><div class="talent-name">Select a talent</div><div class="talent-desc">Hover or click a node to inspect it. Double-click a node to learn it quickly.</div></div><div class="talent-actions"><button id="learnTalentBtn" class="main-btn">Learn Selected Talent</button><button id="resetTalentsBtn" class="minor-btn">Reset This Class</button></div></aside>
+      <aside class="talent-info"><div id="talentInfo"><div class="talent-name">Select a talent</div><div class="talent-desc">Hover or click a node to inspect it. Double-click a node to learn it quickly.</div></div><div class="talent-actions"><div id="talentPresetActions" class="talent-presets"></div><button id="learnTalentBtn" class="main-btn">Learn Selected Talent</button><button id="resetTalentsBtn" class="minor-btn">Reset This Class</button></div></aside>
     </div>
   </div>
 </div>
@@ -250,6 +295,22 @@
  </div>
  <div id="gearTooltip" class="gear-tooltip hidden"></div>
 </div>
+<div id="recraftModal" class="hidden">
+ <div class="recraft-card">
+  <div class="recraft-head">
+   <div><span class="recraft-kicker">Conquest Quartermaster</span><h3>Recraft Build Stats</h3></div>
+   <button id="closeRecraft" class="sg-close">×</button>
+  </div>
+  <div id="recraftItemSummary" class="recraft-item-summary"></div>
+  <p class="recraft-copy">Keep this item, its item level, appearance and equipped state. Only its two chosen build stats will change.</p>
+  <div class="recraft-fields">
+   <label>New Style Stat I<select id="recraftStatA"></select></label>
+   <label>New Style Stat II<select id="recraftStatB"></select></label>
+  </div>
+  <div id="recraftPreview" class="recraft-preview"></div>
+  <div class="recraft-actions"><button id="cancelRecraft" class="minor-btn">Cancel</button><button id="confirmRecraft" class="main-btn">Recraft</button></div>
+ </div>
+</div>
 <div id="statGuideModal" class="hidden">
  <div class="stat-guide-card">
   <div class="sg-head">
@@ -266,8 +327,9 @@
    <div class="sg-card"><b>Restoration</b><span>Every 1 point adds 0.038% healing.</span></div>
    <div class="sg-card"><b>Vitality</b><span>Every 1 point adds 0.72 maximum health, sharing the +420 HP cap with Stamina.</span></div>
    <div class="sg-card"><b>Mana</b><span>Every 1 point adds 0.18 maximum mana, capped at +60 mana.</span></div>
-   <div class="sg-card"><b>Versatility</b><span>Every 1 point adds 0.018% damage, 0.018% healing and 0.018% damage reduction, with damage/healing bonuses capped at 30%.</span></div>
-   <div class="sg-card"><b>Balance Note</b><span>Primary stats and Stamina are treated as stable class foundations. Gear still tunes performance through combat stats, with 990 gear raising damage/healing caps to 30%, HP bonus to 420 and mana bonus to 60.</span></div>
+   <div class="sg-card"><b>Versatility</b><span>Every 1 point adds 0.018% damage, 0.018% healing and 0.018% damage reduction. Its damage and healing bonuses continue above the 30% core-stat cap.</span></div>
+   <div class="sg-card"><b>Critical Strike</b><span>Champions have a base 5% critical chance. Every 1 point adds 0.03%, up to 35% total. Critical damage and healing are 150% of normal.</span></div>
+   <div class="sg-card"><b>Progression Curve</b><span>Stats now scale more sharply by item level: entry gear is deliberately modest, ilvl 950 stays near the previous combat midpoint, and elite 970–1000 gear gains increasingly stronger totals. Power/Restoration plus primary stats cap at 30%; Versatility continues beyond it.</span></div>
   </div>
   <div class="sg-note">Every forged item has automatic Core Attributes (Stamina + class primary) and exactly the two Build Bonuses you selected. No hidden recommended Power or Restoration is added as a third build bonus.</div>
  </div>
@@ -295,13 +357,13 @@
  <div class="focus-ability-head"><label>Ability</label><span class="focus-select-shell focus-ability"><span id="focusAbilityPreview" class="focus-select-art"></span><select id="focusAbilitySelect" class="focus-ability"></select></span></div>
  <div id="focusBindGrid" class="focus-grid"></div>
 </div>
-<label class="setting-toggle"><input type="checkbox" id="reducedFX"> Reduced visual effects</label><label class="setting-toggle"><input type="checkbox" id="hideCombatText"> Hide healing / info combat text</label><label class="setting-toggle"><input type="checkbox" id="hideLiveDetails"> Hide live damage / healing meters during combat</label><label class="setting-toggle"><input type="checkbox" id="stackingNameplates"> Stack overlapping enemy nameplates</label><label class="setting-toggle"><input type="checkbox" id="showTargetOfTarget"> Show target-of-target portrait</label><label class="setting-toggle"><input type="checkbox" id="soundEnabled"> Spell &amp; combat sounds · 12m spatial range</label><label class="sound-volume">Volume <input type="range" id="soundVolume" min="0" max="100" step="1"><span id="soundVolumeLabel">35%</span></label><div class="setting-row"><button class="minor-btn" id="resetBinds">Reset Defaults</button><button class="main-btn" style="flex:0 0 140px" id="closeSettings">Resume</button></div></div></div>
+<section class="hud-settings"><h3>HUD &amp; Performance</h3><label class="sound-volume">HUD scale <input type="range" id="hudScale" min="70" max="140" step="5"><span id="hudScaleLabel">100%</span></label><label class="sound-volume">Raid frames <select id="raidFrameStyle"><option value="detailed">Detailed frames</option><option value="class">Class-coloured boxes</option></select></label><label class="setting-toggle"><input type="checkbox" id="instantCamera"> Instant camera response <small>No smoothing · recommended</small></label><label class="setting-toggle"><input type="checkbox" id="showFPS"> Show FPS counter</label><div class="performance-status">Full-quality scheduling keeps models, effects and native resolution while running bot decisions independently of monitor refresh.</div><div id="performanceStatus" class="performance-status">Full-quality performance ready</div><button class="minor-btn hud-edit-button" id="editHud">Edit HUD layout</button></section><label class="setting-toggle"><input type="checkbox" id="reducedFX"> Reduced visual effects</label><label class="setting-toggle"><input type="checkbox" id="hideCombatText"> Hide healing / info combat text</label><label class="setting-toggle"><input type="checkbox" id="hideLiveDetails"> Hide live damage / healing meters during combat</label><label class="setting-toggle"><input type="checkbox" id="stackingNameplates"> Stack overlapping enemy nameplates</label><label class="setting-toggle"><input type="checkbox" id="showTargetOfTarget"> Show target-of-target portrait</label><label class="setting-toggle"><input type="checkbox" id="soundEnabled"> Spell &amp; combat sounds · 12m spatial range</label><label class="sound-volume">Volume <input type="range" id="soundVolume" min="0" max="100" step="1"><span id="soundVolumeLabel">35%</span></label><div class="setting-row"><button class="minor-btn" id="resetBinds">Reset Defaults</button><button class="main-btn" style="flex:0 0 140px" id="closeSettings">Resume</button></div></div></div>
 <div id="debug" class="hidden"><div id="debugPanel" class="glass"></div></div>
 <div id="achievementToastRoot"></div>
-<script src="./src/game-runtime.js"></script>
+	  <script src="./src/game-runtime.js?v=245-online-arena-1"></script>
 
 
-<script src="./src/online-authoritative.js"></script>
+	  <script src="./src/online-authoritative.js?v=245-online-arena-1"></script>
 
 <script src="./src/error-hook.js"></script>
 

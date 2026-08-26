@@ -48,7 +48,14 @@ export const BOT_TALENT_LOADOUTS = Object.freeze({
     war_victory_rush: 1,
     war_disarm: 1,
     war_execute_strike: 1
-  })
+  }),
+  disc: Object.freeze({ disc_archangel: 1, disc_angelic_body: 1 }),
+  sage: Object.freeze({ sage_natures_grasp: 1, sage_rejuvenate: 1, sage_spirit_bloom: 1 }),
+  flame: Object.freeze({ flame_combustion: 1, flame_meteor_spear: 1, flame_phoenix_guard: 1 }),
+  shadow: Object.freeze({ shadow_cloak: 1, shadow_crimson_vial: 1, shadow_gouge: 1, shadow_garrote: 1 }),
+  storm: Object.freeze({ storm_thunderstep: 1, storm_grounding_aegis: 1, storm_chain_spark: 1 }),
+  wind: Object.freeze({ wind_karma: 1, wind_tiger_rush: 1, wind_tigereye_brew: 1 }),
+  soul: Object.freeze({ soul_dark_pact: 1, soul_horror: 1, soul_shadowfury: 1, soul_void_mend: 1, soul_summon_infernal: 1 })
 });
 
 function ratio(unit) {
@@ -72,10 +79,14 @@ function visible(from, to, arena) {
 }
 
 export class BotDirector {
-  constructor(simulation, botIds, { decisionInterval = .1 } = {}) {
+  constructor(simulation, botIds, { decisionInterval = .22, reactionMin = .18, reactionMax = .42 } = {}) {
     this.simulation = simulation;
     this.botIds = [...botIds].sort();
     this.decisionInterval = decisionInterval;
+    this.reactionMin = reactionMin;
+    this.reactionMax = reactionMax;
+    this.castLockout = new Map(this.botIds.map(id => [id, 0]));
+    this.rngState = (this.botIds.join('|').split('').reduce((h, ch) => Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0, 2166136261) || 1) >>> 0;
     this.accumulator = decisionInterval;
     this.inputSequence = new Map(this.botIds.map(id => [id, 0]));
     this.actionSequence = new Map(this.botIds.map(id => [id, 0]));
@@ -91,6 +102,9 @@ export class BotDirector {
   }
 
   update(elapsed) {
+    for (const botId of this.botIds) {
+      this.castLockout.set(botId, Math.max(0, (this.castLockout.get(botId) || 0) - elapsed));
+    }
     this.accumulator += elapsed;
     while (this.accumulator + 1e-9 >= this.decisionInterval) {
       this.accumulator -= this.decisionInterval;
@@ -130,6 +144,7 @@ export class BotDirector {
     if (effect(bot, `lock_${ability.school}`)) return false;
     if (bot.cast && !this.simulation.combat.canUseWhileCasting(bot, ability) && !CAST_OFF_GLOBAL.has(ability.type)) return false;
     if (!ability.offGlobal && bot.gcd > .001) return false;
+    if ((this.castLockout.get(bot.id) || 0) > .001) return false;
     if (!ability.ignoreCooldown && (bot.cooldowns.get(ability.id) || 0) > .001) return false;
     return bot.resource + 1e-6 >= ability.cost;
   }
@@ -141,6 +156,27 @@ export class BotDirector {
       abilityId,
       targetId: target?.id || null
     });
+    if (result.ok) this.#armReaction(bot);
+    return !!result.ok;
+  }
+
+  #random() {
+    this.rngState = (Math.imul(1664525, this.rngState) + 1013904223) >>> 0;
+    return this.rngState / 0x100000000;
+  }
+
+  #armReaction(bot) {
+    const spread = Math.max(0, this.reactionMax - this.reactionMin);
+    this.castLockout.set(bot.id, this.reactionMin + this.#random() * spread);
+  }
+
+  #groundAction(bot, abilityId, point) {
+    if (!this.#ready(bot, abilityId) || !point) return false;
+    const result = this.simulation.applyAction(bot.id, {
+      sequence: this.#nextAction(bot.id), abilityId,
+      targetId: null, x: point.x, z: point.z
+    });
+    if (result.ok) this.#armReaction(bot);
     return !!result.ok;
   }
 
@@ -410,6 +446,109 @@ export class BotDirector {
     this.#action(bot, 'warrior.mortal_swing', target);
   }
 
+  #genericHealer(bot, allies, enemies) {
+    const arena = this.simulation.state.arena;
+    const evaluated = allies.map(ally => ({ ally, state: this.#pressure(bot, ally, enemies) }))
+      .sort((a, b) => b.state.score - a.state.score || a.ally.id.localeCompare(b.ally.id));
+    const injured = evaluated[0]?.ally || bot;
+    const danger = evaluated[0]?.state || { ratio: 1, burst: 0 };
+    const nearestEnemy = [...enemies].sort((a, b) => distance(bot, a) - distance(bot, b))[0];
+    const enemyRange = nearestEnemy ? distance(bot, nearestEnemy) : 99;
+    const canHeal = distance(bot, injured) <= 27.5 && visible(bot, injured, arena);
+    bot.targetId = injured.id;
+
+    if (controlled(bot)) {
+      this.#input(bot, 0, 0);
+      if ((ratio(bot) < .48 || danger.burst >= 3.5) && bot.trinketCooldown <= 0) this.simulation.useTrinket(bot.id);
+      return;
+    }
+
+    const defensive = bot.classId === 'disc'
+      ? ['disc.pain_suppression', 'disc.fade']
+      : ['sage_spirit_bloom', 'sage.fae_retreat'];
+    if (danger.ratio < .46) for (const id of defensive) if (this.#action(bot, id, id.includes('pain') || id.includes('spirit') ? injured : bot)) return;
+
+    const cleansable = allies.find(ally => DISPELLABLE_CONTROL.some(type => effect(ally, type)));
+    const cleanseId = bot.classId === 'disc' ? 'disc.purify' : 'sage.purifying_light';
+    if (cleansable && this.#action(bot, cleanseId, cleansable)) return;
+
+    const priorities = bot.classId === 'disc'
+      ? [
+        ['disc.power_shield', .90], ['disc.penance', .84], ['disc.shadow_mend', .93],
+        ['disc.ultimate_radiance', .54], ['disc.solace', .98]
+      ]
+      : [
+        ['sage.renewal_tide', .48], ['sage.spirit_blossom', .70], ['sage.blooming_echo', .91],
+        ['sage_rejuvenate', .94], ['sage.verdant_mend', .96]
+      ];
+    if (canHeal) {
+      for (const [id, threshold] of priorities) {
+        if (danger.ratio < threshold && this.#action(bot, id, injured)) {
+          if (bot.cast && !bot.cast.channel) this.#input(bot, 0, 0);
+          return;
+        }
+      }
+    }
+
+    if (!canHeal || enemyRange < 7.5) {
+      const point = enemyRange < 7.5
+        ? this.#kitePosition(bot, nearestEnemy, injured)
+        : this.#healPosition(bot, injured, enemies);
+      if (point) return this.#move(bot, point.x - bot.x, point.z - bot.z);
+      return this.#moveToward(bot, enemyRange < 7.5 ? nearestEnemy : injured, enemyRange < 7.5);
+    }
+
+    this.#input(bot, 0, 0);
+    if (danger.ratio > .88 && nearestEnemy) {
+      const pressure = bot.classId === 'disc' ? ['disc.solace', 'disc.smite'] : ['sage.lullaby_bloom'];
+      for (const id of pressure) if (this.#action(bot, id, nearestEnemy)) return;
+    }
+  }
+
+  #genericDamage(bot, allies, enemies) {
+    const target = this.#chooseFocus(bot, enemies);
+    if (!target) return this.#input(bot, 0, 0);
+    const arena = this.simulation.state.arena;
+    const range = distance(bot, target);
+    const melee = ['shadow', 'wind'].includes(bot.classId);
+    const preferredRange = melee ? 3.8 : 19;
+    if (controlled(bot)) {
+      this.#input(bot, 0, 0);
+      if (ratio(bot) < .45 && bot.trinketCooldown <= 0) this.simulation.useTrinket(bot.id);
+      return;
+    }
+
+    const rotations = {
+      flame: ['flame.ice_block', 'flame.counterflare', 'flame_combustion', 'flame_meteor_spear', 'flame.prism_hex', 'flame.ember_lance', 'flame.cinder_bolt'],
+      shadow: ['shadow_cloak', 'shadow_crimson_vial', 'shadow.shadow_kick', 'shadow_shadowstep', 'shadow.ribbreaker', 'shadow_garrote', 'shadow.viper_cut', 'shadow.umbral_pounce', 'shadow.night_slash'],
+      storm: ['storm.static_aegis', 'storm.wind_shear', 'storm_thunderstep', 'storm.skybreaker_pulse', 'storm.flame_shock', 'storm.forked_current', 'storm.arc_spark'],
+      wind: ['wind.willow_guard', 'wind_karma', 'wind.disrupting_palm', 'wind.valley_sweep', 'wind_tiger_rush', 'wind.fists_of_fury', 'wind.cloudstep_kick', 'wind.zephyr_palm'],
+      soul: ['soul_undying_resolve', 'soul_dark_pact', 'soul_void_mend', 'soul.fear', 'soul.creeping_torment', 'soul.soul_scar', 'soul.essence_siphon']
+    };
+    const selfOnly = new Set([
+      'flame.ice_block', 'flame_combustion', 'shadow_cloak', 'shadow_crimson_vial',
+      'storm.static_aegis', 'storm_thunderstep', 'wind.willow_guard', 'wind_karma',
+      'soul_undying_resolve', 'soul_dark_pact'
+    ]);
+
+    if (range > preferredRange || !visible(bot, target, arena)) {
+      if (melee) {
+        const gap = bot.classId === 'shadow' ? 'shadow.umbral_pounce' : 'wind.cloudstep_kick';
+        if (this.#action(bot, gap, target)) return;
+      }
+      if (bot.cast) return this.#input(bot, 0, 0);
+      return this.#moveToward(bot, target);
+    }
+    if (!melee && range < 7) return this.#moveToward(bot, target, true);
+    this.#input(bot, 0, 0);
+    if (bot.classId === 'soul' && this.#groundAction(bot, 'soul_summon_infernal', target)) return;
+    for (const id of rotations[bot.classId] || []) {
+      const selfTarget = selfOnly.has(id);
+      if (selfTarget && ratio(bot) > .52 && !['flame_combustion', 'storm_thunderstep', 'wind_karma'].includes(id)) continue;
+      if (this.#action(bot, id, selfTarget ? bot : target)) return;
+    }
+  }
+
   #decide(botId) {
     const bot = this.simulation.state.units.get(botId);
     if (!bot?.alive) return;
@@ -420,5 +559,7 @@ export class BotDirector {
 
     if (bot.classId === 'pala') this.#paladin(bot, allies, enemies);
     else if (bot.classId === 'warrior') this.#warrior(bot, allies, enemies);
+    else if (['disc', 'sage'].includes(bot.classId)) this.#genericHealer(bot, allies, enemies);
+    else this.#genericDamage(bot, allies, enemies);
   }
 }

@@ -5,7 +5,9 @@ import { CoopRoom } from '../../packages/server-core/src/coop-room.js';
 
 const PROTOCOL_VERSION = 20;
 const TICK_RATE = 30;
-const SNAPSHOT_RATE = 20;
+// Match the 30 Hz authoritative simulation so clients receive one fresh state
+// per simulated step instead of displaying repeated 20 Hz correction pulses.
+const SNAPSHOT_RATE = 30;
 const TICK_SECONDS = 1 / TICK_RATE;
 const MAX_BUFFERED_BYTES = 64 * 1024;
 const ROOM_IDLE_MS = 5 * 60_000;
@@ -40,6 +42,10 @@ function cleanId(value: unknown) {
   return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
 }
 
+function cleanFormat(value: unknown) {
+  return value === '1v1' ? '1v1' : '2v2';
+}
+
 function arenaFor(code: string) {
   const serpent = [...code].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 2 === 1;
   return {
@@ -70,11 +76,11 @@ function roomSeed(code: string) {
   return seed >>> 0;
 }
 
-function getOrCreateRoom(code: string) {
+function getOrCreateRoom(code: string, format = '2v2') {
   let live = liveRooms.get(code);
   if (live) return live;
   if (liveRooms.size >= MAX_ROOMS) throw new Error('server_busy');
-  const room = new CoopRoom({ code, seed: roomSeed(code), arena: arenaFor(code) });
+  const room = new CoopRoom({ code, seed: roomSeed(code), arena: arenaFor(code), format });
   live = { room, sockets: new Map(), lastActive: Date.now(), lastPhase: room.phase, snapshotAccumulator: 0 };
   liveRooms.set(code, live);
   return live;
@@ -85,6 +91,8 @@ function playerSummary(live: LiveRoom) {
     slot: player.slot,
     unitId: player.unitId,
     classId: player.classId,
+    displayName: player.displayName,
+    itemLevel: 990,
     connected: player.connected,
     host: player.slot === 'player1'
   }));
@@ -104,6 +112,7 @@ function broadcastLobby(live: LiveRoom) {
     roomCode: live.room.code,
     phase: live.room.phase,
     ready: live.room.ready,
+    format: live.room.format,
     players: playerSummary(live)
   });
 }
@@ -126,6 +135,8 @@ function join(socket: WebSocket, message: Record<string, unknown>) {
   const clientId = cleanId(message.clientId);
   const classId = cleanId(message.classId);
   const sessionToken = cleanId(message.sessionToken);
+  const displayName = String(message.displayName || '').replace(/[<>]/g, '').trim().slice(0, 24);
+  const format = cleanFormat(message.format);
   const talents = message.talents && typeof message.talents === 'object'
     ? Object.fromEntries(Object.entries(message.talents as Record<string, unknown>)
       .slice(0, 64)
@@ -141,12 +152,12 @@ function join(socket: WebSocket, message: Record<string, unknown>) {
   }
   detach(socket);
   let live: LiveRoom;
-  try { live = getOrCreateRoom(roomCode); } catch {
+  try { live = getOrCreateRoom(roomCode, format); } catch {
     json(socket, { type: 'error', reason: 'server_busy' });
     return;
   }
   live.room.expireDisconnected();
-  const result = live.room.join({ clientId, classId, talents, sessionToken: sessionToken || null });
+  const result = live.room.join({ clientId, classId, talents, displayName, format, sessionToken: sessionToken || null });
   if (!result.ok) {
     json(socket, { type: 'error', reason: result.reason });
     return;
@@ -191,7 +202,9 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
   }
   live.lastActive = Date.now();
   if (message.type === 'start') {
-    const result = live.room.start(state.clientId);
+    const requestedFormat = cleanFormat(message.format);
+    if (live.room.host?.clientId === state.clientId) live.room.updateFormat(state.clientId, requestedFormat);
+    const result = live.room.start(state.clientId, requestedFormat);
     json(socket, { type: 'startAck', ...result });
     if (result.ok) {
       broadcast(live, {
@@ -199,10 +212,16 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
         phase: result.phase,
         countdownRemaining: result.countdownRemaining,
         seed: result.seed,
+        format: result.format,
         controlledUnits: Object.fromEntries([...live.room.players.values()].map((player) => [player.clientId, player.unitId])),
         world: result.snapshot
       });
     }
+    return;
+  }
+  if (message.type === 'format') {
+    if (live.room.updateFormat(state.clientId, cleanFormat(message.format))) broadcastLobby(live);
+    else json(socket, { type: 'error', reason: 'format_change_rejected' });
     return;
   }
   if (message.type === 'class') {
@@ -232,13 +251,29 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
     const result = live.room.action(state.clientId, {
       sequence: Number(message.sequence),
       abilityId: String(message.abilityId || ''),
-      targetId: message.targetId == null ? null : String(message.targetId)
+      targetId: message.targetId == null ? null : String(message.targetId),
+      x: Number.isFinite(Number(message.x)) ? Number(message.x) : null,
+      z: Number.isFinite(Number(message.z)) ? Number(message.z) : null
     });
     const snapshot = live.room.snapshotFor(state.clientId);
     json(socket, {
       type: 'actionAck', sequence: Number(message.sequence), ...result,
       unit: snapshot?.world.units.find((unit) => unit.id === snapshot.controlledUnitId) || null
     });
+    return;
+  }
+  if (message.type === 'returnToLobby') {
+    if (!live.room.returnToLobby(state.clientId)) {
+      json(socket, { type: 'error', reason: 'return_to_lobby_rejected' });
+      return;
+    }
+    live.lastPhase = 'lobby';
+    broadcast(live, {
+      type: 'returnedToLobby', protocol: PROTOCOL_VERSION,
+      roomCode: live.room.code, phase: live.room.phase, format: live.room.format,
+      ready: live.room.ready, players: playerSummary(live)
+    });
+    broadcastLobby(live);
     return;
   }
   if (message.type === 'trinket') {
@@ -268,7 +303,10 @@ setInterval(() => {
         }
       }
       if (live.lastPhase !== 'ended' && live.room.phase === 'ended') {
-        broadcast(live, { type: 'matchEnd', phase: live.room.phase });
+        broadcast(live, {
+          type: 'matchEnd', phase: live.room.phase,
+          winnerTeam: live.room.winnerTeam, format: live.room.format
+        });
       }
     }
     live.lastPhase = live.room.phase;

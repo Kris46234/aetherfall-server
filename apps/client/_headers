@@ -3,4 +3,16 @@
   X-Content-Type-Options: nosniff
 
 /assets/*
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: public, max-age=31536000, immutable
+
+/spell-icons/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/audio/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/styles/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/src/three-offline-bundle.js
+  Cache-Control: public, max-age=31536000, immutable

@@ -14,7 +14,8 @@ const SELF_TYPES = new Set([
 ]);
 const FRIENDLY_TYPES = new Set([
   'heal', 'holyLight', 'sacrifice', 'bestowFaith', 'shield', 'cleanse', 'hot',
-  'spiritBlossom', 'bigHeal', 'ironbark', 'discShield', 'discMend', 'painSuppression'
+  'spiritBlossom', 'bigHeal', 'ironbark', 'discShield', 'discMend', 'painSuppression',
+  'freedom', 'guardianAngel'
 ]);
 const SUPPORTED_TYPES = new Set([
   'damage', 'meteor', 'leap', 'fistsChannel', 'whirlingDragonPunch', 'windInterrupt', 'windStun', 'touchOfDeath', 'stormbolt',
@@ -33,6 +34,7 @@ const SUPPORTED_TYPES = new Set([
   'natureSwiftness', 'ironbark', 'discSmite', 'discShield', 'discPenance',
   'discMend', 'discSolace', 'painSuppression', 'ultimateRadiance', 'discFear',
   'discFade', 'archangel', 'darkArchangel', 'angelicBody', 'volcanicEruption', 'avengingWings', 'alterTime'
+  , 'freedom', 'guardianAngel', 'summonInfernal'
 ]);
 const round = value => Number(value.toFixed(4));
 
@@ -69,9 +71,12 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
   }
 
   function movementMultiplier(unit) {
-    if (isControlled(unit) || getEffect(unit, 'root')) return 0;
+    // Immunity effects are movement locks too. The client may continue sending
+    // held-key input while Ice Block is active, but the server must remain the
+    // final authority and refuse that movement.
+    if (isControlled(unit) || getEffect(unit, 'root') || getEffect(unit, 'iceBlock')) return 0;
     const slow = getEffect(unit, 'slow');
-    const speed = getEffect(unit, 'tigersLust') || getEffect(unit, 'divineSteed') || getEffect(unit, 'discFade') || getEffect(unit, 'angelicBody');
+    const speed = getEffect(unit, 'freedom') || getEffect(unit, 'tigersLust') || getEffect(unit, 'divineSteed') || getEffect(unit, 'discFade') || getEffect(unit, 'angelicBody');
     const channel = unit.cast?.channel ? unit.cast.moveSpeedMultiplier || 1 : 1;
     return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * channel;
   }
@@ -86,6 +91,24 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
 
   function prepareAbility(unit, source) {
     const ability = { ...source };
+    if (ability.id === 'soul_void_mend') {
+      ability.name = 'Chaos Bolt';
+      ability.type = 'damage';
+      ability.castTime = 1.6;
+      ability.cooldown = 10;
+      ability.baseValue = 510;
+      ability.alwaysCritical = true;
+      ability.commitCooldownOnComplete = true;
+    }
+    if (ability.id === 'soul.creeping_torment' && hasTalent(unit, 'soul_void_mend')) {
+      ability.name = 'Immolate';
+      ability.type = 'dot';
+      ability.school = 'fire';
+      ability.castTime = 1.35;
+      ability.cooldown = 0;
+      ability.baseValue = 86;
+      ability.immolate = true;
+    }
     if (ability.id === 'flame_phoenix_guard') {
       ability.type = 'alterTime';
       ability.cooldown = 0;
@@ -231,6 +254,12 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
   function damage(source, target, amount, label, options = {}) {
     if (!source?.alive || !target?.alive) return { hit: false, amount: 0, absorbed: 0 };
     if (getEffect(target, 'iceBlock')) return { hit: false, amount: 0, absorbed: 0, immune: true };
+    const guardian = getEffect(target, 'guardianImmunity');
+    if (guardian) {
+      const valkyr = state.units.get(guardian.guardianId);
+      if (valkyr?.alive) return { hit: false, amount: 0, absorbed: 0, immune: true };
+      removeEffect(target, 'guardianImmunity', 'guardian_gone');
+    }
     const sacrifice = getEffect(target, 'sacrifice');
     const protector = sacrifice ? state.units.get(sacrifice.sourceId) : null;
     if (protector?.alive && protector !== target && !options.redirected) {
@@ -255,6 +284,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     if (!options.periodic) for (const type of BREAKABLE_CONTROL) removeEffect(target, type, 'damage');
     const defensive = getEffect(target, 'defensive');
     if (defensive) outgoing *= 1 - Number(defensive.reduction || .35);
+    if (getEffect(target, 'infernalExposure')) outgoing *= 1.10;
     const staticGuard = getEffect(target, 'staticAegisGuard');
     if (staticGuard) outgoing *= 1 - Number(staticGuard.reduction || .20);
     if (getEffect(target, 'holdTheLine')) outgoing *= 1 - Number(getEffect(target, 'holdTheLine').reduction || 0);
@@ -262,10 +292,6 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       outgoing *= 1 - talentRank(target, 'battlehardened') * .03;
     }
     const karma = getEffect(target, 'touchKarma');
-    if (karma && !options.cannotReflect && source !== target && source.alive) {
-      const reflected = Math.max(1, Math.round(outgoing * Number(karma.reflectPct || .50)));
-      damage(target, source, reflected, 'Touch of Karma', { cannotReflect: true });
-    }
     let absorbed = 0;
     if (target.shield > 0) {
       absorbed = Math.min(target.shield, outgoing);
@@ -289,11 +315,19 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         ability: label, amount: actual, absorbed: Math.round(absorbed),
         periodic: !!options.periodic
       });
+      if (karma && !options.cannotReflect && source !== target && source.alive && label !== 'Touch of Karma') {
+        damage(target, source, Math.max(1, Math.round(actual * .30)), 'Touch of Karma', { cannotReflect: true, school: 'wind' });
+        heal(target, target, actual * .50, 'Touch of Karma');
+      }
       if (target.hp <= 0) {
         target.alive = false;
         target.cast = null;
         source.stats.killingBlows += 1;
         emit({ type: 'death', unitId: target.id, killerId: source.id });
+        if (target.summonKind === 'guardianAngel' && target.protectedId) {
+          const protectedUnit = state.units.get(target.protectedId);
+          if (protectedUnit) removeEffect(protectedUnit, 'guardianImmunity', 'guardian_killed');
+        }
       }
     }
     return { hit: true, amount: actual, absorbed: Math.round(absorbed) };
@@ -320,6 +354,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
   }
 
   function applyCrowdControl(target, type, duration, category) {
+    if (getEffect(target, 'freedom') && (type === 'root' || type === 'slow')) return 0;
     if (getEffect(target, 'bladestorm') && ['stun', 'root', 'slow'].includes(type)) {
       emit({ type: 'crowdControlImmune', unitId: target.id, effect: type, category, reason: 'bladestorm' });
       return 0;
@@ -372,6 +407,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     switch (ability.type) {
       case 'damage': {
         let amount = ability.baseValue;
+        if (ability.alwaysCritical) amount *= 1.5;
         if (ability.name === 'Pandemic Bloom' && getEffect(source, 'pandemicSurge')) {
           amount *= 1.20;
           removeEffect(source, 'pandemicSurge', 'consumed');
@@ -547,9 +583,68 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         addEffect(source, 'tigersLust', 4, { speed: 1.6 });
         return true;
       case 'karma':
-        addEffect(source, 'touchKarma', 4, { reflectPct: .50 });
-        addEffect(source, 'defensive', 4, { reduction: .20 });
+        addEffect(source, 'touchKarma', 4, { reflectPct: .30, healPct: .50 });
+        emit({ type: 'presentation', cue: 'touchOfKarma', sourceId: source.id, duration: 4 });
         return true;
+      case 'freedom':
+        removeEffect(target, 'slow', 'freedom');
+        removeEffect(target, 'root', 'freedom');
+        addEffect(target, 'freedom', 5, { sourceId: source.id, speed: 1.30 });
+        return true;
+      case 'guardianAngel': {
+        const guardianId = `guardian-${source.id}-${state.tick}`;
+        const angle = random() * Math.PI * 2;
+        const x = target.x + Math.cos(angle) * 1.4;
+        const z = target.z + Math.sin(angle) * 1.4;
+        state.units.set(guardianId, {
+          id: guardianId, team: source.team, classId: 'pala', displayName: 'Guardian Angel', itemLevel: 990,
+          summonKind: 'guardianAngel', ownerId: source.id, protectedId: target.id,
+          x, z, radius: .5, speed: 6, hp: 124, maxHp: 124,
+          resourceType: 'mana', resource: 0, maxResource: 0, resourceRegen: 0, alive: true, shield: 0,
+          effects: new Map(), dr: {
+            stun: { level: 0, until: 0 }, fear: { level: 0, until: 0 },
+            incap: { level: 0, until: 0 }, root: { level: 0, until: 0 }
+          }, talents: {}, tigereyeStacks: 0, tigereyePalmCounter: 0,
+          stats: { damage: 0, healing: 0, absorb: 0, interrupts: 0, killingBlows: 0, damageByAbility: {}, healingByAbility: {} },
+          input: { sequence: 0, x: 0, z: 0 }, lastActionSequence: -1, gcd: 0, cast: null,
+          cooldowns: new Map(), trinketCooldown: 0, spawnRoll: random()
+        });
+        const valkyr = state.units.get(guardianId);
+        addEffect(valkyr, 'guardianLifetime', 6, { protectedId: target.id, sourceId: source.id });
+        addEffect(target, 'guardianImmunity', 6, { guardianId, sourceId: source.id });
+        emit({ type: 'presentation', cue: 'guardianAngel', sourceId: source.id, targetId: target.id, guardianId, duration: 6 });
+        return true;
+      }
+      case 'summonInfernal': {
+        const infernalId = `infernal-${source.id}-${state.tick}`;
+        const maxHp = Math.max(1, Math.round(source.maxHp * .25));
+        state.units.set(infernalId, {
+          id: infernalId, team: source.team, classId: 'soul', displayName: 'Infernal', itemLevel: 990,
+          summonKind: 'infernal', ownerId: source.id, x: target.x, z: target.z,
+          radius: .82, speed: 3.6, hp: maxHp, maxHp,
+          resourceType: 'mana', resource: 0, maxResource: 0, resourceRegen: 0, alive: true, shield: 0,
+          effects: new Map(), dr: {
+            stun: { level: 0, until: 0 }, fear: { level: 0, until: 0 },
+            incap: { level: 0, until: 0 }, root: { level: 0, until: 0 }
+          }, talents: {}, tigereyeStacks: 0, tigereyePalmCounter: 0,
+          stats: { damage: 0, healing: 0, absorb: 0, interrupts: 0, killingBlows: 0, damageByAbility: {}, healingByAbility: {} },
+          input: { sequence: 0, x: 0, z: 0 }, lastActionSequence: -1, gcd: 0, cast: null,
+          cooldowns: new Map(), trinketCooldown: 0, spawnRoll: random()
+        });
+        const infernal = state.units.get(infernalId);
+        addEffect(infernal, 'infernalLifetime', 10, {
+          sourceId: source.id, manaRemaining: 1, pulseRemaining: 2
+        });
+        emit({ type: 'presentation', cue: 'infernalLanding', sourceId: source.id, targetId: infernalId, x: round(target.x), z: round(target.z), duration: 10 });
+        for (const enemy of state.units.values()) {
+          if (!enemy.alive || enemy.team === source.team || enemy.summonKind || distance(infernal, enemy) > 5) continue;
+          if (!hasLineOfSight(infernal, enemy, state.arena.pillars, .05)) continue;
+          damage(source, enemy, ability.baseValue || 90, 'Infernal Landing', { school: 'shadow' });
+          applyCrowdControl(enemy, 'stun', 2, 'stun');
+          addEffect(enemy, 'infernalExposure', 10, { sourceId: source.id });
+        }
+        return true;
+      }
       case 'heal':
       case 'holyLight':
         return heal(source, target, ability.baseValue, label) > 0;
@@ -704,8 +799,8 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       case 'blind':
         return applyCrowdControl(target, 'blind', ability.baseValue || 3, 'incap') > 0;
       case 'shieldSelf':
-        applyShield(source, source, ability.baseValue, 6);
-        if (source.classId === 'soul') addEffect(source, 'interruptWard', 6);
+        applyShield(source, source, ability.id === 'soul_dark_pact' ? source.maxHp * .30 : ability.baseValue, 6);
+        if (source.classId === 'soul' && ability.id !== 'soul_dark_pact') addEffect(source, 'interruptWard', 6);
         if (source.classId === 'storm') addEffect(source, 'staticAegisGuard', 6, { reduction: .20 });
         return true;
       case 'flameNova': {
@@ -783,6 +878,14 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         }
         return true;
       case 'dot': {
+        if (ability.immolate) {
+          const hit = damage(source, target, ability.baseValue, 'Immolate', { school: 'fire' }).hit;
+          if (hit) addEffect(target, 'burn', 8, {
+            effectKey: `immolate:${source.id}`, sourceId: source.id, value: 35,
+            label: 'Immolate', interval: 1, tickRemaining: 1
+          });
+          return hit;
+        }
         const garrote = ability.id === 'shadow_garrote';
         const venom = getEffect(source, 'venomEdge');
         const immediate = garrote ? Math.round(ability.baseValue * .70) : ability.baseValue + (venom ? 78 : 0);
@@ -1067,6 +1170,10 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         + Number(getEffect(target, 'unstableAffliction')?.stacks || 0);
       const amount = cast.baseValue + afflictions * 15;
       if (damage(source, target, amount, cast.ability.name, { school: 'shadow' }).hit) heal(source, source, amount * .442, cast.ability.name);
+      if (hasTalent(source, 'soul_void_mend')) {
+        const remaining = source.cooldowns.get('soul_void_mend') || 0;
+        if (remaining > 0) source.cooldowns.set('soul_void_mend', Math.max(0, remaining - 3));
+      }
       cast.ticks += 1;
       return;
     }
@@ -1144,6 +1251,37 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
           emit({ type: 'presentation', cue: 'bestowFaithComplete', sourceId: source.id, targetId: unit.id });
           heal(source, unit, effect.value || 240, 'Bestow Faith');
         }
+      }
+      if (effect.remaining === 0 && type === 'guardianLifetime') {
+        unit.alive = false;
+        unit.hp = 0;
+        const protectedUnit = state.units.get(effect.protectedId);
+        if (protectedUnit) removeEffect(protectedUnit, 'guardianImmunity', 'guardian_expired');
+        emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });
+      }
+      if (type === 'infernalLifetime' && unit.alive && !isControlled(unit)) {
+        effect.manaRemaining -= fixedDt;
+        effect.pulseRemaining -= fixedDt;
+        const owner = state.units.get(effect.sourceId);
+        while (effect.manaRemaining <= 1e-9) {
+          effect.manaRemaining += 1;
+          if (owner?.alive) owner.resource = Math.min(owner.maxResource, owner.resource + 4);
+        }
+        while (effect.pulseRemaining <= 1e-9) {
+          effect.pulseRemaining += 2;
+          emit({ type: 'presentation', cue: 'infernalSlam', sourceId: unit.id, duration: .62 });
+          if (owner?.alive) for (const enemy of state.units.values()) {
+            if (!enemy.alive || enemy.team === unit.team || enemy.summonKind || distance(unit, enemy) > 8) continue;
+            if (!hasLineOfSight(unit, enemy, state.arena.pillars, .05)) continue;
+            damage(owner, enemy, 50, 'Infernal Immolation', { school: 'shadow' });
+            addEffect(enemy, 'infernalExposure', 10, { sourceId: owner.id });
+          }
+        }
+      }
+      if (effect.remaining === 0 && type === 'infernalLifetime') {
+        unit.alive = false;
+        unit.hp = 0;
+        emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });
       }
       if (effect.remaining === 0 && type === 'livingBomb') {
         const source = state.units.get(effect.sourceId);

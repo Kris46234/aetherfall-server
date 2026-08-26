@@ -65,6 +65,8 @@ export function createSimulation({
       id: entry.id,
       team: entry.team,
       classId: entry.classId,
+      displayName: String(entry.displayName || entry.classId || entry.id),
+      itemLevel: Math.max(1, Number(entry.itemLevel) || 990),
       x: Number(entry.x) || 0,
       z: Number(entry.z) || 0,
       radius: Math.max(.1, Number(entry.radius) || .62),
@@ -119,11 +121,12 @@ export function createSimulation({
     const x = Number(input.x);
     const z = Number(input.z);
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+    const locked = combat.movementMultiplier(unit) <= 0;
     const length = Math.hypot(x, z);
     unit.input = {
       sequence: input.sequence,
-      x: length > 1 ? x / length : x,
-      z: length > 1 ? z / length : z
+      x: locked ? 0 : length > 1 ? x / length : x,
+      z: locked ? 0 : length > 1 ? z / length : z
     };
     return true;
   }
@@ -196,7 +199,18 @@ export function createSimulation({
     }
     if (unit.resource < ability.cost) return rejectAction(unit, action, 'resource');
 
+    const groundTargeted = ['meteor', 'summonInfernal'].includes(ability.type);
     let target = combat.isSelfTarget(ability) ? unit : null;
+    if (!target && groundTargeted && Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.z))) {
+      const ground = {
+        id: null, team: null, alive: true, radius: 0,
+        x: Math.max(-state.arena.x, Math.min(state.arena.x, Number(action.x))),
+        z: Math.max(-state.arena.z, Math.min(state.arena.z, Number(action.z)))
+      };
+      if (ability.range > 0 && distance(unit, ground) > ability.range + unit.radius) return rejectAction(unit, action, 'range');
+      if (ability.range > 0 && !hasLineOfSight(unit, ground, state.arena.pillars, .05)) return rejectAction(unit, action, 'line_of_sight');
+      target = ground;
+    }
     if (!target && action.targetId) {
       target = state.units.get(action.targetId);
       if (!target || !target.alive) return rejectAction(unit, action, 'target_unavailable');
@@ -209,11 +223,11 @@ export function createSimulation({
       }
     }
     if (!target) return rejectAction(unit, action, 'target_unavailable');
-    if (combat.requiresFriendlyTarget(ability) && target.team !== unit.team) {
+    if (!groundTargeted && combat.requiresFriendlyTarget(ability) && target.team !== unit.team) {
       return rejectAction(unit, action, 'friendly_target_required');
     }
     if (ability.type === 'sacrifice' && target === unit) return rejectAction(unit, action, 'ally_target_required');
-    if (combat.requiresEnemyTarget(ability) && target.team === unit.team) {
+    if (!groundTargeted && combat.requiresEnemyTarget(ability) && target.team === unit.team) {
       return rejectAction(unit, action, 'enemy_target_required');
     }
     unit.targetId = target?.id || null;
@@ -305,12 +319,41 @@ export function createSimulation({
       : Math.min(.99, (Math.floor((state.time - 30) / 10) + 1) * .05);
     for (const unit of state.units.values()) {
       if (!unit.alive) continue;
+      if (unit.summonKind === 'infernal') {
+        const nearest = [...state.units.values()]
+          .filter(candidate => candidate.alive && !candidate.summonKind && candidate.team !== unit.team)
+          .sort((a, b) => distance(unit, a) - distance(unit, b))[0];
+        if (nearest && combat.movementMultiplier(unit) > 0) {
+          const dx = nearest.x - unit.x;
+          const dz = nearest.z - unit.z;
+          const length = Math.hypot(dx, dz);
+          unit.input.x = length > 3.2 ? dx / length : 0;
+          unit.input.z = length > 3.2 ? dz / length : 0;
+          unit.targetId = nearest.id;
+        } else {
+          unit.input.x = 0;
+          unit.input.z = 0;
+        }
+      }
+      if (unit.summonKind === 'guardianAngel') {
+        const protectedUnit = state.units.get(unit.protectedId);
+        if (protectedUnit?.alive && combat.movementMultiplier(unit) > 0) {
+          const dx = protectedUnit.x - unit.x;
+          const dz = protectedUnit.z - unit.z;
+          const length = Math.hypot(dx, dz);
+          unit.input.x = length > 1.8 ? dx / length : 0;
+          unit.input.z = length > 1.8 ? dz / length : 0;
+        } else {
+          unit.input.x = 0;
+          unit.input.z = 0;
+        }
+      }
       const moveLength = Math.hypot(unit.input.x, unit.input.z);
-      if (unit.cast && !unit.cast.channel && moveLength > 0) {
+      const moveMultiplier = combat.movementMultiplier(unit);
+      if (unit.cast && !unit.cast.channel && moveLength > 0 && moveMultiplier > 0) {
         emit({ type: 'castCancelled', unitId: unit.id, abilityId: unit.cast.abilityId, reason: 'movement' });
         unit.cast = null;
       }
-      const moveMultiplier = combat.movementMultiplier(unit);
       unit.x += unit.input.x * unit.speed * moveMultiplier * fixedDt;
       unit.z += unit.input.z * unit.speed * moveMultiplier * fixedDt;
       resolvePillarCollisions(unit, state.arena.pillars, unit.radius);
@@ -397,6 +440,10 @@ export function createSimulation({
         id: unit.id,
         team: unit.team,
         classId: unit.classId,
+        summonKind: unit.summonKind || null,
+        protectedId: unit.protectedId || null,
+        displayName: unit.displayName,
+        itemLevel: unit.itemLevel,
         x: round(unit.x),
         z: round(unit.z),
         radius: unit.radius,

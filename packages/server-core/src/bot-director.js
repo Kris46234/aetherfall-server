@@ -79,12 +79,13 @@ function visible(from, to, arena) {
 }
 
 export class BotDirector {
-  constructor(simulation, botIds, { decisionInterval = .22, reactionMin = .18, reactionMax = .42 } = {}) {
+  constructor(simulation, botIds, { decisionInterval = .22, reactionMin = .42, reactionMax = .70, interruptChance = .28 } = {}) {
     this.simulation = simulation;
     this.botIds = [...botIds].sort();
     this.decisionInterval = decisionInterval;
     this.reactionMin = reactionMin;
     this.reactionMax = reactionMax;
+    this.interruptChance = interruptChance;
     this.castLockout = new Map(this.botIds.map(id => [id, 0]));
     this.rngState = (this.botIds.join('|').split('').reduce((h, ch) => Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0, 2166136261) || 1) >>> 0;
     this.accumulator = decisionInterval;
@@ -97,6 +98,8 @@ export class BotDirector {
       health: new Map(),
       lastPosition: null,
       stuckFor: 0,
+      interruptKey: null,
+      interruptRoll: false,
       strafeSign: id.localeCompare('bot2') < 0 ? 1 : -1
     }]));
   }
@@ -158,6 +161,23 @@ export class BotDirector {
     });
     if (result.ok) this.#armReaction(bot);
     return !!result.ok;
+  }
+
+  /* Offline bots hold an interrupt until the target is actually casting and only land
+     it a fraction of the time (botDifficultyProfile's `interrupt`, .28 at entry rating).
+     Firing them straight off the priority list both wasted the kick and read nothing
+     like the offline opponent. The roll is cached per cast so a bot does not re-roll
+     every decision tick and end up interrupting everything anyway. */
+  #shouldInterrupt(bot, target) {
+    if (!target?.cast) return false;
+    const memory = this.memory.get(bot.id);
+    if (!memory) return true;
+    const key = `${target.id}:${target.cast.abilityId}:${target.cast.sequence ?? ''}`;
+    if (memory.interruptKey !== key) {
+      memory.interruptKey = key;
+      memory.interruptRoll = this.#random() < this.interruptChance;
+    }
+    return memory.interruptRoll;
   }
 
   #random() {
@@ -525,6 +545,9 @@ export class BotDirector {
       wind: ['wind.willow_guard', 'wind_karma', 'wind.disrupting_palm', 'wind.valley_sweep', 'wind_tiger_rush', 'wind.fists_of_fury', 'wind.cloudstep_kick', 'wind.zephyr_palm'],
       soul: ['soul_undying_resolve', 'soul_dark_pact', 'soul_void_mend', 'soul.fear', 'soul.creeping_torment', 'soul.soul_scar', 'soul.essence_siphon']
     };
+    const interrupts = new Set([
+      'flame.counterflare', 'shadow.shadow_kick', 'storm.wind_shear', 'wind.disrupting_palm'
+    ]);
     const selfOnly = new Set([
       'flame.ice_block', 'flame_combustion', 'shadow_cloak', 'shadow_crimson_vial',
       'storm.static_aegis', 'storm_thunderstep', 'wind.willow_guard', 'wind_karma',
@@ -545,6 +568,7 @@ export class BotDirector {
     for (const id of rotations[bot.classId] || []) {
       const selfTarget = selfOnly.has(id);
       if (selfTarget && ratio(bot) > .52 && !['flame_combustion', 'storm_thunderstep', 'wind_karma'].includes(id)) continue;
+      if (interrupts.has(id) && !this.#shouldInterrupt(bot, target)) continue;
       if (this.#action(bot, id, selfTarget ? bot : target)) return;
     }
   }

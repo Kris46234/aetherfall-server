@@ -13,6 +13,22 @@ export function getClass(classId) {
   return classById.get(classId) || null;
 }
 
+/* Ability ids that older published clients still send. A client and server can be
+   deployed minutes apart, and without this a rename silently turns a button into
+   "No valid target" until both halves are updated. Map the old id onto the current
+   ability instead of rejecting the cast. */
+const LEGACY_ABILITY_IDS = new Map([
+  ['wind_whirling_dragon', 'wind.whirling_dragon_punch'],
+  ['storm.healing_stream_totem', 'storm_static_field'],
+  ['warrior.sharpen_blade', 'war_rallying_wall'],
+  ['warrior.intercept', 'war_battle_banner'],
+  ['sage.g_hanir_the_mother_tree', 'sage.ghanir_the_mother_tree'],
+  ['soul.immolate', 'soul.creeping_torment']
+]);
+
 export function getAbility(abilityId) {
-  return abilityById.get(abilityId) || null;
+  const direct = abilityById.get(abilityId);
+  if (direct) return direct;
+  const legacy = LEGACY_ABILITY_IDS.get(abilityId);
+  return (legacy && abilityById.get(legacy)) || null;
 }

@@ -14,7 +14,7 @@ const ONLINE_ITEM_LEVEL = 990;
    Online has no rating context yet, so it uses the entry tier, which is what a new
    player meets offline. decisionInterval is how often a bot re-evaluates; reactionMin/Max
    is the randomised pause after any cast before it may press anything again. */
-const BOT_TUNING = Object.freeze({ decisionInterval: .22, reactionMin: .42, reactionMax: .70 });
+const BOT_TUNING = Object.freeze({ decisionInterval: .22, reactionMin: .42, reactionMax: .70, interruptChance: .28 });
 const HEALER_BOT_CLASSES = Object.freeze(['pala', 'disc', 'sage']);
 const DAMAGE_BOT_CLASSES = Object.freeze(['warrior', 'flame', 'shadow', 'storm', 'wind', 'soul']);
 

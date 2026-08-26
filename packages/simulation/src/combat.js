@@ -1,9 +1,10 @@
 import { distance, hasLineOfSight, resolveArenaBounds, resolvePillarCollisions } from './geometry.js';
 
 const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap']);
-const BREAKABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap'];
+const BREAKABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'gouge'];
 const SELF_TYPES = new Set([
   'monkDefensive', 'fistsChannel', 'whirlingDragonPunch', 'tigereyeBrew', 'karma', 'tigersLust',
+  'healingStreamTotem', 'crimsonVial', 'sharpenBlade',
   'paladinGuard', 'paladinSteed', 'warriorGuard', 'shieldSelf', 'buff',
   'reflect', 'shout', 'avatar', 'bladestorm', 'flameNova', 'dash', 'iceBlock',
   'combustion', 'flameShield', 'defensive', 'evasion', 'cloak', 'push',
@@ -15,7 +16,7 @@ const SELF_TYPES = new Set([
 const FRIENDLY_TYPES = new Set([
   'heal', 'holyLight', 'sacrifice', 'bestowFaith', 'shield', 'cleanse', 'hot',
   'spiritBlossom', 'bigHeal', 'ironbark', 'discShield', 'discMend', 'painSuppression',
-  'freedom', 'guardianAngel'
+  'freedom', 'guardianAngel', 'intercept'
 ]);
 const SUPPORTED_TYPES = new Set([
   'damage', 'meteor', 'leap', 'fistsChannel', 'whirlingDragonPunch', 'windInterrupt', 'windStun', 'touchOfDeath', 'stormbolt',
@@ -34,7 +35,8 @@ const SUPPORTED_TYPES = new Set([
   'natureSwiftness', 'ironbark', 'discSmite', 'discShield', 'discPenance',
   'discMend', 'discSolace', 'painSuppression', 'ultimateRadiance', 'discFear',
   'discFade', 'archangel', 'darkArchangel', 'angelicBody', 'volcanicEruption', 'avengingWings', 'alterTime'
-  , 'freedom', 'guardianAngel', 'summonInfernal'
+  , 'freedom', 'guardianAngel', 'summonInfernal', 'healingStreamTotem'
+  , 'crimsonVial', 'gouge', 'groundStun', 'chaosBolt', 'intercept', 'sharpenBlade'
 ]);
 const round = value => Number(value.toFixed(4));
 
@@ -335,7 +337,9 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
 
   function heal(source, target, amount, label) {
     if (!source?.alive || !target?.alive) return 0;
-    const requested = Number(amount) * healingMultiplier(source, target, label) * (1 - state.dampening);
+    const wound = getEffect(target, 'mortalWound');
+    const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
+    const requested = Number(amount) * healingMultiplier(source, target, label) * woundMult * (1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
     if (!actual) return 0;
     target.hp += actual;
@@ -615,6 +619,72 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         emit({ type: 'presentation', cue: 'guardianAngel', sourceId: source.id, targetId: target.id, guardianId, duration: 6 });
         return true;
       }
+      case 'crimsonVial':
+        /* 1.5% max health each second for 10 sec, ignoring dampening. */
+        addEffect(source, 'crimsonVial', 10, { tickRemaining: 1, pct: ability.baseValue || .015 });
+        emit({ type: 'presentation', cue: 'crimsonVial', sourceId: source.id, duration: 10 });
+        return true;
+      case 'gouge':
+        /* Incapacitate that any damage breaks early. */
+        return applyCrowdControl(target, 'gouge', ability.baseValue || 3, 'incap') > 0;
+      case 'chaosBolt':
+        /* Always crits. */
+        return damage(source, target, ability.baseValue || 510, label, { school: 'shadow' }).hit;
+      case 'sharpenBlade':
+        addEffect(source, 'sharpenBlade', 20, { sourceId: source.id });
+        emit({ type: 'presentation', cue: 'sharpenBlade', sourceId: source.id, duration: 20 });
+        return true;
+      case 'intercept': {
+        /* Charge to the ally, then eat their damage for 4 sec. */
+        if (!target || target === source || target.team !== source.team) return false;
+        const dx = source.x - target.x, dz = source.z - target.z, d = Math.hypot(dx, dz) || 1;
+        source.x = target.x + (dx / d) * 1.6;
+        source.z = target.z + (dz / d) * 1.6;
+        addEffect(target, 'sacrifice', 4, { sourceId: source.id });
+        emit({ type: 'presentation', cue: 'intercept', sourceId: source.id, targetId: target.id, duration: 4 });
+        return true;
+      }
+      case 'groundStun': {
+        /* Shadowfury: 4.5m circle at the chosen point. */
+        let hits = 0;
+        for (const enemy of state.units.values()) {
+          if (!enemy.alive || enemy.team === source.team || enemy.summonKind) continue;
+          if (distance(target, enemy) > 4.5) continue;
+          if (!hasLineOfSight(source, enemy, state.arena.pillars, .05)) continue;
+          damage(source, enemy, ability.baseValue || 42, label, { school: 'shadow' });
+          applyCrowdControl(enemy, 'stun', 3, 'stun');
+          hits++;
+        }
+        addEffect(source, 'pandemicSurge', 8, { bonus: .20 });
+        emit({ type: 'presentation', cue: 'shadowfury', sourceId: source.id, x: round(target.x), z: round(target.z), hits });
+        return true;
+      }
+      case 'healingStreamTotem': {
+        const totemId = `totem-${source.id}-${state.tick}`;
+        for (const existing of state.units.values()) {
+          if (existing.summonKind === 'healingStreamTotem' && existing.ownerId === source.id && existing.alive) {
+            existing.alive = false; existing.hp = 0;
+            emit({ type: 'death', unitId: existing.id, killerId: null, expired: true });
+          }
+        }
+        state.units.set(totemId, {
+          id: totemId, team: source.team, classId: 'storm', displayName: 'Healing Stream Totem', itemLevel: 990,
+          summonKind: 'healingStreamTotem', ownerId: source.id, x: source.x, z: source.z,
+          radius: .42, speed: 0, hp: 280, maxHp: 280,
+          resourceType: 'mana', resource: 0, maxResource: 0, resourceRegen: 0, alive: true, shield: 0,
+          effects: new Map(), dr: {
+            stun: { level: 0, until: 0 }, fear: { level: 0, until: 0 },
+            incap: { level: 0, until: 0 }, root: { level: 0, until: 0 }
+          }, talents: {}, tigereyeStacks: 0, tigereyePalmCounter: 0,
+          stats: { damage: 0, healing: 0, absorb: 0, interrupts: 0, killingBlows: 0, damageByAbility: {}, healingByAbility: {} },
+          input: { sequence: 0, x: 0, z: 0 }, lastActionSequence: -1, gcd: 0, cast: null,
+          cooldowns: new Map(), trinketCooldown: 0, spawnRoll: random()
+        });
+        const totem = state.units.get(totemId);
+        addEffect(totem, 'totemLifetime', 10, { sourceId: source.id, tickRemaining: 2, interval: 2, healValue: ability.baseValue || 90 });
+        emit({ type: 'presentation', cue: 'healingStreamTotem', sourceId: source.id, targetId: totemId, x: round(source.x), z: round(source.z), duration: 10 });
+        return true;
+      }
       case 'summonInfernal': {
         const infernalId = `infernal-${source.id}-${state.tick}`;
         const maxHp = Math.max(1, Math.round(source.maxHp * .25));
@@ -671,6 +741,11 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         if (warbreaker) removeEffect(source, 'warbreakerReady', 'consumed');
         let hit = damage(source, target, ability.baseValue * multiplier, label, { school: 'physical' }).hit;
         if (empowered) removeEffect(source, 'empoweredSwing', 'consumed');
+        if (hit && getEffect(source, 'sharpenBlade')) {
+          removeEffect(source, 'sharpenBlade', 'consumed');
+          addEffect(target, 'mortalWound', 3, { pct: .40, sourceId: source.id });
+          addEffect(source, 'sharpenRecovery', 3, { tickRemaining: 1, pct: .03 });
+        }
         return hit;
       }
       case 'charge': {
@@ -1234,6 +1309,19 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
             damage(source, unit, totalTick, effect.label || type, { school: 'shadow', periodic: true });
           }
           if (source?.alive && unit.alive && type === 'hot') heal(source, unit, effect.value, effect.label || 'Healing Over Time');
+          if (unit.alive && (type === 'crimsonVial' || type === 'sharpenRecovery')) {
+            /* Percent-of-health recovery that ignores dampening, matching the client. */
+            const amount = Math.max(1, Math.round(unit.maxHp * (effect.pct || .015)));
+            unit.hp = Math.min(unit.maxHp, unit.hp + amount);
+            unit.stats.healing += amount;
+          }
+          if (type === 'totemLifetime' && unit.alive) {
+            emit({ type: 'presentation', cue: 'healingStreamPulse', sourceId: unit.id, duration: .5 });
+            if (source?.alive) for (const ally of state.units.values()) {
+              if (!ally.alive || ally.team !== unit.team || ally.summonKind || distance(unit, ally) > 18) continue;
+              heal(source, ally, effect.healValue || 90, 'Healing Stream Totem');
+            }
+          }
           if (type === 'spiritBlossomTree' && unit.alive) {
             for (const ally of state.units.values()) {
               if (!ally.alive || ally.team !== unit.team || Math.hypot(ally.x - effect.x, ally.z - effect.z) > 6) continue;
@@ -1277,6 +1365,11 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
             addEffect(enemy, 'infernalExposure', 10, { sourceId: owner.id });
           }
         }
+      }
+      if (effect.remaining === 0 && (type === 'infernalLifetime' || type === 'totemLifetime')) {
+        unit.alive = false;
+        unit.hp = 0;
+        emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });
       }
       if (effect.remaining === 0 && type === 'infernalLifetime') {
         unit.alive = false;

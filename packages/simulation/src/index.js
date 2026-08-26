@@ -199,7 +199,7 @@ export function createSimulation({
     }
     if (unit.resource < ability.cost) return rejectAction(unit, action, 'resource');
 
-    const groundTargeted = ['meteor', 'summonInfernal'].includes(ability.type);
+    const groundTargeted = ['meteor', 'summonInfernal', 'groundStun'].includes(ability.type);
     let target = combat.isSelfTarget(ability) ? unit : null;
     if (!target && groundTargeted && Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.z))) {
       const ground = {

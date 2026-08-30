@@ -78,6 +78,7 @@ export function createSimulation({
       maxResource: resources.maxResource,
       resourceRegen: resources.resourceRegen,
       alive: entry.alive !== false,
+      cauterizeConsumed: !!entry.cauterizeConsumed,
       shield: Math.max(0, Number(entry.shield) || 0),
       effects: new Map(),
       dr: {

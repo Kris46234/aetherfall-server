@@ -217,6 +217,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       * (avatar ? 1 + Number(avatar.damagePct || .16) : 1)
       * (defensive?.damagePenalty ? 1 - defensive.damagePenalty : 1);
     if (unit.classId === 'shadow' && label !== 'Night Slash') multiplier *= 1.10;
+    if (getEffect(unit, 'crimsonVial')) multiplier *= .85;
     if (getEffect(unit, 'smokePower')) multiplier *= 1.10;
     if (getEffect(unit, 'darkArchangel')) multiplier *= 1.30;
     if (getEffect(unit, 'totemMastery')) {
@@ -285,7 +286,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     if (!Number.isFinite(outgoing) || outgoing <= 0) return { hit: false, amount: 0, absorbed: 0 };
     if (!options.periodic) for (const type of BREAKABLE_CONTROL) removeEffect(target, type, 'damage');
     const defensive = getEffect(target, 'defensive');
-    if (defensive) outgoing *= 1 - Number(defensive.reduction || .35);
+    if (defensive) outgoing *= 1 - Number(defensive.reduction ?? .35);
     if (getEffect(target, 'infernalExposure')) outgoing *= 1.10;
     const staticGuard = getEffect(target, 'staticAegisGuard');
     if (staticGuard) outgoing *= 1 - Number(staticGuard.reduction || .20);
@@ -322,13 +323,20 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         heal(target, target, actual * .50, 'Touch of Karma');
       }
       if (target.hp <= 0) {
-        target.alive = false;
-        target.cast = null;
-        source.stats.killingBlows += 1;
-        emit({ type: 'death', unitId: target.id, killerId: source.id });
-        if (target.summonKind === 'guardianAngel' && target.protectedId) {
-          const protectedUnit = state.units.get(target.protectedId);
-          if (protectedUnit) removeEffect(protectedUnit, 'guardianImmunity', 'guardian_killed');
+        if (target.classId === 'flame' && hasTalent(target, 'flame_cauterize') && !target.cauterizeConsumed) {
+          target.cauterizeConsumed = true;
+          target.hp = Math.max(1, Math.round(target.maxHp * .30));
+          addEffect(target, 'cauterizeDoom', 5, { sourceId: source.id });
+          emit({ type: 'presentation', cue: 'cauterize', sourceId: target.id, targetId: target.id, duration: 5 });
+        } else {
+          target.alive = false;
+          target.cast = null;
+          source.stats.killingBlows += 1;
+          emit({ type: 'death', unitId: target.id, killerId: source.id });
+          if (target.summonKind === 'guardianAngel' && target.protectedId) {
+            const protectedUnit = state.units.get(target.protectedId);
+            if (protectedUnit) removeEffect(protectedUnit, 'guardianImmunity', 'guardian_killed');
+          }
         }
       }
     }
@@ -620,9 +628,9 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         return true;
       }
       case 'crimsonVial':
-        /* 1.5% max health each second for 10 sec, ignoring dampening. */
-        addEffect(source, 'crimsonVial', 10, { tickRemaining: 1, pct: ability.baseValue || .015 });
-        emit({ type: 'presentation', cue: 'crimsonVial', sourceId: source.id, duration: 10 });
+        /* 2.5% max health each second for 6 sec, ignoring dampening. */
+        addEffect(source, 'crimsonVial', 6, { tickRemaining: 1, pct: ability.baseValue || .025 });
+        emit({ type: 'presentation', cue: 'crimsonVial', sourceId: source.id, duration: 6 });
         return true;
       case 'gouge':
         /* Incapacitate that any damage breaks early. */
@@ -945,7 +953,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         addEffect(source, 'fireShield', 8, { sourceId: source.id });
         return true;
       case 'defensive':
-        addEffect(source, 'defensive', 4, { reduction: .35 });
+        addEffect(source, 'defensive', 4, { reduction: source.classId === 'shadow' ? 0 : .35 });
         if (source.classId === 'shadow') {
           addEffect(source, 'smokePower', 8);
           addEffect(source, 'cheapReady', 8);
@@ -1282,6 +1290,17 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       const type = effect.type || effectKey;
       const nextRemaining = effect.remaining - fixedDt;
       effect.remaining = nextRemaining <= 1e-9 ? 0 : nextRemaining;
+      if (type === 'cauterizeDoom' && unit.alive) {
+        unit.hp = Math.min(unit.hp, Math.max(1, Math.floor(unit.maxHp * .30 * effect.remaining / 5)));
+        if (effect.remaining === 0) {
+          const source = state.units.get(effect.sourceId);
+          unit.hp = 0;
+          unit.alive = false;
+          unit.cast = null;
+          if (source?.stats) source.stats.killingBlows += 1;
+          emit({ type: 'death', unitId: unit.id, killerId: source?.id || null, cauterize: true });
+        }
+      }
       if (Number.isFinite(effect.tickRemaining)) {
         effect.tickRemaining -= fixedDt;
         while (effect.tickRemaining <= 1e-9) {
@@ -1311,7 +1330,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
           if (source?.alive && unit.alive && type === 'hot') heal(source, unit, effect.value, effect.label || 'Healing Over Time');
           if (unit.alive && (type === 'crimsonVial' || type === 'sharpenRecovery')) {
             /* Percent-of-health recovery that ignores dampening, matching the client. */
-            const amount = Math.max(1, Math.round(unit.maxHp * (effect.pct || .015)));
+            const amount = Math.max(1, Math.round(unit.maxHp * (effect.pct || .025)));
             unit.hp = Math.min(unit.maxHp, unit.hp + amount);
             unit.stats.healing += amount;
           }

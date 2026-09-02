@@ -100,6 +100,10 @@ export function createSimulation({
         healingByAbility: {}
       },
       input: { sequence: 0, x: 0, z: 0 },
+      mounted: false,
+      mountId: 'skyhoof',
+      mountSkinId: 'default',
+      combatUntil: 0,
       lastActionSequence: -1,
       gcd: 0,
       cast: null,
@@ -154,6 +158,23 @@ export function createSimulation({
     if (removed) unit.cast = null;
     emit({ type: 'trinket', unitId, removed });
     return { ok: true, reason: null, removed };
+  }
+
+  function setMounted(unitId, mounted, mountId = 'skyhoof', mountSkinId = 'default') {
+    const unit = state.units.get(unitId);
+    if (!unit?.alive) return { ok: false, reason: 'unit_unavailable' };
+    if (!mounted) {
+      unit.mounted = false;
+      emit({ type: 'mount', unitId, mounted: false });
+      return { ok: true, reason: null, mounted: false };
+    }
+    if (unit.combatUntil > state.time) return { ok: false, reason: 'in_combat' };
+    if (combat.isControlled(unit) || combat.getEffect(unit, 'root') || combat.getEffect(unit, 'iceBlock')) return { ok: false, reason: 'crowd_controlled' };
+    unit.mounted = true;
+    unit.mountId = String(mountId || 'skyhoof').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'skyhoof';
+    unit.mountSkinId = String(mountSkinId || 'default').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'default';
+    emit({ type: 'mount', unitId, mounted: true, mountId: unit.mountId, mountSkinId: unit.mountSkinId });
+    return { ok: true, reason: null, mounted: true };
   }
 
   function rejectAction(unit, action, reason) {
@@ -257,7 +278,9 @@ export function createSimulation({
           });
         }
       }
-      const duration = soulDrain ? 2.5 : discPenance ? castTime || 1.5 : bladestorm ? 4 : castTime || 2.5;
+      const immolate = soulDrain ? combat.getEffect(target, 'burn') : null;
+      const quickSiphon = !!(immolate && immolate.label === 'Immolate' && immolate.sourceId === unit.id);
+      const duration = soulDrain ? (quickSiphon ? 1.5 : 2.5) : discPenance ? castTime || 1.5 : bladestorm ? 4 : castTime || 2.5;
       unit.cast = {
         kind: bladestorm ? 'bladestorm' : soulDrain ? 'soulDrain' : discPenance ? 'discPenance' : 'fists',
         abilityId: ability.id,
@@ -302,7 +325,12 @@ export function createSimulation({
       });
     } else {
       emit({ type: 'actionComplete', unitId, abilityId: ability.id, targetId: target?.id || null, sequence: action.sequence });
+      if (ability.type === 'dash') {
+        const dx = Number(action.directionX), dz = Number(action.directionZ), length = Math.hypot(dx, dz);
+        unit.actionDirection = Number.isFinite(length) && length > .001 ? { x: dx / length, z: dz / length } : null;
+      }
       combat.resolveAbility(unit, ability, target);
+      unit.actionDirection = null;
     }
     return { ok: true, reason: null };
   }
@@ -442,6 +470,7 @@ export function createSimulation({
         team: unit.team,
         classId: unit.classId,
         summonKind: unit.summonKind || null,
+        ownerId: unit.ownerId || null,
         protectedId: unit.protectedId || null,
         displayName: unit.displayName,
         itemLevel: unit.itemLevel,
@@ -455,6 +484,9 @@ export function createSimulation({
         resource: round(unit.resource),
         maxResource: unit.maxResource,
         alive: unit.alive,
+        mounted: !!unit.mounted,
+        mountId: unit.mountId || 'skyhoof',
+        mountSkinId: unit.mountSkinId || 'default',
         targetId: unit.targetId || null,
         inputSequence: unit.input.sequence,
         actionSequence: unit.lastActionSequence,
@@ -484,6 +516,7 @@ export function createSimulation({
     applyAction,
     setCooldown,
     useTrinket,
+    setMounted,
     step,
     snapshot,
     drainEvents,

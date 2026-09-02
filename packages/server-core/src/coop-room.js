@@ -244,6 +244,12 @@ export class CoopRoom {
     return this.simulation.useTrinket(player.unitId);
   }
 
+  mount(clientId, message) {
+    const player = this.#connectedPlayer(clientId);
+    if (!player || this.phase !== 'running') return { ok: false, reason: 'not_running' };
+    return this.simulation.setMounted(player.unitId, !!message.mounted, message.mountId, message.mountSkinId);
+  }
+
   tick(elapsed) {
     if (this.phase === 'countdown') {
       this.countdownRemaining = Math.max(0, this.countdownRemaining - elapsed);

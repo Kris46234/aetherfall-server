@@ -80,7 +80,8 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     const slow = getEffect(unit, 'slow');
     const speed = getEffect(unit, 'freedom') || getEffect(unit, 'tigersLust') || getEffect(unit, 'divineSteed') || getEffect(unit, 'discFade') || getEffect(unit, 'angelicBody');
     const channel = unit.cast?.channel ? unit.cast.moveSpeedMultiplier || 1 : 1;
-    return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * channel;
+    const pounce = getEffect(unit, 'pounceSpeed');
+return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.speed || 1) * channel * (unit.mounted ? 1.704 : 1);
   }
 
   function hasTalent(unit, id) {
@@ -226,7 +227,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     }
     const wings = getEffect(unit, 'avengingWings');
     if (wings?.damageBonus) multiplier *= 1 + Number(wings.damageBonus);
-    if (getEffect(unit, 'combustion') && random() < .30) multiplier *= 1.5;
+    if (getEffect(unit, 'combustion') && random() < .80) multiplier *= 1.5;
     if (unit.classId === 'warrior' && !/Rend$|Gushing Wound/i.test(label)) {
       multiplier *= 1 + talentRank(unit, 'warlust') * .03;
     }
@@ -280,10 +281,16 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     if (getEffect(target, 'cloakShadows') && options.school !== 'physical' && !options.melee) return { hit: false, amount: 0, absorbed: 0, immune: true };
     if (getEffect(target, 'evasion') && options.melee && random() < Number(getEffect(target, 'evasion').pct || .50)) return { hit: false, amount: 0, absorbed: 0, dodged: true };
     let outgoing = Number(amount) * damageMultiplier(source, label);
+    const frostMark = getEffect(target, 'frostShockAmp');
+    if (frostMark?.sourceId === source.id && /Arc Spark|Forked Current/i.test(String(label))) outgoing *= 1.15;
     if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && target.hp / target.maxHp < .35) {
       outgoing *= 1 + talentRank(source, 'executioner') * .05;
     }
     if (!Number.isFinite(outgoing) || outgoing <= 0) return { hit: false, amount: 0, absorbed: 0 };
+    source.combatUntil = Math.max(Number(source.combatUntil) || 0, state.time + 7);
+    target.combatUntil = Math.max(Number(target.combatUntil) || 0, state.time + 7);
+    if (source.mounted) { source.mounted = false; emit({ type: 'mount', unitId: source.id, mounted: false, reason: 'combat' }); }
+    if (target.mounted) { target.mounted = false; emit({ type: 'mount', unitId: target.id, mounted: false, reason: 'combat' }); }
     if (!options.periodic) for (const type of BREAKABLE_CONTROL) removeEffect(target, type, 'damage');
     const defensive = getEffect(target, 'defensive');
     if (defensive) outgoing *= 1 - Number(defensive.reduction ?? .35);
@@ -414,6 +421,43 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     return total;
   }
 
+  function landInfernal(source, x, z, baseValue = 90) {
+    if (!source?.alive) return null;
+    for (const existing of state.units.values()) {
+      if (existing.summonKind === 'infernal' && existing.ownerId === source.id && existing.alive) {
+        existing.alive = false;
+        existing.hp = 0;
+        emit({ type: 'death', unitId: existing.id, killerId: null, expired: true });
+      }
+    }
+    const infernalId = `infernal-${source.id}-${state.tick}`;
+    const maxHp = Math.max(1, Math.round(source.maxHp * .25));
+    const infernal = {
+      id: infernalId, team: source.team, classId: 'soul', displayName: 'Infernal', itemLevel: 990,
+      summonKind: 'infernal', ownerId: source.id, x, z,
+      radius: .82, speed: 3.6, hp: maxHp, maxHp,
+      resourceType: 'mana', resource: 0, maxResource: 0, resourceRegen: 0, alive: true, shield: 0,
+      effects: new Map(), dr: {
+        stun: { level: 0, until: 0 }, fear: { level: 0, until: 0 },
+        incap: { level: 0, until: 0 }, root: { level: 0, until: 0 }
+      }, talents: {}, tigereyeStacks: 0, tigereyePalmCounter: 0,
+      stats: { damage: 0, healing: 0, absorb: 0, interrupts: 0, killingBlows: 0, damageByAbility: {}, healingByAbility: {} },
+      input: { sequence: 0, x: 0, z: 0 }, lastActionSequence: -1, gcd: 0, cast: null,
+      cooldowns: new Map(), trinketCooldown: 0, spawnRoll: random()
+    };
+    state.units.set(infernalId, infernal);
+    addEffect(infernal, 'infernalLifetime', 10, { sourceId: source.id, manaRemaining: 1, pulseRemaining: 2 });
+    emit({ type: 'presentation', cue: 'infernalLanding', sourceId: source.id, targetId: infernalId, x: round(x), z: round(z), duration: 10 });
+    for (const enemy of state.units.values()) {
+      if (!enemy.alive || enemy.team === source.team || enemy.summonKind || Math.hypot(enemy.x - x, enemy.z - z) > 5) continue;
+      if (!hasLineOfSight(infernal, enemy, state.arena.pillars, .05)) continue;
+      damage(source, enemy, baseValue, 'Infernal Landing', { school: 'shadow' });
+      applyCrowdControl(enemy, 'stun', 2, 'stun');
+      addEffect(enemy, 'infernalExposure', 10, { sourceId: source.id });
+    }
+    return infernal;
+  }
+
   function resolveAbility(source, ability, target) {
     const label = ability.name;
     switch (ability.type) {
@@ -504,7 +548,10 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
           if (ability.id === 'wind.cloudstep_kick') addEffect(source, 'cloudstepDashCd', 20);
         }
         const hit = damage(source, target, ability.baseValue, label, { school: ability.school, melee: true }).hit;
-        if (hit && ability.id === 'shadow.umbral_pounce') addEffect(source, 'evasion', 4, { pct: .80 });
+        if (hit && ability.id === 'shadow.umbral_pounce') {
+          addEffect(source, 'evasion', 1.5, { pct: .50 });
+          addEffect(source, 'pounceSpeed', 1.5, { speed: 1.30 });
+        }
         return hit;
       }
       case 'windInterrupt': {
@@ -694,33 +741,10 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         return true;
       }
       case 'summonInfernal': {
-        const infernalId = `infernal-${source.id}-${state.tick}`;
-        const maxHp = Math.max(1, Math.round(source.maxHp * .25));
-        state.units.set(infernalId, {
-          id: infernalId, team: source.team, classId: 'soul', displayName: 'Infernal', itemLevel: 990,
-          summonKind: 'infernal', ownerId: source.id, x: target.x, z: target.z,
-          radius: .82, speed: 3.6, hp: maxHp, maxHp,
-          resourceType: 'mana', resource: 0, maxResource: 0, resourceRegen: 0, alive: true, shield: 0,
-          effects: new Map(), dr: {
-            stun: { level: 0, until: 0 }, fear: { level: 0, until: 0 },
-            incap: { level: 0, until: 0 }, root: { level: 0, until: 0 }
-          }, talents: {}, tigereyeStacks: 0, tigereyePalmCounter: 0,
-          stats: { damage: 0, healing: 0, absorb: 0, interrupts: 0, killingBlows: 0, damageByAbility: {}, healingByAbility: {} },
-          input: { sequence: 0, x: 0, z: 0 }, lastActionSequence: -1, gcd: 0, cast: null,
-          cooldowns: new Map(), trinketCooldown: 0, spawnRoll: random()
-        });
-        const infernal = state.units.get(infernalId);
-        addEffect(infernal, 'infernalLifetime', 10, {
-          sourceId: source.id, manaRemaining: 1, pulseRemaining: 2
-        });
-        emit({ type: 'presentation', cue: 'infernalLanding', sourceId: source.id, targetId: infernalId, x: round(target.x), z: round(target.z), duration: 10 });
-        for (const enemy of state.units.values()) {
-          if (!enemy.alive || enemy.team === source.team || enemy.summonKind || distance(infernal, enemy) > 5) continue;
-          if (!hasLineOfSight(infernal, enemy, state.arena.pillars, .05)) continue;
-          damage(source, enemy, ability.baseValue || 90, 'Infernal Landing', { school: 'shadow' });
-          applyCrowdControl(enemy, 'stun', 2, 'stun');
-          addEffect(enemy, 'infernalExposure', 10, { sourceId: source.id });
-        }
+        const x = Number.isFinite(target?.x) ? target.x : source.x;
+        const z = Number.isFinite(target?.z) ? target.z : source.z;
+        emit({ type: 'presentation', cue: 'infernalIncoming', sourceId: source.id, x: round(x), z: round(z), duration: .98, radius: 5 });
+        addEffect(source, 'infernalPending', .98, { x, z, baseValue: ability.baseValue || 90 });
         return true;
       }
       case 'heal':
@@ -898,9 +922,10 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         return landed;
       }
       case 'dash': {
-        const length = Math.hypot(source.input.x, source.input.z);
-        const dx = length > 0 ? source.input.x / length : 1;
-        const dz = length > 0 ? source.input.z / length : 0;
+        const requested = source.actionDirection;
+        const length = Math.hypot(requested?.x || source.input.x, requested?.z || source.input.z);
+        const dx = length > 0 ? (requested?.x ?? source.input.x) / length : 1;
+        const dz = length > 0 ? (requested?.z ?? source.input.z) / length : 0;
         source.x += dx * 15;
         source.z += dz * 15;
         resolvePillarCollisions(source, state.arena.pillars, source.radius);
@@ -937,7 +962,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         });
         return true;
       case 'combustion':
-        addEffect(source, 'combustion', 8, { critChance: .30, castSpeed: .15 });
+        addEffect(source, 'combustion', 8, { critChance: .80, castSpeed: .15 });
         return true;
       case 'livingBomb':
         addEffect(target, 'livingBomb', 6, {
@@ -1086,7 +1111,12 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       }
       case 'frostShock': {
         const hit = damage(source, target, ability.baseValue, label, { school: 'storm' }).hit;
-        if (hit) addEffect(target, 'slow', 4, { pct: .50, sourceId: source.id });
+        if (hit) {
+          const snareDuration = applyCrowdControl(target, 'slow', 3, 'root');
+          const snare = getEffect(target, 'slow');
+          if (snareDuration > 0 && snare) { snare.pct = .25; snare.sourceId = source.id; }
+          addEffect(target, 'frostShockAmp', 8, { pct: .15, sourceId: source.id });
+        }
         return hit;
       }
       case 'totemMastery':
@@ -1252,7 +1282,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
         + (getEffect(target, 'agony') ? 1 : 0)
         + Number(getEffect(target, 'unstableAffliction')?.stacks || 0);
       const amount = cast.baseValue + afflictions * 15;
-      if (damage(source, target, amount, cast.ability.name, { school: 'shadow' }).hit) heal(source, source, amount * .442, cast.ability.name);
+      if (damage(source, target, amount, cast.ability.name, { school: 'shadow' }).hit) heal(source, source, amount * .575, cast.ability.name);
       if (hasTalent(source, 'soul_void_mend')) {
         const remaining = source.cooldowns.get('soul_void_mend') || 0;
         if (remaining > 0) source.cooldowns.set('soul_void_mend', Math.max(0, remaining - 3));
@@ -1401,6 +1431,9 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
           emit({ type: 'presentation', cue: 'livingBombExplosion', sourceId: source.id, targetId: unit.id, x: round(unit.x), z: round(unit.z) });
           damage(source, unit, effect.explosion || 190, 'Living Bomb Explosion', { school: 'fire' });
         }
+      }
+      if (effect.remaining === 0 && type === 'infernalPending') {
+        landInfernal(unit, effect.x, effect.z, Number(effect.baseValue) || 90);
       }
       if (effect.remaining === 0 && type === 'meteorPending') {
         emit({

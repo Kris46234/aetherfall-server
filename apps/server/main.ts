@@ -253,7 +253,9 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
       abilityId: String(message.abilityId || ''),
       targetId: message.targetId == null ? null : String(message.targetId),
       x: Number.isFinite(Number(message.x)) ? Number(message.x) : null,
-      z: Number.isFinite(Number(message.z)) ? Number(message.z) : null
+      z: Number.isFinite(Number(message.z)) ? Number(message.z) : null,
+      directionX: Number.isFinite(Number(message.directionX)) ? Number(message.directionX) : null,
+      directionZ: Number.isFinite(Number(message.directionZ)) ? Number(message.directionZ) : null
     });
     const snapshot = live.room.snapshotFor(state.clientId);
     json(socket, {
@@ -278,6 +280,14 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
   }
   if (message.type === 'trinket') {
     json(socket, { type: 'trinketAck', ...live.room.trinket(state.clientId) });
+    return;
+  }
+  if (message.type === 'mount') {
+    json(socket, { type: 'mountAck', ...live.room.mount(state.clientId, {
+      mounted: !!message.mounted,
+      mountId: cleanId(message.mountId),
+      mountSkinId: cleanId(message.mountSkinId)
+    }) });
     return;
   }
   if (message.type === 'leave') {
@@ -320,6 +330,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
+      release: '2.45.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

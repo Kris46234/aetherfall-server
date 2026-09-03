@@ -349,7 +349,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.48.0',
+      release: '2.49.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

@@ -275,6 +275,16 @@ export function createAiHost(simulation, options) {
     /* The AI inspects allies and enemies as well as itself, so every unit in the
        simulation has to carry the client-shaped view before any controller runs. */
     syncAll() {
+      if (this.nextMemoryCleanup == null || state.time >= this.nextMemoryCleanup) {
+        this.nextMemoryCleanup = state.time + 1;
+        for (const controller of this.controllers.values()) {
+          for (const unit of controller.reactiveHealth?.keys() || []) {
+            if (!state.units.has(unit.id)) controller.reactiveHealth.delete(unit);
+          }
+          if (controller.focus && !state.units.has(controller.focus.id)) controller.focus = null;
+          if (controller.healFocus && !state.units.has(controller.healFocus.id)) controller.healFocus = null;
+        }
+      }
       for (const unit of state.units.values()) {
         decorate(unit);
         refresh(unit);

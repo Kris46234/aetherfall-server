@@ -139,6 +139,9 @@ export class BotDirector {
     this.accumulator += elapsed;
     while (this.accumulator + 1e-9 >= this.decisionInterval) {
       this.accumulator -= this.decisionInterval;
+      for (const memory of this.memory.values()) {
+        for (const id of memory.health.keys()) if (!this.simulation.state.units.has(id)) memory.health.delete(id);
+      }
       for (const botId of this.botIds) this.#decide(botId);
     }
   }

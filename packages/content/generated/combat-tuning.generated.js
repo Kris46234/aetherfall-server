@@ -4978,8 +4978,8 @@ export const combatTuning = {
           "cast": 0,
           "cd": 10,
           "cost": 0,
-          "value": 0.08,
-          "tip": "Heal yourself for 8% of your maximum health. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Healing is affected by dampening. Target: yourself or the area around you."
+          "value": 0.16,
+          "tip": "Heal yourself for 16% of your maximum health, ignoring dampening. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Target: yourself or the area around you."
         }
       }
     },
@@ -7843,7 +7843,7 @@ export const combatTuning = {
         "capstone": true,
         "capstoneGroup": "wind_capstone",
         "capstoneLimit": 2,
-        "desc": "Heal yourself for 8% of your maximum health. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Healing is affected by dampening. Target: yourself or the area around you. 10 sec cooldown. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm."
+        "desc": "Heal yourself for 16% of your maximum health, ignoring dampening. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Target: yourself or the area around you. 10 sec cooldown. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm."
       }
     ]
   },

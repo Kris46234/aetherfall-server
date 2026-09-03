@@ -388,7 +388,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (!source?.alive || !target?.alive) return 0;
     const wound = getEffect(target, 'mortalWound');
     const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
-    const requested = Number(amount) * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (1 - state.dampening);
+    const requested = Number(amount) * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
     if (!actual) return 0;
     target.hp += actual;
@@ -714,7 +714,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       }
       case 'reverseHarm': {
-        const actual=heal(source,source,source.maxHp*.08,'Reverse Harm');
+        const actual=heal(source,source,source.maxHp*.16,'Reverse Harm');
         const enemy=[...state.units.values()].filter(u=>u.alive&&u.team!==source.team&&distance(source,u)<=5&&hasLineOfSight(source,u,state.arena.pillars,.05)).sort((a,b)=>distance(source,a)-distance(source,b))[0];
         if(actual&&enemy)damage(source,enemy,actual,'Reverse Harm',{school:'nature',exact:true});
         return true;
@@ -1457,11 +1457,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         }
       }
       if (effect.remaining === 0 && (type === 'infernalLifetime' || type === 'totemLifetime')) {
-        unit.alive = false;
-        unit.hp = 0;
-        emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });
-      }
-      if (effect.remaining === 0 && type === 'infernalLifetime') {
         unit.alive = false;
         unit.hp = 0;
         emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });

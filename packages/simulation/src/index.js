@@ -445,6 +445,11 @@ export function createSimulation({
       combat.tickEffects(unit);
     }
     combat.tickProjectiles();
+    // Fighters remain for results; spent summons must not accumulate in scans,
+    // collision checks or snapshots throughout a long match.
+    for (const [id, unit] of state.units) {
+      if (unit.summonKind && !unit.alive) state.units.delete(id);
+    }
     resolveUnitCollisions(state.units.values());
     for (const unit of state.units.values()) {
       resolvePillarCollisions(unit, state.arena.pillars, unit.radius);

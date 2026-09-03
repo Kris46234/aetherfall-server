@@ -3,7 +3,7 @@ import { defineCatalogue } from './schema.js';
 import {tuneAbility} from './combat-tuning.js';
 
 const updated=structuredClone(generatedCatalogue);
-updated.classes.find(c=>c.id==='wind').talentAbilities.push({id:'wind_reverse_harm',classId:'wind',source:'talent',name:'Reverse Harm',type:'reverseHarm',school:'nature',castTime:0,cooldown:10,cost:0,range:0,baseValue:.08});
+updated.classes.find(c=>c.id==='wind').talentAbilities.push({id:'wind_reverse_harm',classId:'wind',source:'talent',name:'Reverse Harm',type:'reverseHarm',school:'nature',castTime:0,cooldown:10,cost:0,range:0,baseValue:.16});
 for(const cls of updated.classes){cls.baseAbilities=cls.baseAbilities.map(tuneAbility);cls.talentAbilities=cls.talentAbilities.map(tuneAbility);}
 export const catalogue = defineCatalogue(updated);
 

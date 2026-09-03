@@ -76,7 +76,7 @@ export function abilityListFor(classId, talents) {
     const ability = BY_CLASS_NAME.get(classId + '|' + name);
     if (ability) list.push(toClientAbility(ability));
   }
-  for (const talentId of CLIENT_TALENT_ORDER[classId] || []) {
+  for (const talentId of [...(CLIENT_TALENT_ORDER[classId] || []),...(classId==='wind'?['wind_reverse_harm']:[])]) {
     if (!(Number(learned[talentId]) > 0)) continue;
     const ability = BY_ID.get(talentId);
     if (!ability) continue;
@@ -282,6 +282,8 @@ export function createAiHost(simulation, options) {
     }
     step(unit, dt) {
       this.syncAll();
+      abilitiesFor(unit);
+      if(unit.classId==='wind'&&unit.talents.wind_reverse_harm&&unit.hp/unit.maxHp<.88&&!unit.cast){const i=abilitiesFor(unit).findIndex(a=>a.type==='reverseHarm');if(i>=0&&this.tryAbility(unit,i,unit))return;}
       this.controllerFor(unit).update(dt);
     }
   }

@@ -1,6 +1,8 @@
 import { createSimulation } from '../../simulation/src/index.js';
 import { getClass } from '../../content/src/catalogue.js';
 import { BOT_TALENT_LOADOUTS, BotDirector } from './bot-director.js';
+import {normalizedVitals,botBuild} from '../../content/src/combat-tuning.js';
+import {createRandom} from '../../simulation/src/random.js';
 
 const HUMAN_SLOTS = Object.freeze(['player1', 'player2']);
 const MATCH_COUNTDOWN_SECONDS = 3;
@@ -46,6 +48,7 @@ export class CoopRoom {
     this.reconnectGraceMs = reconnectGraceMs;
     this.arena = arena;
     this.format = cleanFormat(format);
+    if(this.players)for(const p of this.players.values())p.lockedIn=false;
     this.round = 0;
     this.phase = 'lobby';
     this.countdownRemaining = 0;
@@ -60,7 +63,7 @@ export class CoopRoom {
   }
 
   get ready() {
-    return HUMAN_SLOTS.every(slot => this.players.get(slot)?.connected);
+    return HUMAN_SLOTS.every(slot => this.players.get(slot)?.connected && this.players.get(slot)?.lockedIn);
   }
 
   join({ clientId, classId, talents = {}, displayName = '', format = this.format, sessionToken = null }) {
@@ -70,7 +73,7 @@ export class CoopRoom {
       const player = this.players.get(slot);
       if (!player) return { ok: false, reason: 'expired_session' };
       player.clientId = clientId;
-      player.talents = { ...talents };
+      if(this.phase==='lobby'&&!player.lockedIn)player.talents = { ...talents };
       player.displayName = String(displayName || player.displayName || classId).slice(0, 24);
       player.connected = true;
       player.disconnectedAt = null;
@@ -92,6 +95,7 @@ export class CoopRoom {
       talents: { ...talents },
       sessionToken: token,
       connected: true,
+      lockedIn:false,
       joinedAt: this.now(),
       disconnectedAt: null
     };
@@ -127,9 +131,15 @@ export class CoopRoom {
     if (this.phase !== 'lobby' || !getClass(classId)) return false;
     const player = this.#connectedPlayer(clientId);
     if (!player) return false;
+    if(player.lockedIn)return false;
     player.classId = classId;
     player.talents = { ...talents };
     return true;
+  }
+
+  setReady(clientId,ready){
+    const player=this.#connectedPlayer(clientId);if(!player||this.phase!=='lobby')return false;
+    player.lockedIn=ready===true;return true;
   }
 
   leave(clientId) {
@@ -140,11 +150,14 @@ export class CoopRoom {
 
   updateFormat(clientId, format) {
     if (this.phase !== 'lobby' || !this.host || this.host.clientId !== clientId) return false;
+    if(this.format===cleanFormat(format))return true;
     this.format = cleanFormat(format);
+    if(this.players)for(const p of this.players.values())p.lockedIn=false;
     return true;
   }
 
   resetToLobby() {
+    for(const p of this.players.values())p.lockedIn=false;
     this.phase = 'lobby';
     this.countdownRemaining = 0;
     this.simulation = null;
@@ -173,26 +186,16 @@ export class CoopRoom {
     if (this.phase === 'ended') this.resetToLobby();
     if (this.phase !== 'lobby') return { ok: false, reason: 'already_started' };
     if (!this.host || this.host.clientId !== clientId) return { ok: false, reason: 'host_only' };
-    if (!this.ready) return { ok: false, reason: 'waiting_for_player' };
+    if (!HUMAN_SLOTS.every(slot=>this.players.get(slot)?.connected))return {ok:false,reason:'waiting_for_player'};
+    if (!this.ready) return { ok: false, reason: 'players_not_ready' };
     if (format) this.format = cleanFormat(format);
     this.phase = 'countdown';
     this.round += 1;
     this.countdownRemaining = MATCH_COUNTDOWN_SECONDS;
     const rosterEntry = (id, team, classId, x, z, talents = {}, displayName = classId) => {
-      const healer = ['sage', 'pala', 'disc'].includes(classId);
-      const staminaTalent = {
-        flame: 'flame_ashen_vitality', warrior: 'war_plate_training', storm: 'storm_static_hide',
-        soul: 'soul_dark_resilience', sage: 'sage_vital_growth', pala: 'pala_sacred_stamina',
-        shadow: 'shadow_elusiveness', wind: 'wind_iron_body', disc: 'disc_focused_will'
-      }[classId];
-      const staminaRank = Math.max(0, Number(talents?.[staminaTalent] || 0));
-      const maxHp = Math.round((healer ? 1513 : 1650) * (1 + staminaRank * .03));
-      const resourceRegen = ['wind', 'shadow', 'warrior'].includes(classId)
-        ? 16
-        : healer ? 2.38 : classId === 'soul' ? 2.35 : classId === 'storm' ? 1.48 : 1.42;
       return {
         id, team, classId, displayName, itemLevel: ONLINE_ITEM_LEVEL,
-        x, z, hp: maxHp, maxHp, speed: classSpeed(classId), resourceRegen, talents
+        x, z, ...normalizedVitals(classId,talents), speed: classSpeed(classId), talents
       };
     };
     const first = this.players.get('player1');
@@ -204,7 +207,8 @@ export class CoopRoom {
     };
     const healerClass = pick(HEALER_BOT_CLASSES, 0x9e37);
     const damageClass = pick(DAMAGE_BOT_CLASSES, 0x85eb);
-    const botTalents = classId => BOT_TALENT_LOADOUTS[classId] || {};
+    const buildRandom=createRandom(this.seed+this.round*40503);
+    const botTalents = classId => botBuild(classId,buildRandom);
     const roster = this.format === '1v1'
       ? [
         rosterEntry('player1', 'allies', first.classId, -20, 0, first.talents, first.displayName),

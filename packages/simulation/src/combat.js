@@ -4,7 +4,7 @@ const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windInc
 const BREAKABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'gouge'];
 const SELF_TYPES = new Set([
   'monkDefensive', 'fistsChannel', 'whirlingDragonPunch', 'tigereyeBrew', 'karma', 'tigersLust',
-  'healingStreamTotem', 'crimsonVial', 'sharpenBlade',
+  'healingStreamTotem', 'crimsonVial', 'sharpenBlade', 'reverseHarm',
   'paladinGuard', 'paladinSteed', 'warriorGuard', 'shieldSelf', 'buff',
   'reflect', 'shout', 'avatar', 'bladestorm', 'flameNova', 'dash', 'iceBlock',
   'combustion', 'flameShield', 'defensive', 'evasion', 'cloak', 'push',
@@ -36,7 +36,7 @@ const SUPPORTED_TYPES = new Set([
   'discMend', 'discSolace', 'painSuppression', 'ultimateRadiance', 'discFear',
   'discFade', 'archangel', 'darkArchangel', 'angelicBody', 'volcanicEruption', 'avengingWings', 'alterTime'
   , 'freedom', 'guardianAngel', 'summonInfernal', 'healingStreamTotem'
-  , 'crimsonVial', 'gouge', 'groundStun', 'chaosBolt', 'intercept', 'sharpenBlade'
+  , 'reverseHarm', 'crimsonVial', 'gouge', 'groundStun', 'chaosBolt', 'intercept', 'sharpenBlade'
 ]);
 const round = value => Number(value.toFixed(4));
 
@@ -79,7 +79,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
 
   function addEffect(unit, type, duration, data = {}) {
     const effect = { type, remaining: duration, ...data };
-    const key = data.effectKey || type;
+    const key = data.effectKey || (['bleed','poison'].includes(type)&&state.units.get(data.sourceId)?.classId==='shadow'?`${type}:${data.sourceId}:${data.label||type}`:type);
     unit.effects.set(key, effect);
     emit({ type: 'effectApplied', unitId: unit.id, effect: type, effectKey: key, duration: round(duration) });
     return effect;
@@ -125,6 +125,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
 
   function prepareAbility(unit, source) {
     const ability = { ...source };
+    if (ability.id === 'pala_judgement' || ability.type === 'bestowFaith') ability.cost = 0;
+    // Reach and resource costs come from the generated, client-matched tuning.
+    if (ability.type === 'iceBlock' && hasTalent(unit,'flame_glacial_recovery')) ability.cooldown = 40;
     if (ability.id === 'soul_void_mend') {
       ability.name = 'Chaos Bolt';
       ability.type = 'chaosBolt';
@@ -217,7 +220,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (['singleStun', 'shadowInterrupt', 'vendetta', 'shiv', 'interrupt', 'natureSwiftness', 'painSuppression', 'archangel', 'darkArchangel', 'angelicBody'].includes(ability.type)) ability.offGlobal = true;
     if (ability.type === 'leap' && unit.classId === 'shadow') ability.offGlobal = true;
     if (ability.id === 'shadow_garrote' || ability.id === 'storm.skybreaker_pulse' || ability.id === 'storm_lava_burst' || ability.id === 'soul.grasping_gloom') ability.offGlobal = true;
-    if (['interruptProc', 'flameNova', 'iceBlock', 'combustion', 'livingBomb'].includes(ability.type)) ability.offGlobal = true;
+    if (['dash', 'interruptProc', 'flameNova', 'iceBlock', 'combustion', 'livingBomb'].includes(ability.type)) ability.offGlobal = true;
     if (['poly', 'sleep', 'fear', 'stormkeeper'].includes(ability.type) && ability.castTime > 0) ability.commitCooldownOnComplete = true;
     return ability;
   }
@@ -234,7 +237,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       || ability.type === 'iceBlock'
       || ability.type === 'livingBomb'
       || ability.type === 'combustion'
-      || (ability.type === 'dash' && ['flame.cinder_bolt', 'flame.prism_hex'].includes(unit.cast?.abilityId));
+      || (ability.type === 'dash' && unit.classId === 'flame');
   }
 
   function supports(ability) {
@@ -249,7 +252,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       * (avatar ? 1 + Number(avatar.damagePct || .16) : 1)
       * (defensive?.damagePenalty ? 1 - defensive.damagePenalty : 1);
     if (unit.classId === 'shadow' && label !== 'Night Slash') multiplier *= 1.10;
-    if (getEffect(unit, 'crimsonVial')) multiplier *= .85;
+    if (getEffect(unit, 'crimsonVial')) multiplier *= .75;
     if (getEffect(unit, 'smokePower')) multiplier *= 1.10;
     if (getEffect(unit, 'darkArchangel')) multiplier *= 1.30;
     if (getEffect(unit, 'totemMastery')) {
@@ -311,18 +314,18 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     }
     if (getEffect(target, 'cloakShadows') && options.school !== 'physical' && !options.melee) return { hit: false, amount: 0, absorbed: 0, immune: true };
     if (getEffect(target, 'evasion') && options.melee && random() < Number(getEffect(target, 'evasion').pct || .50)) return { hit: false, amount: 0, absorbed: 0, dodged: true };
-    let outgoing = Number(amount) * damageMultiplier(source, label);
+    let outgoing = Number(amount) * (options.exact?1:damageMultiplier(source, label));
     const frostMark = getEffect(target, 'frostShockAmp');
     if (frostMark?.sourceId === source.id && /Arc Spark|Forked Current/i.test(String(label))) outgoing *= 1.15;
     if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && target.hp / target.maxHp < .35) {
       outgoing *= 1 + talentRank(source, 'executioner') * .05;
     }
     if (!Number.isFinite(outgoing) || outgoing <= 0) return { hit: false, amount: 0, absorbed: 0 };
-    source.combatUntil = Math.max(Number(source.combatUntil) || 0, state.time + 7);
-    target.combatUntil = Math.max(Number(target.combatUntil) || 0, state.time + 7);
+    source.combatUntil = Math.max(Number(source.combatUntil) || 0, state.time + 4);
+    target.combatUntil = Math.max(Number(target.combatUntil) || 0, state.time + 4);
     if (source.mounted) { source.mounted = false; emit({ type: 'mount', unitId: source.id, mounted: false, reason: 'combat' }); }
     if (target.mounted) { target.mounted = false; emit({ type: 'mount', unitId: target.id, mounted: false, reason: 'combat' }); }
-    if (!options.periodic) for (const type of BREAKABLE_CONTROL) removeEffect(target, type, 'damage');
+    for (const type of BREAKABLE_CONTROL) {if(type==='fear'&&options.periodic&&getEffect(target,'fear')?.breakFromDots===false)continue;removeEffect(target, type, 'damage');}
     const defensive = getEffect(target, 'defensive');
     if (defensive) outgoing *= 1 - Number(defensive.reduction ?? .35);
     if (getEffect(target, 'infernalExposure')) outgoing *= 1.10;
@@ -385,7 +388,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (!source?.alive || !target?.alive) return 0;
     const wound = getEffect(target, 'mortalWound');
     const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
-    const requested = Number(amount) * healingMultiplier(source, target, label) * woundMult * (1 - state.dampening);
+    const requested = Number(amount) * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
     if (!actual) return 0;
     target.hp += actual;
@@ -405,11 +408,11 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
 
   function applyCrowdControl(target, type, duration, category) {
     if (getEffect(target, 'freedom') && (type === 'root' || type === 'slow')) return 0;
-    if (getEffect(target, 'bladestorm') && ['stun', 'root', 'slow'].includes(type)) {
+    if (getEffect(target, 'bladestorm') && ['stun', 'root', 'slow', 'fear', 'poly'].includes(type)) {
       emit({ type: 'crowdControlImmune', unitId: target.id, effect: type, category, reason: 'bladestorm' });
       return 0;
     }
-    const dr = target.dr[category];
+    const dr = target.dr[category] ||= {level:0,until:0};
     if (state.time > dr.until) dr.level = 0;
     if (dr.level >= 3) {
       emit({ type: 'crowdControlImmune', unitId: target.id, effect: type, category });
@@ -710,6 +713,12 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         emit({ type: 'presentation', cue: 'guardianAngel', sourceId: source.id, targetId: target.id, guardianId, duration: 6 });
         return true;
       }
+      case 'reverseHarm': {
+        const actual=heal(source,source,source.maxHp*.08,'Reverse Harm');
+        const enemy=[...state.units.values()].filter(u=>u.alive&&u.team!==source.team&&distance(source,u)<=5&&hasLineOfSight(source,u,state.arena.pillars,.05)).sort((a,b)=>distance(source,a)-distance(source,b))[0];
+        if(actual&&enemy)damage(source,enemy,actual,'Reverse Harm',{school:'nature',exact:true});
+        return true;
+      }
       case 'crimsonVial':
         /* 2.5% max health each second for 6 sec, ignoring dampening. */
         addEffect(source, 'crimsonVial', 6, { tickRemaining: 1, pct: ability.baseValue || .025 });
@@ -980,7 +989,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         removeEffect(source, 'slow', 'cleansed');
         addEffect(source, 'iceBlock', 8, {
           sourceId: source.id,
-          value: source.maxHp * .025,
+          value: source.maxHp * .025 * (hasTalent(source,'flame_glacial_recovery')?1.30:1),
           interval: 1,
           tickRemaining: 1
         });
@@ -1025,7 +1034,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         if (!hit) return false;
         if (venom) removeEffect(source, 'venomEdge', 'consumed');
         const vendetta = getEffect(target, 'vendetta')?.sourceId === source.id;
-        addEffect(target, garrote ? 'bleed' : 'poison', garrote ? 8 : 6, {
+        addEffect(target, garrote ? 'bleed' : 'poison', 8, {
           sourceId: source.id,
           value: garrote ? 46 : venom ? 28 : 14,
           label: garrote ? 'Garrote' : 'Viper Cut Poison',
@@ -1040,6 +1049,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         if (hit) {
           applyCrowdControl(target, 'stun', ability.id === 'shadow.ribbreaker' ? 4 : 6, 'stun');
           if (source.classId === 'shadow') addEffect(source, 'eviscerateReady', 10);
+          if(ability.id==='shadow.ribbreaker'&&hasTalent(source,'shadow_shadowstep'))addEffect(target,'bleed',6,{sourceId:source.id,value:28.1,label:'Internal Bleeding',school:'physical',interval:1,tickRemaining:1});
           if (ability.id === 'soul_shadowfury') addEffect(source, 'pandemicSurge', 8, { pct: .20 });
         }
         return hit;
@@ -1169,6 +1179,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       }
       case 'fear': {
         const applied = applyCrowdControl(target, 'fear', ability.baseValue || 3.5, 'fear') > 0;
+        if(applied)getEffect(target,'fear').breakFromDots=source.classId!=='soul';
         if (ability.name === 'Mortal Horror') heal(source, source, source.maxHp * .20, 'Mortal Horror');
         return applied;
       }
@@ -1384,7 +1395,13 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           if (source?.alive && unit.alive && type === 'hot') heal(source, unit, effect.value, effect.label || 'Healing Over Time');
           if (unit.alive && (type === 'crimsonVial' || type === 'sharpenRecovery')) {
             /* Percent-of-health recovery that ignores dampening, matching the client. */
-            const amount = Math.max(1, Math.round(unit.maxHp * (effect.pct || .025)));
+            let bonus=0;
+            if(type==='crimsonVial')for(const enemy of state.units.values()){
+              if(!enemy.alive||enemy.team===unit.team||distance(unit,enemy)>25)continue;
+              const dots=new Set([...enemy.effects.values()].filter(e=>e.remaining>0&&e.sourceId===unit.id&&['poison','bleed'].includes(e.type)).map(e=>e.label||e.type));
+              bonus=Math.max(bonus,Math.min(3,dots.size)*.005);
+            }
+            const amount = Math.min(unit.maxHp-unit.hp,Math.max(0, Math.round(unit.maxHp * ((effect.pct || .025)+bonus))));
             unit.hp = Math.min(unit.maxHp, unit.hp + amount);
             unit.stats.healing += amount;
           }

@@ -69,6 +69,8 @@ export function createSimulation({
       itemLevel: Math.max(1, Number(entry.itemLevel) || 990),
       x: Number(entry.x) || 0,
       z: Number(entry.z) || 0,
+      facing: Number(entry.facing) || (entry.team === 'enemies' ? -Math.PI/2 : Math.PI/2),
+      jumpY: 0, jumpVel: 0, jumpSequence: 0,
       radius: Math.max(.1, Number(entry.radius) || .62),
       speed: Number(entry.speed) || 5.15,
       hp: Number(entry.hp) || maxHp,
@@ -127,6 +129,11 @@ export function createSimulation({
     const z = Number(input.z);
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
     const locked = combat.movementMultiplier(unit) <= 0;
+    if (Number.isFinite(input.facing)) unit.facing = Math.atan2(Math.sin(input.facing),Math.cos(input.facing));
+    if (Number.isSafeInteger(input.jumpSequence) && input.jumpSequence > (unit.jumpSequence||0)) {
+      unit.jumpSequence=input.jumpSequence;
+      if (!locked && !unit.jumpY && !unit.jumpVel) { unit.jumpY=.01;unit.jumpVel=unit.mounted?5.25:5.75;if(unit.cast&&!unit.cast.channel)unit.cast=null; }
+    }
     const length = Math.hypot(x, z);
     unit.input = {
       sequence: input.sequence,
@@ -168,6 +175,7 @@ export function createSimulation({
       emit({ type: 'mount', unitId, mounted: false });
       return { ok: true, reason: null, mounted: false };
     }
+    if (unit.cast) return {ok:false,reason:'already_casting'};
     if (unit.combatUntil > state.time) return { ok: false, reason: 'in_combat' };
     if (combat.isControlled(unit) || combat.getEffect(unit, 'root') || combat.getEffect(unit, 'iceBlock')) return { ok: false, reason: 'crowd_controlled' };
     unit.mounted = true;
@@ -254,6 +262,8 @@ export function createSimulation({
     }
     unit.targetId = target?.id || null;
 
+    if(unit.mounted){unit.mounted=false;emit({type:'mount',unitId,mounted:false,reason:'casting'});}
+    if(target && target!==unit && !combat.canUseWhileCasting(unit,ability))unit.facing=Math.atan2(target.x-unit.x,target.z-unit.z);
     unit.resource -= ability.cost;
     combat.commitAbility(unit, ability);
     if (ability.type === 'iceBlock' && unit.cast) {
@@ -377,7 +387,9 @@ export function createSimulation({
           unit.input.z = 0;
         }
       }
+      if ((unit.jumpY||0)>0 || unit.jumpVel) {unit.jumpVel-=15.5*fixedDt;unit.jumpY=Math.max(0,unit.jumpY+unit.jumpVel*fixedDt);if(!unit.jumpY)unit.jumpVel=0;}
       const moveLength = Math.hypot(unit.input.x, unit.input.z);
+      if(unit.id.startsWith('bot')||unit.summonKind){const focus=state.units.get(unit.targetId);if(focus?.alive)unit.facing=Math.atan2(focus.x-unit.x,focus.z-unit.z);else if(moveLength>0)unit.facing=Math.atan2(unit.input.x,unit.input.z);}
       const moveMultiplier = combat.movementMultiplier(unit);
       if (unit.cast && !unit.cast.channel && moveLength > 0 && moveMultiplier > 0) {
         emit({ type: 'castCancelled', unitId: unit.id, abilityId: unit.cast.abilityId, reason: 'movement' });
@@ -487,6 +499,8 @@ export function createSimulation({
         resource: round(unit.resource),
         maxResource: unit.maxResource,
         alive: unit.alive,
+        facing:round(unit.facing||0),jumpY:round(unit.jumpY||0),jumpVel:round(unit.jumpVel||0),jumpSequence:unit.jumpSequence||0,
+        combatUntil:round(unit.combatUntil||0),
         mounted: !!unit.mounted,
         charging: !!unit.charge,
         mountId: unit.mountId || 'skyhoof',

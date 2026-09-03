@@ -95,6 +95,7 @@ function playerSummary(live: LiveRoom) {
     displayName: player.displayName,
     itemLevel: 990,
     connected: player.connected,
+    lockedIn: !!player.lockedIn,
     host: player === live.room.host
   }));
 }
@@ -237,6 +238,10 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
     else json(socket, { type: 'error', reason: 'format_change_rejected' });
     return;
   }
+  if(message.type==='ready'){
+    if(live.room.setReady(state.clientId,message.ready===true))broadcastLobby(live);
+    else json(socket,{type:'error',reason:'ready_change_rejected'});return;
+  }
   if (message.type === 'class') {
     const classId = cleanId(message.classId);
     const talents = message.talents && typeof message.talents === 'object'
@@ -250,7 +255,7 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
   }
   if (message.type === 'input') {
     const accepted = live.room.input(state.clientId, {
-      sequence: Number(message.sequence), x: Number(message.x), z: Number(message.z)
+      sequence: Number(message.sequence), x: Number(message.x), z: Number(message.z), facing:Number(message.facing),jumpSequence:Number(message.jumpSequence)
     });
     if (!accepted) json(socket, { type: 'inputRejected', sequence: message.sequence });
     return;
@@ -344,7 +349,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.46.0',
+      release: '2.47.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

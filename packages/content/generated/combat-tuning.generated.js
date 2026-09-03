@@ -1536,7 +1536,6 @@ export const combatTuning = {
         "wind_karma": 1,
         "wind_tiger_rush": 1,
         "wind_nimble_brew": 2,
-        "wind_reverse_harm": 1,
         "wind_temple_guard": 2,
         "wind_iron_body": 2,
         "wind_chi_wave": 1,
@@ -1550,8 +1549,8 @@ export const combatTuning = {
         "wind_nimble_brew": 2,
         "wind_iron_body": 2,
         "cyclonetech": 2,
+        "wind_reverse_harm": 1,
         "wind_chi_burst": 1,
-        "wind_tiger_rush": 1,
         "wind_tigers_lust": 1,
         "wind_tigereye_brew": 1,
         "wind_temple_guard": 2,
@@ -1567,7 +1566,7 @@ export const combatTuning = {
         "wind_tigereye_brew": 1,
         "cyclonetech": 2,
         "wind_tiger_rush": 1,
-        "wind_karma": 1,
+        "wind_reverse_harm": 1,
         "wind_nimble_brew": 2,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
@@ -1585,7 +1584,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_reverse_harm": 1,
         "wind_karma": 1,
-        "wind_chi_burst": 1,
         "wind_chi_wave": 1,
         "wind_tigereye_brew": 1,
         "wind_nimble_brew": 2,
@@ -1615,9 +1613,9 @@ export const combatTuning = {
         "wind_tigers_lust": 1,
         "wind_temple_guard": 2,
         "cyclonetech": 2,
+        "wind_reverse_harm": 1,
         "wind_chi_burst": 1,
         "focusfury": 2,
-        "wind_tiger_rush": 1,
         "wind_nimble_brew": 2,
         "wind_tigereye_brew": 1,
         "wind_iron_body": 2,
@@ -1633,7 +1631,6 @@ export const combatTuning = {
         "wind_karma": 1,
         "wind_chi_burst": 1,
         "wind_tigereye_brew": 1,
-        "wind_reverse_harm": 1,
         "wind_temple_guard": 2,
         "wind_iron_body": 2,
         "wind_chi_wave": 1,
@@ -1649,7 +1646,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_reverse_harm": 1,
         "wind_karma": 1,
-        "wind_tiger_rush": 1,
         "wind_tigers_lust": 1,
         "wind_nimble_brew": 2,
         "wind_temple_guard": 2,
@@ -1666,7 +1662,7 @@ export const combatTuning = {
         "wind_tigers_lust": 1,
         "cyclonetech": 2,
         "wind_karma": 1,
-        "wind_tiger_rush": 1,
+        "wind_reverse_harm": 1,
         "wind_temple_guard": 2,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
@@ -1685,7 +1681,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_tiger_rush": 1,
         "wind_reverse_harm": 1,
-        "wind_karma": 1,
         "wind_iron_body": 2,
         "wind_chi_wave": 1,
         "wind_disabling_reach": 1,
@@ -1705,7 +1700,7 @@ export const combatTuning = {
         "wind_chi_wave": 1,
         "cyclonetech": 2,
         "wind_tiger_rush": 1,
-        "wind_chi_burst": 1
+        "wind_reverse_harm": 1
       },
       {
         "flowstate": 3,
@@ -1752,7 +1747,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_reverse_harm": 1,
-        "wind_chi_burst": 1,
         "wind_temple_guard": 2,
         "wind_chi_wave": 1
       },
@@ -1763,10 +1757,10 @@ export const combatTuning = {
         "wind_tigereye_brew": 1,
         "wind_nimble_brew": 2,
         "cyclonetech": 2,
+        "wind_reverse_harm": 1,
         "wind_tiger_rush": 1,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
-        "wind_chi_burst": 1,
         "wind_tigers_lust": 1,
         "longdash": 2,
         "wind_temple_guard": 2,
@@ -1780,7 +1774,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_chi_burst": 1,
         "wind_karma": 1,
-        "wind_reverse_harm": 1,
         "wind_nimble_brew": 2,
         "wind_tigereye_brew": 1,
         "longdash": 2,
@@ -1814,8 +1807,8 @@ export const combatTuning = {
         "wind_temple_guard": 2,
         "wind_nimble_brew": 2,
         "wind_karma": 1,
+        "wind_reverse_harm": 1,
         "wind_tigereye_brew": 1,
-        "wind_tiger_rush": 1,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
         "wind_chi_wave": 1,
@@ -1851,7 +1844,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_tiger_rush": 1,
-        "wind_reverse_harm": 1,
         "wind_nimble_brew": 2
       },
       {
@@ -1862,8 +1854,8 @@ export const combatTuning = {
         "wind_nimble_brew": 2,
         "wind_tigereye_brew": 1,
         "cyclonetech": 2,
+        "wind_reverse_harm": 1,
         "wind_tiger_rush": 1,
-        "wind_karma": 1,
         "longdash": 2,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
@@ -1892,8 +1884,8 @@ export const combatTuning = {
         "longdash": 2,
         "windpath": 1,
         "cyclonetech": 2,
+        "wind_reverse_harm": 1,
         "wind_karma": 1,
-        "wind_chi_burst": 1,
         "wind_temple_guard": 2,
         "wind_tigers_lust": 1,
         "wind_iron_body": 2,
@@ -1912,7 +1904,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_tiger_rush": 1,
-        "wind_reverse_harm": 1,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
         "wind_chi_wave": 1,
@@ -1932,7 +1923,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_chi_burst": 1,
-        "wind_reverse_harm": 1,
         "wind_tigereye_brew": 1,
         "wind_chi_wave": 1
       },
@@ -1950,7 +1940,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_reverse_harm": 1,
-        "wind_chi_burst": 1,
         "longdash": 2
       },
       {
@@ -1959,7 +1948,7 @@ export const combatTuning = {
         "windpath": 1,
         "cyclonetech": 2,
         "wind_tiger_rush": 1,
-        "wind_chi_burst": 1,
+        "wind_reverse_harm": 1,
         "wind_temple_guard": 2,
         "wind_tigers_lust": 1,
         "longdash": 2,
@@ -1982,7 +1971,6 @@ export const combatTuning = {
         "wind_nimble_brew": 2,
         "wind_chi_wave": 1,
         "wind_tigereye_brew": 1,
-        "wind_reverse_harm": 1,
         "wind_disabling_reach": 1,
         "wind_temple_guard": 2
       },
@@ -1997,7 +1985,6 @@ export const combatTuning = {
         "wind_reverse_harm": 1,
         "wind_chi_burst": 1,
         "wind_nimble_brew": 2,
-        "wind_karma": 1,
         "wind_tigereye_brew": 1,
         "wind_iron_body": 2,
         "wind_disabling_reach": 1,
@@ -2013,7 +2000,6 @@ export const combatTuning = {
         "wind_chi_burst": 1,
         "wind_nimble_brew": 2,
         "wind_reverse_harm": 1,
-        "wind_karma": 1,
         "wind_tigereye_brew": 1,
         "wind_tigers_lust": 1,
         "wind_disabling_reach": 1,
@@ -2029,7 +2015,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_reverse_harm": 1,
-        "wind_chi_burst": 1,
         "focusfury": 2,
         "wind_tigereye_brew": 1,
         "wind_nimble_brew": 2,
@@ -2050,7 +2035,6 @@ export const combatTuning = {
         "tigerdash": 2,
         "wind_karma": 1,
         "wind_tiger_rush": 1,
-        "wind_reverse_harm": 1,
         "wind_chi_wave": 1,
         "longdash": 2
       }
@@ -7706,7 +7690,7 @@ export const combatTuning = {
           "cyclonetech"
         ],
         "unlockAbility": true,
-        "desc": "Unlocks Strike of the Windlord: a heavy strike that resets Cloudstep Kick and increases its next damage by 15%. Windwalker capstone: you may learn any two of Touch of Karma, Touch of Death and Strike of the Windlord.",
+        "desc": "Unlocks Strike of the Windlord: a heavy strike that resets Cloudstep Kick and increases its next damage by 15%. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm.",
         "capstone": true,
         "capstoneGroup": "wind_capstone",
         "capstoneLimit": 2
@@ -7723,7 +7707,7 @@ export const combatTuning = {
           "cyclonetech"
         ],
         "unlockAbility": true,
-        "desc": "Unlocks Touch of Karma: for 4 sec, each damaging hit you take deals 30% of the health damage back to its attacker and restores health equal to 50% of the damage you took. Windwalker capstone: you may learn any two of Touch of Karma, Touch of Death and Strike of the Windlord.",
+        "desc": "Unlocks Touch of Karma: for 4 sec, each damaging hit you take deals 30% of the health damage back to its attacker and restores health equal to 50% of the damage you took. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm.",
         "capstone": true,
         "capstoneGroup": "wind_capstone",
         "capstoneLimit": 2
@@ -7766,7 +7750,7 @@ export const combatTuning = {
           "cyclonetech"
         ],
         "unlockAbility": true,
-        "desc": "Unlocks Touch of Death: mark an enemy for 5 sec while recording the damage your spells deal to it, then detonate for 30% of the recorded amount. Windwalker capstone: you may learn any two of Touch of Karma, Touch of Death and Strike of the Windlord.",
+        "desc": "Unlocks Touch of Death: mark an enemy for 5 sec while recording the damage your spells deal to it, then detonate for 30% of the recorded amount. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm.",
         "capstone": true,
         "capstoneGroup": "wind_capstone",
         "capstoneLimit": 2
@@ -7849,13 +7833,17 @@ export const combatTuning = {
         "name": "Reverse Harm",
         "icon": "☯️",
         "x": 19,
-        "y": 78,
+        "y": 82,
         "max": 1,
         "req": [
-          "tigerdash"
+          "tigerdash",
+          "cyclonetech"
         ],
         "unlockAbility": true,
-        "desc": "Heal yourself for 8% of your maximum health. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Healing is affected by dampening. Target: yourself or the area around you. 10 sec cooldown."
+        "capstone": true,
+        "capstoneGroup": "wind_capstone",
+        "capstoneLimit": 2,
+        "desc": "Heal yourself for 8% of your maximum health. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m. Healing is affected by dampening. Target: yourself or the area around you. 10 sec cooldown. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm."
       }
     ]
   },

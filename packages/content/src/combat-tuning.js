@@ -1,4 +1,15 @@
 import {combatTuning as data} from '../generated/combat-tuning.generated.js';
+// Apply shared choice-pool limits to old or stale client builds at the lobby boundary.
+export function limitTalentPools(classId,talents={}){
+ const result={...talents},counts=new Map();
+ for(const node of data.trees[classId]||[]){
+  if(!node.capstoneGroup||!(Number(result[node.id])>0))continue;
+  const count=counts.get(node.capstoneGroup)||0;
+  if(count>=(node.capstoneLimit||2))delete result[node.id];
+  else counts.set(node.capstoneGroup,count+1);
+ }
+ return result;
+}
 export function normalizedVitals(classId,talents={}){
  const gear=data.gear[classId],healer=['sage','pala','disc'].includes(classId),energy=['shadow','wind','warrior'].includes(classId);
  const staminaMultiplier=1+(data.trees[classId]||[]).reduce((sum,n)=>sum+(talents[n.id]||0)*(n.effects?.staminaPct||0)/100,0);

@@ -1,7 +1,7 @@
 import { createSimulation } from '../../simulation/src/index.js';
 import { getClass } from '../../content/src/catalogue.js';
 import { BOT_TALENT_LOADOUTS, BotDirector } from './bot-director.js';
-import {normalizedVitals,botBuild} from '../../content/src/combat-tuning.js';
+import {normalizedVitals,botBuild,limitTalentPools} from '../../content/src/combat-tuning.js';
 import {createRandom} from '../../simulation/src/random.js';
 
 const HUMAN_SLOTS = Object.freeze(['player1', 'player2']);
@@ -73,7 +73,7 @@ export class CoopRoom {
       const player = this.players.get(slot);
       if (!player) return { ok: false, reason: 'expired_session' };
       player.clientId = clientId;
-      if(this.phase==='lobby'&&!player.lockedIn)player.talents = { ...talents };
+      if(this.phase==='lobby'&&!player.lockedIn)player.talents = limitTalentPools(player.classId,talents);
       player.displayName = String(displayName || player.displayName || classId).slice(0, 24);
       player.connected = true;
       player.disconnectedAt = null;
@@ -92,7 +92,7 @@ export class CoopRoom {
       classId,
       displayName: String(displayName || classId).slice(0, 24),
       itemLevel: ONLINE_ITEM_LEVEL,
-      talents: { ...talents },
+      talents: limitTalentPools(classId,talents),
       sessionToken: token,
       connected: true,
       lockedIn:false,
@@ -133,7 +133,7 @@ export class CoopRoom {
     if (!player) return false;
     if(player.lockedIn)return false;
     player.classId = classId;
-    player.talents = { ...talents };
+    player.talents = limitTalentPools(player.classId,talents);
     return true;
   }
 

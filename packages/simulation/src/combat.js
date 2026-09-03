@@ -1,6 +1,6 @@
 import { distance, hasLineOfSight, resolveArenaBounds, resolvePillarCollisions } from './geometry.js';
 
-const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap']);
+const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap', 'gouge']);
 const BREAKABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'gouge'];
 const SELF_TYPES = new Set([
   'monkDefensive', 'fistsChannel', 'whirlingDragonPunch', 'tigereyeBrew', 'karma', 'tigersLust',
@@ -41,6 +41,37 @@ const SUPPORTED_TYPES = new Set([
 const round = value => Number(value.toFixed(4));
 
 export function createCombatResolver({ state, emit, fixedDt, random }) {
+  // Gameplay travel is server-owned; visual effects never decide when damage lands.
+  const projectiles = [];
+  function advanceCharge(unit) {
+    const charge = unit.charge;
+    if (!charge) return false;
+    const target = state.units.get(charge.targetId);
+    if (!unit.alive || !target?.alive || movementMultiplier(unit) <= 0 || !hasLineOfSight(unit, target, state.arena.pillars, .1)) { unit.charge = null; return true; }
+    const dx=target.x-unit.x, dz=target.z-unit.z, length=Math.hypot(dx,dz), step=Math.min(Math.max(0,length-2.5),32*fixedDt);
+    if(length>0){unit.x+=dx/length*step;unit.z+=dz/length*step;}
+    charge.remaining-=fixedDt;
+    if(length-step<=2.51){
+      unit.charge=null;
+      if(charge.ally) addEffect(target,'sacrifice',4,{sourceId:unit.id});
+      else if(charge.kind==='cloudstep') damage(unit,target,charge.value,charge.label,{school:charge.school,melee:true});
+      else if(damage(unit,target,charge.value,charge.label).hit){
+        applyCrowdControl(target,'root',1.5,'root');addEffect(target,'slow',4,{pct:.45,sourceId:unit.id});
+        const rank=talentRank(unit,'war_hold_the_line');if(rank)addEffect(unit,'holdTheLine',3,{reduction:rank*.02});
+      }
+    } else if(charge.remaining<=0)unit.charge=null;
+    return true;
+  }
+  function tickProjectiles(){
+    for(let i=projectiles.length-1;i>=0;i--){
+      const bolt=projectiles[i],source=state.units.get(bolt.sourceId),target=state.units.get(bolt.targetId);
+      bolt.life-=fixedDt;
+      if(!source||!target?.alive||bolt.life<=0||!hasLineOfSight(bolt,target,state.arena.pillars,.05)){projectiles.splice(i,1);continue;}
+      const dx=target.x-bolt.x,dz=target.z-bolt.z,length=Math.hypot(dx,dz),step=22*fixedDt;
+      if(length<=step+.45){damage(source,target,bolt.value,'Chaos Bolt',{school:'shadow'});projectiles.splice(i,1);}
+      else{bolt.x+=dx/length*step;bolt.z+=dz/length*step;}
+    }
+  }
   function getEffect(unit, type) {
     if (!unit?.effects) return null;
     return unit.effects.get(type) || [...unit.effects.values()].find(effect => effect.type === type) || null;
@@ -96,7 +127,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     const ability = { ...source };
     if (ability.id === 'soul_void_mend') {
       ability.name = 'Chaos Bolt';
-      ability.type = 'damage';
+      ability.type = 'chaosBolt';
       ability.castTime = 1.6;
       ability.cooldown = 10;
       ability.baseValue = 510;
@@ -537,7 +568,13 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         addEffect(source, 'meteorPending', .98, { x: target.x, z: target.z });
         return true;
       case 'leap': {
-        if ((ability.id === 'wind.cloudstep_kick' && ability.dashReady) || ability.id === 'shadow.umbral_pounce') {
+        if (ability.id === 'wind.cloudstep_kick' && ability.dashReady) {
+          source.charge={kind:'cloudstep',targetId:target.id,value:ability.baseValue,label,school:ability.school,remaining:1.5};
+          addEffect(source,'cloudstepDashCd',20);
+          emit({type:'presentation',cue:'cloudstepDashStart',sourceId:source.id,targetId:target.id,duration:Math.max(.18,(distance(source,target)-2.5)/32)});
+          return true;
+        }
+        if (ability.id === 'shadow.umbral_pounce') {
           const dx = source.x - target.x;
           const dz = source.z - target.z;
           const length = Math.hypot(dx, dz) || 1;
@@ -545,7 +582,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           source.z = target.z + dz / length * 2.5;
           resolvePillarCollisions(source, state.arena.pillars, source.radius);
           resolveArenaBounds(source, state.arena, source.radius);
-          if (ability.id === 'wind.cloudstep_kick') addEffect(source, 'cloudstepDashCd', 20);
         }
         const hit = damage(source, target, ability.baseValue, label, { school: ability.school, melee: true }).hit;
         if (hit && ability.id === 'shadow.umbral_pounce') {
@@ -683,8 +719,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         /* Incapacitate that any damage breaks early. */
         return applyCrowdControl(target, 'gouge', ability.baseValue || 3, 'incap') > 0;
       case 'chaosBolt':
-        /* Always crits. */
-        return damage(source, target, ability.baseValue || 510, label, { school: 'shadow' }).hit;
+        projectiles.push({sourceId:source.id,targetId:target.id,x:source.x,z:source.z,value:(ability.baseValue||510)*1.5,life:3});
+        emit({type:'presentation',cue:'chaosBoltLaunch',sourceId:source.id,targetId:target.id});
+        return true;
       case 'sharpenBlade':
         addEffect(source, 'sharpenBlade', 20, { sourceId: source.id });
         emit({ type: 'presentation', cue: 'sharpenBlade', sourceId: source.id, duration: 20 });
@@ -692,10 +729,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       case 'intercept': {
         /* Charge to the ally, then eat their damage for 4 sec. */
         if (!target || target === source || target.team !== source.team) return false;
-        const dx = source.x - target.x, dz = source.z - target.z, d = Math.hypot(dx, dz) || 1;
-        source.x = target.x + (dx / d) * 1.6;
-        source.z = target.z + (dz / d) * 1.6;
-        addEffect(target, 'sacrifice', 4, { sourceId: source.id });
+        source.charge={targetId:target.id,ally:true,remaining:1.5};
         emit({ type: 'presentation', cue: 'intercept', sourceId: source.id, targetId: target.id, duration: 4 });
         return true;
       }
@@ -781,19 +815,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return hit;
       }
       case 'charge': {
-        const dx = source.x - target.x;
-        const dz = source.z - target.z;
-        const length = Math.hypot(dx, dz) || 1;
-        source.x = target.x + dx / length * 2.5;
-        source.z = target.z + dz / length * 2.5;
-        const hit = damage(source, target, ability.baseValue, label).hit;
-        if (hit) {
-          applyCrowdControl(target, 'root', 1.5, 'root');
-          addEffect(target, 'slow', 4, { pct: .45, sourceId: source.id });
-          const holdTheLine = talentRank(source, 'war_hold_the_line');
-          if (holdTheLine) addEffect(source, 'holdTheLine', 3, { reduction: holdTheLine * .02 });
-        }
-        return hit;
+        source.charge={targetId:target.id,value:ability.baseValue,label,remaining:1.5};
+        emit({type:'presentation',cue:'chargeStart',sourceId:source.id,targetId:target.id});
+        return true;
       }
       case 'rend': {
         const hit = damage(source, target, ability.baseValue, label, { school: 'physical' }).hit;
@@ -1487,6 +1511,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
 
   return {
+    advanceCharge,
+    tickProjectiles,
     addEffect,
     applyCrowdControl,
     channelTick,

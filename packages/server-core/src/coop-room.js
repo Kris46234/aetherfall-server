@@ -56,7 +56,7 @@ export class CoopRoom {
   }
 
   get host() {
-    return this.players.get('player1') || null;
+    return this.players.values().next().value || null;
   }
 
   get ready() {
@@ -106,7 +106,7 @@ export class CoopRoom {
       roomCode: this.code,
       slot: player.slot,
       unitId: player.unitId,
-      host: player.slot === 'player1',
+      host: player === this.host,
       sessionToken: player.sessionToken,
       ready: this.ready,
       phase: this.phase,
@@ -132,6 +132,12 @@ export class CoopRoom {
     return true;
   }
 
+  leave(clientId) {
+    const player=this.#connectedPlayer(clientId);if(!player)return false;
+    this.players.delete(player.slot);this.sessions.delete(player.sessionToken);
+    this.resetToLobby();return true;
+  }
+
   updateFormat(clientId, format) {
     if (this.phase !== 'lobby' || !this.host || this.host.clientId !== clientId) return false;
     this.format = cleanFormat(format);
@@ -147,7 +153,7 @@ export class CoopRoom {
 
   returnToLobby(clientId) {
     const player = this.#connectedPlayer(clientId);
-    if (!player || this.phase !== 'ended') return false;
+    if (!player || !['ended','lobby'].includes(this.phase)) return false;
     this.resetToLobby();
     return true;
   }

@@ -33,6 +33,7 @@ type LiveRoom = {
 const liveRooms = new Map<string, LiveRoom>();
 const socketState = new WeakMap<WebSocket, SocketState>();
 const messageRates = new WeakMap<WebSocket, { startedAt: number; count: number }>();
+const chatRates = new WeakMap<WebSocket, number[]>();
 
 function cleanCode(value: unknown) {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 24);
@@ -94,7 +95,7 @@ function playerSummary(live: LiveRoom) {
     displayName: player.displayName,
     itemLevel: 990,
     connected: player.connected,
-    host: player.slot === 'player1'
+    host: player === live.room.host
   }));
 }
 
@@ -111,6 +112,7 @@ function broadcastLobby(live: LiveRoom) {
     protocol: PROTOCOL_VERSION,
     roomCode: live.room.code,
     phase: live.room.phase,
+    hostClientId: live.room.host?.clientId,
     ready: live.room.ready,
     format: live.room.format,
     players: playerSummary(live)
@@ -201,6 +203,17 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
     return;
   }
   live.lastActive = Date.now();
+  if(message.type === 'chat') {
+    const player=[...live.room.players.values()].find(p=>p.clientId===state.clientId&&p.connected);
+    if(!player)return;
+    const now=Date.now(),recent=(chatRates.get(socket)||[]).filter(t=>now-t<10000);
+    const text=String(message.text||'').replace(/[\u0000-\u001f\u007f<>]/g,' ').trim().slice(0,240);
+    if(!text)return;
+    if(recent.length>=6){json(socket,{type:'chatError',text:'Please wait a moment before sending more messages.'});return;}
+    recent.push(now);chatRates.set(socket,recent);
+    broadcast(live,{type:'chat',senderId:player.unitId,senderName:player.displayName,text,createdAt:now});
+    return;
+  }
   if (message.type === 'start') {
     const requestedFormat = cleanFormat(message.format);
     if (live.room.host?.clientId === state.clientId) live.room.updateFormat(state.clientId, requestedFormat);
@@ -291,7 +304,8 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
     return;
   }
   if (message.type === 'leave') {
-    detach(socket);
+    live.room.leave(state.clientId);live.sockets.delete(state.clientId);socketState.delete(socket);live.lastPhase='lobby';
+    broadcast(live,{type:'returnedToLobby',players:playerSummary(live),ready:live.room.ready});broadcastLobby(live);
     try { socket.close(1000, 'left'); } catch { /* ignored */ }
   }
 }
@@ -330,7 +344,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.45.0',
+      release: '2.46.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

@@ -248,7 +248,7 @@ export function createSimulation({
     if (!groundTargeted && combat.requiresFriendlyTarget(ability) && target.team !== unit.team) {
       return rejectAction(unit, action, 'friendly_target_required');
     }
-    if (ability.type === 'sacrifice' && target === unit) return rejectAction(unit, action, 'ally_target_required');
+    if (['sacrifice','intercept'].includes(ability.type) && target === unit) return rejectAction(unit, action, 'ally_target_required');
     if (!groundTargeted && combat.requiresEnemyTarget(ability) && target.team === unit.team) {
       return rejectAction(unit, action, 'enemy_target_required');
     }
@@ -383,8 +383,10 @@ export function createSimulation({
         emit({ type: 'castCancelled', unitId: unit.id, abilityId: unit.cast.abilityId, reason: 'movement' });
         unit.cast = null;
       }
-      unit.x += unit.input.x * unit.speed * moveMultiplier * fixedDt;
-      unit.z += unit.input.z * unit.speed * moveMultiplier * fixedDt;
+      if (!combat.advanceCharge(unit)) {
+        unit.x += unit.input.x * unit.speed * moveMultiplier * fixedDt;
+        unit.z += unit.input.z * unit.speed * moveMultiplier * fixedDt;
+      }
       resolvePillarCollisions(unit, state.arena.pillars, unit.radius);
       resolveArenaBounds(unit, state.arena, unit.radius);
       unit.gcd = decrementTimer(unit.gcd);
@@ -430,6 +432,7 @@ export function createSimulation({
       }
       combat.tickEffects(unit);
     }
+    combat.tickProjectiles();
     resolveUnitCollisions(state.units.values());
     for (const unit of state.units.values()) {
       resolvePillarCollisions(unit, state.arena.pillars, unit.radius);
@@ -485,6 +488,7 @@ export function createSimulation({
         maxResource: unit.maxResource,
         alive: unit.alive,
         mounted: !!unit.mounted,
+        charging: !!unit.charge,
         mountId: unit.mountId || 'skyhoof',
         mountSkinId: unit.mountSkinId || 'default',
         targetId: unit.targetId || null,

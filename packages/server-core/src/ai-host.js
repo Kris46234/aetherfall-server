@@ -100,7 +100,7 @@ export function createAiHost(simulation, options) {
   const opts = options || {};
   const deps = {
     dist, clamp, isUntargetableStealth, windTigereyeStacks, bracketKey, classRating,
-    AB: {}, BALANCE, DIFFICULTY, CLASS_INFO, talentRank, unitTalentRank
+    AB: {}, BALANCE, DIFFICULTY, CLASS_INFO, talentRank, unitTalentRank, unitAbilities: abilitiesFor
   };
   const AIController = createAIControllerClass(deps);
   const Helpers = createGameHelpers(deps);

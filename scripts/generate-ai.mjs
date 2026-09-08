@@ -79,7 +79,7 @@ const baseOrder = {};
 for (const cls of Object.keys(AB)) baseOrder[cls] = AB[cls].map(a => a.name);
 
 const digest = createHash('sha256').update(source).digest('hex');
-const deps = ['dist', 'clamp', 'isUntargetableStealth', 'windTigereyeStacks', 'bracketKey', 'classRating', 'AB', 'BALANCE', 'DIFFICULTY', 'CLASS_INFO', 'talentRank', 'unitTalentRank'];
+const deps = ['dist', 'clamp', 'isUntargetableStealth', 'windTigereyeStacks', 'bracketKey', 'classRating', 'AB', 'BALANCE', 'DIFFICULTY', 'CLASS_INFO', 'talentRank', 'unitTalentRank', 'unitAbilities'];
 
 await mkdir(new URL('../packages/server-core/generated/', import.meta.url), { recursive: true });
 await writeFile(outPath, [

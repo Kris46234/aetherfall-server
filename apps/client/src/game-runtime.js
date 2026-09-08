@@ -9,9 +9,8 @@
    Unreal-mannequin skeletons procedurally (idle / walk / attack / cast),
    since the source models ship with a rig but NO animation clips.
 
-   TUNING: I cannot run WebGL in the build sandbox, so a few sign choices
-   (which way a knee/elbow bends, which way arms raise to cast) are best-guess.
-   If a limb bends the wrong way in play, flip the matching sign in RIG_T below.
+   The current animator derives every limb direction from the imported skeleton's
+   real parent-to-child vectors. RIG_T remains only for motion amplitude and timing.
    ========================================================================== */
 const AetherKit=(()=>{
   // ---- which outfit each class wears (edit freely) -----------------------
@@ -63,6 +62,7 @@ const AetherKit=(()=>{
                      'upperarm_l','upperarm_r','lowerarm_l','lowerarm_r',
                      'spine_01','spine_02','spine_03','neck_01','Head','pelvis',
                      'clavicle_l','clavicle_r','hand_l','hand_r'];
+  const AIM_CHILD={upperarm_l:'lowerarm_l',upperarm_r:'lowerarm_r',lowerarm_l:'hand_l',lowerarm_r:'hand_r',thigh_l:'calf_l',thigh_r:'calf_r',calf_l:'foot_l',calf_r:'foot_r'};
 
   const sources={};   // key -> { scene, meta, scale, footY, yawFix }
   // Identical class outfits can share their immutable base materials. This keeps
@@ -71,7 +71,7 @@ const AetherKit=(()=>{
   const tintedMaterials=new Map();
   let   loaded=false;
 
-  let _q=null, _q2=null, _qf=null;   // scratch; created lazily once THREE is ready (see loadAll)
+  let _q=null, _q2=null, _qf=null, _qa=null, _v=null;   // allocation-free animation scratch
 
   function b64ToArrayBuffer(dataUri){
     const b64=dataUri.split(',')[1];
@@ -100,12 +100,15 @@ const AetherKit=(()=>{
       const b=bones[name]; if(!b) return;
       const invParent=new THREE.Quaternion();
       if(b.parent) b.parent.getWorldQuaternion(invParent).invert();
-      meta[name]={
-        rest : b.quaternion.clone(),
-        lat  : lateral.clone().applyQuaternion(invParent).normalize(),  // swing axis in parent space
-        up   : up.clone().applyQuaternion(invParent).normalize(),       // twist axis in parent space
-        fwd  : forward.clone().applyQuaternion(invParent).normalize()   // body-facing axis in parent space
-      };
+       const child=bones[AIM_CHILD[name]],axis=child?.parent===b&&child.position.lengthSq()>1e-8?child.position.clone().normalize():null;
+       meta[name]={
+         rest : b.quaternion.clone(),
+         lat  : lateral.clone().applyQuaternion(invParent).normalize(),  // swing axis in parent space
+         up   : up.clone().applyQuaternion(invParent).normalize(),       // twist axis in parent space
+         fwd  : forward.clone().applyQuaternion(invParent).normalize(),  // body-facing axis in parent space
+         axis,
+         restDir:axis?axis.clone().applyQuaternion(b.quaternion).normalize():null
+       };
     });
 
     // scale + foot offset. Base the scale on the Head joint (not the raw bounding box)
@@ -144,7 +147,7 @@ const AetherKit=(()=>{
 
   async function loadAll(){
     if(loaded) return;
-    if(!_q){ _q=new THREE.Quaternion(); _q2=new THREE.Quaternion(); _qf=new THREE.Quaternion(); }
+    if(!_q){ _q=new THREE.Quaternion(); _q2=new THREE.Quaternion(); _qf=new THREE.Quaternion(); _qa=new THREE.Quaternion(); _v=new THREE.Vector3(); }
     const keys=[...new Set(Object.values(MODEL_MAP))];
     await Promise.all(keys.map(loadOne));
     loaded=true;
@@ -159,8 +162,40 @@ const AetherKit=(()=>{
     if(upAngle){  _q2.setFromAxisAngle(m.up,  upAngle ); b.quaternion.premultiply(_q2); }
   }
 
+  // Point a limb along a body-relative direction while preserving the roll from
+  // the imported rest pose. This uses the real bone-to-child vector, avoiding the
+  // guessed Euler axes that left elbows behind the torso and knees hyperextended.
+  function aimBone(rig,name,x,y,z,twist=0){
+    const b=rig.bones[name],m=rig.meta[name];if(!b||!m?.axis||!m.restDir)return;
+    // The outfit torsos and shoulder armour are wider than the mannequin's
+    // underlying joint spacing. Keep the upper-arm chain outside that volume;
+    // without this bias a correctly aimed arm can be fully hidden inside the
+    // chest when viewed from the gameplay camera.
+    if(name==='upperarm_l')x-=.20+_armOut;
+    else if(name==='upperarm_r')x+=.20+_armOut;
+    else if(_foreOut){
+      // Melee forearms were authored with the lateral sign inverted, so every swing
+      // folded the hand - and the weapon with it - back onto the chest. Push the
+      // forearm outboard while a strike is being posed.
+      if(name==='lowerarm_l')x-=_foreOut;
+      else if(name==='lowerarm_r')x+=_foreOut;
+    }
+    _v.set(0,0,0).addScaledVector(m.lat,x).addScaledVector(m.up,y).addScaledVector(m.fwd,z);
+    if(_v.lengthSq()<1e-8)return;_v.normalize();
+    _qa.setFromUnitVectors(m.restDir,_v);b.quaternion.copy(m.rest).premultiply(_qa);
+    if(twist){_q.setFromAxisAngle(_v,twist);b.quaternion.premultiply(_q);}
+  }
+
   // Sign to bring each arm down from the T-pose (rotate around the forward axis).
+  /* Extra lateral clearance applied while melee limbs are posed, so swings carry the
+     weapon away from the torso instead of hugging it. Tunable at runtime for tuning. */
+  let _foreOut=0,_armOut=0;
+  /* Bones eased by the settle pass. Limbs and torso only - feet and pelvis stay exact
+     so planting and hip drive are never softened. */
+  const SMOOTH_BONES=['upperarm_l','lowerarm_l','hand_l','upperarm_r','lowerarm_r','hand_r',
+                      'clavicle_l','clavicle_r','spine_01','spine_02','spine_03','neck_01'];
   const ARM_SIDE={l:-1, r:+1};
+  const _gq=new THREE.Quaternion(),_gq2=new THREE.Quaternion(),_gq3=new THREE.Quaternion();
 
   // Pose one upper arm: lower it to the body (around fwd), then swing it fwd/back (around lat).
   function armPose(rig, side, swing, extraDown){
@@ -170,6 +205,127 @@ const AetherKit=(()=>{
     const down=(RIG_T.armDown+(extraDown||0))*ARM_SIDE[side]*RIG_T.armDownSign;
     if(down){ _qf.setFromAxisAngle(me.fwd, down); b.quaternion.premultiply(_qf); }
     if(swing){ _q.setFromAxisAngle(me.lat, swing*RIG_T.armSwingSign); b.quaternion.premultiply(_q); }
+  }
+
+  // Four authored attack phases: anticipation, contact, follow-through and recovery.
+  // Keeping this scalar and allocation-free matters because every visible champion
+  // samples it on render frames. Values are deliberately not a sine wave: a weapon
+  // must accelerate into contact, carry its weight past the target, then settle.
+  function attackEase(x){x=Math.max(0,Math.min(1,x));return x*x*(3-2*x);}
+
+  /* Attack shaping by weapon weight. A heavy weapon earns its weight from a longer
+     wind-up, more body involvement, the weapon trailing the body and a slow recovery
+     - not from playing the whole swing at a uniformly slower speed. A light weapon
+     anticipates briefly, accelerates sharply and recovers fast so it can chain.
+       wind    : end of anticipation
+       contact : the strike
+       follow  : end of follow-through, recovery runs from there to 1
+       lag     : how far the weapon trails the body
+       lead    : how far the pelvis leads it
+       body    : how much pelvis/chest rotation the swing carries */
+  const ATTACK_WEIGHT={
+    heavy :{wind:.26,contact:.47,follow:.74,lag:.090,lead:.070,body:1.40},
+    medium:{wind:.18,contact:.38,follow:.66,lag:.055,lead:.045,body:1.00},
+    light :{wind:.11,contact:.28,follow:.55,lag:.028,lead:.022,body:.70},
+    rogueCut:{wind:.09,contact:.235,follow:.47,lag:.022,lead:.035,body:.92},
+    rogueThrust:{wind:.07,contact:.195,follow:.40,lag:.014,lead:.042,body:.82},
+    roguePounce:{wind:.14,contact:.31,follow:.63,lag:.030,lead:.055,body:1.08},
+    rogueControl:{wind:.12,contact:.30,follow:.60,lag:.018,lead:.030,body:.78}
+  };
+  let _atk=ATTACK_WEIGHT.medium;
+  function attackWeightFor(style){
+    const st=String(style||'');
+    if(st==='warriorWarbreaker'||st==='warriorMortal'||st==='warriorSlicing'||st==='warriorAvatar'||st==='paladinHammer')return ATTACK_WEIGHT.heavy;
+    if(st==='shadowPounce')return ATTACK_WEIGHT.roguePounce;
+    if(st==='shadowRib'||st==='shadowShiv')return ATTACK_WEIGHT.rogueThrust;
+    if(st==='shadowGarrote'||st==='shadowGouge'||st==='shadowKick')return ATTACK_WEIGHT.rogueControl;
+    if(st.startsWith('shadow'))return ATTACK_WEIGHT.rogueCut;
+    if(st==='windRising'||st==='windCloudstep'||st==='windCyclone')return ATTACK_WEIGHT.light;
+    return ATTACK_WEIGHT.medium;
+  }
+  /* Offset a joint along the swing so motion propagates down the chain instead of
+     every bone peaking on the same frame. Positive leads, negative trails. */
+  function phaseAt(p,shift){return Math.max(0,Math.min(1,p+shift));}
+
+  function attackKey(p,wind,contact,follow){
+    const a=_atk;
+    if(p<a.wind)return wind*attackEase(p/a.wind);
+    if(p<a.contact){const e=attackEase((p-a.wind)/(a.contact-a.wind));return wind+(contact-wind)*e;}
+    if(p<a.follow){const e=attackEase((p-a.contact)/(a.follow-a.contact));return contact+(follow-contact)*e;}
+    return follow*(1-attackEase((p-a.follow)/Math.max(.01,1-a.follow)));
+  }
+  function contactPulse(p){
+    const a=_atk;
+    if(p<a.wind||p>a.follow)return 0;
+    if(p<a.contact)return (p-a.wind)/(a.contact-a.wind);
+    return 1-(p-a.contact)/(a.follow-a.contact);
+  }
+
+  function poseMeleeLimbs(rig,style,p,side){
+    _foreOut=style.startsWith('warrior')?1.05:.78;_armOut=.16;
+    try{ return poseMeleeLimbsInner(rig,style,p,side); } finally { _foreOut=0;_armOut=0; }
+  }
+  function poseMeleeLimbsInner(rig,style,p,side){
+    const hit=contactPulse(p),arc=attackKey(p,-.55,1,.34),lead=side<0?'l':'r',off=side<0?'r':'l';
+    const plant=(wide=.10,lean=.14)=>{aimBone(rig,'thigh_l',-.04,-.97,lean,-wide);aimBone(rig,'thigh_r',.04,-.97,-lean,wide);aimBone(rig,'calf_l',0,-.985,-.10);aimBone(rig,'calf_r',0,-.985,-.10);};
+    const guard=()=>{aimBone(rig,'upperarm_l',-.30,-.34,.89);aimBone(rig,'upperarm_r',.30,-.34,.89);aimBone(rig,'lowerarm_l',.22,.06,.97);aimBone(rig,'lowerarm_r',-.22,.06,.97);};
+    if(style==='shadowNight'){
+      plant(.22,side*attackKey(p,-.08,.42,.22));const cut=attackKey(p,-.85,.65,1.10);aimBone(rig,`upperarm_${lead}`,side*cut,.22-.42*hit,.72);aimBone(rig,`lowerarm_${lead}`,side*cut*1.2,.20-.28*hit,.90);
+      aimBone(rig,`upperarm_${off}`,-side*(.42-.12*hit),-.22,.88);aimBone(rig,`lowerarm_${off}`,side*(.48-.18*hit),.12,.86);
+    }else if(style==='shadowPounce'){
+      aimBone(rig,`thigh_${lead}`,side*.06,-.62,.78);aimBone(rig,`calf_${lead}`,-side*.03,-.90,-.42);aimBone(rig,`thigh_${off}`,-side*.10,-.94,-.30);aimBone(rig,`calf_${off}`,side*.03,-.78,-.62);
+      aimBone(rig,`upperarm_${lead}`,side*.20,-.06,.98);aimBone(rig,`lowerarm_${lead}`,-side*.08,-.02,.996);aimBone(rig,`upperarm_${off}`,-side*.40,-.34,.84);aimBone(rig,`lowerarm_${off}`,side*.48,.06,.87);
+    }else if(style==='shadowViper'){
+      plant(.25,-side*attackKey(p,.08,.34,.20));const rake=attackKey(p,.75,-.65,-.95);aimBone(rig,`upperarm_${lead}`,side*rake,attackKey(p,-.65,.38,.58),.70);aimBone(rig,`lowerarm_${lead}`,side*rake*.85,attackKey(p,-.38,.22,.44),.92);
+      aimBone(rig,`upperarm_${off}`,-side*.44,-.22,.86);aimBone(rig,`lowerarm_${off}`,side*.50,.12,.85);
+    }else if(style==='shadowRib'){
+      plant(.18,side*attackKey(p,-.05,.48,.22));const thrust=attackKey(p,-.50,1,.45);aimBone(rig,`upperarm_${lead}`,side*.10,-.42+.26*hit,thrust);aimBone(rig,`lowerarm_${lead}`,-side*.52,-.26,thrust+.45);
+      aimBone(rig,`upperarm_${off}`,-side*.46,-.28,.84);aimBone(rig,`lowerarm_${off}`,side*.52,.12,.84);
+    }else if(style==='shadowShiv'){
+      plant(.12,side*.20);const stab=attackKey(p,-.28,1,.20);aimBone(rig,`upperarm_${lead}`,side*.12,-.60,stab);aimBone(rig,`lowerarm_${lead}`,-side*.45,.24,stab+.30);
+      aimBone(rig,`upperarm_${off}`,-side*.52,-.18,.83);aimBone(rig,`lowerarm_${off}`,side*.56,.18,.81);
+    }else if(style==='shadowGouge'){
+      plant(.14,side*.10);aimBone(rig,`upperarm_${lead}`,side*(.46-.62*hit),-.10+.36*hit,.88);aimBone(rig,`lowerarm_${lead}`,-side*(.52-.18*hit),.12+.22*hit,.84);
+      aimBone(rig,`upperarm_${off}`,-side*.45,-.30,.83);aimBone(rig,`lowerarm_${off}`,side*.48,.08,.87);
+    }else if(style==='shadowGarrote'){
+      plant(.28,attackKey(p,-.10,.28,-.14));const pull=attackKey(p,.15,.85,-.45);aimBone(rig,'upperarm_l',-.30,.45,pull);aimBone(rig,'upperarm_r',.30,.45,pull);
+      aimBone(rig,'lowerarm_l',.58-.18*hit,.30,.76);aimBone(rig,'lowerarm_r',-.58+.18*hit,.30,.76);
+    }else if(style==='shadowKick'){
+      guard();const kick=lead,support=off;aimBone(rig,`thigh_${kick}`,side*(.10+.22*hit),-.44+.46*hit,.88);aimBone(rig,`calf_${kick}`,-side*.05,-.18+.22*hit,.98);aimBone(rig,`thigh_${support}`,-side*.08,-.95,-.30);aimBone(rig,`calf_${support}`,side*.03,-.88,-.46);
+    }else if(style==='warriorMortal'||style==='warriorSlicing'){
+      plant(.30,attackKey(phaseAt(p,.07),-.20,.40,.26));const sweep=attackKey(phaseAt(p,-.045),-.95,.60,1.45),height=style==='warriorSlicing'?-.10:attackKey(p,.50,-.12,-.42);aimBone(rig,'upperarm_r',sweep,height,.66);aimBone(rig,'lowerarm_r',sweep*.9,height*.65,.92);
+      aimBone(rig,'upperarm_l',-.24+.16*hit,-.34,.91);aimBone(rig,'lowerarm_l',.18+.16*hit,-.10,.97);
+    }else if(style==='warriorWarbreaker'){
+      plant(.32,attackKey(p,-.14,.42,.18));const overhead=attackKey(phaseAt(p,-.04),1.55,-.30,-.70);
+      aimBone(rig,'upperarm_r',.20,overhead,.78);aimBone(rig,'lowerarm_r',-.08,overhead*.62,.94);aimBone(rig,'upperarm_l',-.18,overhead*.78,.82);aimBone(rig,'lowerarm_l',.12,overhead*.48,.96);
+    }else if(style==='warriorVictory'||style==='warriorRend'){
+      plant(.26,-side*.22);const cleave=attackKey(p,-.68,.72,1.25);aimBone(rig,'upperarm_r',cleave,style==='warriorRend'?-.58:.35-.55*hit,.76);aimBone(rig,'lowerarm_r',cleave*.9,-.18,.95);
+      aimBone(rig,'upperarm_l',-.28,-.40,.87);aimBone(rig,'lowerarm_l',.22,-.02,.97);
+    }else if(style==='warriorPummel'){
+      guard();aimBone(rig,`thigh_${lead}`,side*.04,-.28+.16*hit,.96);aimBone(rig,`calf_${lead}`,-side*.02,-.08,.997);aimBone(rig,`thigh_${off}`,-side*.03,-.98,-.05);aimBone(rig,`calf_${off}`,0,-.97,-.18);
+    }else if(style==='warriorCharge'){
+      aimBone(rig,'upperarm_l',-.24,-.76,-.60);aimBone(rig,'upperarm_r',.24,-.76,-.60);aimBone(rig,'lowerarm_l',-.06,-.82,-.56);aimBone(rig,'lowerarm_r',.06,-.82,-.56);
+      aimBone(rig,'thigh_l',-.03,-.82,.56);aimBone(rig,'thigh_r',.03,-.90,-.42);aimBone(rig,'calf_l',0,-.96,-.26);aimBone(rig,'calf_r',0,-.74,-.66);
+    }else if(style==='windZephyr'||style==='windDisrupt'){
+      plant(.12,side*.10);aimBone(rig,`upperarm_${lead}`,side*.12,-.12+.08*hit,.985);aimBone(rig,`lowerarm_${lead}`,-side*.08,-.04+.08*hit,.995);
+      aimBone(rig,`upperarm_${off}`,-side*.30,-.36,.88);aimBone(rig,`lowerarm_${off}`,side*.25,.08,.96);
+    }else if(['windCloudstep','windRising','windDisabling'].includes(style)){
+      guard();const high=style==='windRising',kick=lead,support=off;
+      aimBone(rig,`thigh_${kick}`,side*.04,high?.42:-.20,high?.90:.98);aimBone(rig,`calf_${kick}`,-side*.02,high?-.08:.02,.998);
+      aimBone(rig,`thigh_${support}`,-side*.03,-.98,-.05);aimBone(rig,`calf_${support}`,0,-.96,-.20);
+    }else if(style==='windValley'){
+      aimBone(rig,'upperarm_l',-.44,-.32,.84);aimBone(rig,'upperarm_r',.44,-.32,.84);aimBone(rig,'lowerarm_l',-.24,-.18,.95);aimBone(rig,'lowerarm_r',.24,-.18,.95);
+      aimBone(rig,`thigh_${lead}`,side*.62,-.44,.64);aimBone(rig,`calf_${lead}`,side*.38,-.18,.90);aimBone(rig,`thigh_${off}`,-side*.03,-.96,-.20);aimBone(rig,`calf_${off}`,0,-.94,-.28);
+    }else if(style==='windCyclone'||style==='windWhirling'){
+      aimBone(rig,'upperarm_l',-.54,-.48,.69);aimBone(rig,'upperarm_r',.54,-.48,.69);aimBone(rig,'lowerarm_l',-.30,-.34,.89);aimBone(rig,'lowerarm_r',.30,-.34,.89);
+      aimBone(rig,`thigh_${lead}`,side*.10,style==='windWhirling'?.34:-.16,.94);aimBone(rig,`calf_${lead}`,-side*.04,-.04,.998);aimBone(rig,`thigh_${off}`,-side*.03,-.97,-.14);aimBone(rig,`calf_${off}`,0,-.95,-.24);
+    }else if(style==='windWindlord'){
+      plant(.14,.04);aimBone(rig,'upperarm_l',-.18+.16*hit,-.12,.97);aimBone(rig,'upperarm_r',.18-.16*hit,-.12,.97);aimBone(rig,'lowerarm_l',.22,.06,.97);aimBone(rig,'lowerarm_r',-.22,.06,.97);
+    }else if(style==='paladinRighteous'){
+      plant(.16,side*.08);aimBone(rig,'upperarm_l',-.32,-.24,.92);aimBone(rig,'lowerarm_l',.22,.10,.97);aimBone(rig,'upperarm_r',.34-.38*hit,-.28+.12*hit,.90);aimBone(rig,'lowerarm_r',-.24*arc,-.12,.96);
+    }else if(style==='paladinHammer'){
+      plant(.16,.02);const overhead=attackKey(p,.72,-.12,.10);aimBone(rig,'upperarm_r',.22,overhead,.82);aimBone(rig,'lowerarm_r',-.10,overhead*.52,.95);aimBone(rig,'upperarm_l',-.34,-.28,.90);aimBone(rig,'lowerarm_l',.24,.10,.96);
+    }else{plant();guard();}
   }
 
   // The outfit models ship with NO head geometry, so build a simple one and
@@ -243,6 +399,7 @@ const AetherKit=(()=>{
     // hand rotation offset: the imported hand bone itself inherits a broad rig/T-pose orientation.
     // Aim that +Y weapon axis directly into a combat-ready forward vector in character space.
     // This makes the change visibly obvious on the model and keeps swing/cast animation on top.
+    const GRIP_OUT=.34; // how far weapons are held away from the torso
     const forwardGrip={
       warrior:{dir:[ .11,-.20, 1.00],roll:.10}, // axe driven forward, slightly downward
       pala:   {dir:[ .09,-.25, 1.00],roll:.07}, // sword point forward/down
@@ -260,12 +417,21 @@ const AetherKit=(()=>{
       hand.add(g);
       wrapper.updateMatrixWorld(true);
       const mirror=hand===left?-1:1;
-      const desiredDir=new THREE.Vector3(forwardGrip.dir[0]*mirror,forwardGrip.dir[1],forwardGrip.dir[2]).normalize();
+      // +x is the LEFT side in character space, so a weapon angles outward when its x
+      // matches the hand it sits in. The old mirror term did the opposite and pointed
+      // both weapons across the chest.
+      const side=(hand===left)?1:-1;
+      const desiredDir=new THREE.Vector3((Math.abs(forwardGrip.dir[0])+GRIP_OUT)*side,forwardGrip.dir[1],forwardGrip.dir[2]).normalize();
       const aim=new THREE.Quaternion().setFromUnitVectors(weaponAxis,desiredDir);
       const roll=new THREE.Quaternion().setFromAxisAngle(desiredDir,forwardGrip.roll*mirror);
       const desiredWorld=roll.multiply(aim);
       // Cancel the imported hand-bone world rotation, then impose the deliberate forward-facing grip.
       g.quaternion.copy(hand.getWorldQuaternion(new THREE.Quaternion())).invert().multiply(desiredWorld);
+      // Keep the intended character-space aim. The grip used to be baked against the
+      // hand's REST orientation, so once the arm was posed the weapon drifted by that
+      // difference - which is why Male_Ranger classes ended up pointing inward while
+      // the other rigs did not. pose() re-derives it from the live hand each frame.
+      g.userData.gripAim=desiredWorld.clone();
       g.userData.classWeapon=true;
       g.userData.restQuat=g.quaternion.clone();
       g.userData.restPos=g.position.clone();
@@ -349,10 +515,13 @@ const AetherKit=(()=>{
     model.traverse(o=>{
       if(o.isMesh){
         o.castShadow=false; o.receiveShadow=false; o.frustumCulled=false;
+        // Imported geometry and class-tinted materials belong to the asset cache,
+        // not to this character. Skeletons and attached weapons are instance-owned.
+        if(o.geometry)o.geometry.userData.aetherShared=true;
         const retint=m=>{
           const cacheKey=`${cls}:${m.uuid}`;
           if(tintedMaterials.has(cacheKey))return tintedMaterials.get(cacheKey);
-          const c=m.clone();
+          const c=m.clone();c.userData.aetherShared=true;
           if(c.color&&RIG_T.classTint>0) c.color.lerp(tintCol, RIG_T.classTint);
           if(c.emissive){ c.emissive.copy(tintCol); c.emissiveIntensity=RIG_T.classGlow; }
           tintedMaterials.set(cacheKey,c);
@@ -376,7 +545,7 @@ const AetherKit=(()=>{
     attachHead(wrapper, model, bones, hooded);
     attachClassWeapons(wrapper, bones, cls, src.scale);
 
-    wrapper.userData.rig={ bones, meta:src.meta, footY:src.footY,
+    wrapper.userData.rig={ cls,bones, meta:src.meta, footY:src.footY,root:wrapper,
                            weaponGlowParts:wrapper.userData.weaponGlowParts||[],
                            weaponRoots:wrapper.userData.weaponRoots||[], spellFocus:wrapper.userData.spellFocus||null, weaponTrail:wrapper.userData.weaponTrail||null,
                            phase:Math.random()*Math.PI*2 };
@@ -392,6 +561,11 @@ const AetherKit=(()=>{
       const time= state.time||0;
       const idle= 1-m;
 
+      // Move the character's centre of mass with the gait instead of sliding a
+      // perfectly level torso over animated legs. Character.update restores the
+      // calibrated foot height before each pose, so this remains drift-free.
+      if(rig.root&&!state.mounted)rig.root.position.y=(rig.footY||0)+Math.abs(Math.sin(t))*RIG_T.bob*m;
+
       // ---------- locomotion (legs / arms swing) ----------
       const lS=RIG_T.legSwing*m, aS=RIG_T.armSwing*m;
       const legL= Math.sin(t)*lS,        legR= Math.sin(t+Math.PI)*lS;
@@ -404,11 +578,12 @@ const AetherKit=(()=>{
       const sway   =Math.sin(time*1.3)*RIG_T.sway   *idle;
       armL+=sway; armR-=sway;
 
-      // base poses
-      setBone(rig,'thigh_l', legL,0);
-      setBone(rig,'thigh_r', legR,0);
-      setBone(rig,'calf_l',  kneeL,0);
-      setBone(rig,'calf_r',  kneeR,0);
+      // Anatomical locomotion: thighs travel from the hip while the trailing knee
+      // flexes and the calf keeps the ankle under the body. This replaces the old
+      // equal-and-opposite joint rotations that produced locked, backwards knees.
+      const strideL=Math.sin(t)*.42*m,strideR=-strideL,liftL=Math.max(0,-Math.sin(t))*.28*m,liftR=Math.max(0,Math.sin(t))*.28*m;
+      aimBone(rig,'thigh_l',-.035,-.965,strideL);aimBone(rig,'thigh_r',.035,-.965,strideR);
+      aimBone(rig,'calf_l',0,-.985,-.06-liftL);aimBone(rig,'calf_r',0,-.985,-.06-liftR);
       setBone(rig,'spine_02', breathe + m*0.05, -Math.sin(t)*RIG_T.spineTwist*m);
       setBone(rig,'spine_03', breathe*0.6, 0);
       setBone(rig,'neck_01',  -breathe*0.4, 0);
@@ -416,36 +591,292 @@ const AetherKit=(()=>{
       const elbow=RIG_T.elbowBend*RIG_T.elbowSign;
 
       if(state.spell){
-        // both arms raised forward to channel
-        const r=RIG_T.castRaise*RIG_T.castSign;
-        const flutter=Math.sin(time*9)*0.08;
-        armPose(rig,'l', r+flutter, -0.30);
-        armPose(rig,'r', r-flutter, -0.30);
-        setBone(rig,'lowerarm_l', elbow*1.6, 0);
-        setBone(rig,'lowerarm_r', elbow*1.6, 0);
+        // Per-class casting stances. Previously every class converged both hands on
+        // the sternum (measured hand gap 0.08-0.21 against an idle gap of ~0.42),
+        // which read as everyone folding their arms to cast. Each class now has its
+        // own silhouette, and the three melee classes cast like fighters rather than
+        // wizards. Remember the sign convention: for the LEFT arm a negative x aims
+        // outward, so hands are separated by pushing x away from zero, not toward it.
+        const ritual=Math.sin(time*7.5)*.045,heavy=rig.cls==='soul'||rig.cls==='storm';
+        const melee=rig.cls==='warrior'||rig.cls==='shadow'||rig.cls==='wind';
+        if(rig.cls==='flame'){
+          // Asymmetric fire throw: lead hand forward at the flame, off hand drawn back.
+          aimBone(rig,'upperarm_l',-.30,-.30+ritual,.90);aimBone(rig,'lowerarm_l',-.34,-.10,.93);
+          aimBone(rig,'upperarm_r',.52,-.44-ritual,.72);aimBone(rig,'lowerarm_r',.46,-.26,.85);
+        }else if(rig.cls==='storm'){
+          // Both arms open high and wide, calling the storm down.
+          aimBone(rig,'upperarm_l',-.66,.42+ritual,.62);aimBone(rig,'lowerarm_l',-.52,.62,.58);
+          aimBone(rig,'upperarm_r',.66,.42-ritual,.62);aimBone(rig,'lowerarm_r',.52,.62,.58);
+        }else if(rig.cls==='soul'){
+          // Low reaching curse: lead hand out and down, off hand clenched at the ribs.
+          aimBone(rig,'upperarm_l',-.54,-.46+ritual,.70);aimBone(rig,'lowerarm_l',-.48,-.34,.81);
+          aimBone(rig,'upperarm_r',.34,-.62-ritual,.70);aimBone(rig,'lowerarm_r',.30,-.10,.95);
+        }else if(rig.cls==='sage'){
+          // Open palms low and wide, coaxing growth upward.
+          aimBone(rig,'upperarm_l',-.58,-.44+ritual,.68);aimBone(rig,'lowerarm_l',-.44,.16,.88);
+          aimBone(rig,'upperarm_r',.58,-.44-ritual,.68);aimBone(rig,'lowerarm_r',.44,.16,.88);
+        }else if(rig.cls==='pala'){
+          // One arm raised to the light, the other held open at the side.
+          aimBone(rig,'upperarm_l',-.34,-.52+ritual,.78);aimBone(rig,'lowerarm_l',-.40,-.20,.89);
+          aimBone(rig,'upperarm_r',.44,.66-ritual,.60);aimBone(rig,'lowerarm_r',.30,.84,.44);
+        }else if(rig.cls==='disc'){
+          // Shielding gesture: both forearms forward and apart, palms out.
+          aimBone(rig,'upperarm_l',-.48,-.18+ritual,.86);aimBone(rig,'lowerarm_l',-.40,.10,.91);
+          aimBone(rig,'upperarm_r',.48,-.18-ritual,.86);aimBone(rig,'lowerarm_r',.40,.10,.91);
+        }else if(rig.cls==='warrior'){
+          // Martial: weapon arm thrust forward, off arm braced back at the hip.
+          aimBone(rig,'upperarm_r',.30,-.30-ritual,.90);aimBone(rig,'lowerarm_r',.24,-.06,.96);
+          aimBone(rig,'upperarm_l',-.52,-.66+ritual,.54);aimBone(rig,'lowerarm_l',-.44,-.44,.78);
+        }else if(rig.cls==='shadow'){
+          // Low coiled flick, off hand trailing behind the shoulder.
+          aimBone(rig,'upperarm_r',.38,-.56-ritual,.74);aimBone(rig,'lowerarm_r',.34,-.28,.89);
+          aimBone(rig,'upperarm_l',-.46,-.70+ritual,.52);aimBone(rig,'lowerarm_l',-.40,-.52,.74);
+        }else if(rig.cls==='wind'){
+          // Open palm strike forward, off hand chambered at the ribs.
+          aimBone(rig,'upperarm_l',-.34,-.20+ritual,.92);aimBone(rig,'lowerarm_l',-.30,.06,.95);
+          aimBone(rig,'upperarm_r',.46,-.58-ritual,.66);aimBone(rig,'lowerarm_r',.40,-.30,.86);
+        }else{
+          aimBone(rig,'upperarm_l',-.50,-.20+ritual,.84);aimBone(rig,'lowerarm_l',-.42,.08,.90);
+          aimBone(rig,'upperarm_r',.50,-.20-ritual,.84);aimBone(rig,'lowerarm_r',.42,.08,.90);
+        }
+        // Melee classes brace over a planted stance; casters settle and lean in.
+        setBone(rig,'spine_01',melee?-.02:(heavy?-.11:-.06),0);
+        setBone(rig,'spine_02',melee?-.04:(heavy?-.12:-.07),ritual*1.6);
+        setBone(rig,'spine_03',-.03,-ritual);
+        setBone(rig,'pelvis',melee?.02:.045,0);
+        setBone(rig,'thigh_l',melee?.20:.12,melee?-.16:-.10);setBone(rig,'thigh_r',melee?.20:.12,melee?.16:.10);
+        setBone(rig,'calf_l',melee?-.24:-.12,0);setBone(rig,'calf_r',melee?-.24:-.12,0);
       } else if(state.castFury){
-        // rapid alternating punches
-        const p=Math.sin(time*34);
-        armPose(rig,'l', RIG_T.castRaise*RIG_T.castSign*0.7 + p*0.5, -0.20);
-        armPose(rig,'r', RIG_T.castRaise*RIG_T.castSign*0.7 - p*0.5, -0.20);
-        setBone(rig,'lowerarm_l', elbow*2.0, 0);
-        setBone(rig,'lowerarm_r', elbow*2.0, 0);
+        // Fists of Fury is a martial channel, not a spell-cast pose. Alternate a
+        // guarded chamber and a fully extended punch while the hips, shoulders and
+        // planted legs drive each impact. The slower cadence keeps every fist legible.
+        const cycle=(time*4.6)%2,leftLead=cycle<1,phase=cycle%1,punch=Math.sin(phase*Math.PI),recoil=Math.sin(Math.min(1,phase/.28)*Math.PI*.5);
+        const lead=leftLead?'l':'r',guard=leftLead?'r':'l',side=leftLead?-1:1;
+        /* Both arms have to work. Previously the guard arm carried no punch term at
+           all and the lead arm moved through barely a tenth of a radian with z pinned
+           near 1, so the pair sat forward, together and effectively still. Now the lead
+           drives from a chamber at the ribs to full extension while the guard chambers
+           in counterpoint, and both use the outward lateral sign for their own side.
+           sl/sg are the outward direction for whichever arm is leading or guarding. */
+        const sl=lead==='l'?-1:1, sg=guard==='l'?-1:1;
+        const ext=punch, chamber=1-punch;
+        // Keep the impact line through the target's chest. Negative Y points the
+        // fist at the floor on this rig, which made the old channel look like it
+        // was hammering the ground instead of pummelling an opponent.
+        aimBone(rig,`upperarm_${lead}`, sl*(.46-.34*ext), -.20+.24*ext, .58+.40*ext);
+        aimBone(rig,`lowerarm_${lead}`, sl*(.52-.46*ext), -.16+.19*ext, .53+.46*ext);
+        aimBone(rig,`upperarm_${guard}`, sg*(.34+.20*chamber), -.24-.26*chamber, .74+.08*chamber);
+        aimBone(rig,`lowerarm_${guard}`, sg*(.40+.24*chamber), -.10-.34*chamber, .68+.12*chamber);
+        const drive=side*(.20+.34*punch),sink=.10+.07*punch;
+        setBone(rig,'pelvis',sink*.42,-drive*.34);
+        setBone(rig,'spine_01',-.08-.10*punch,drive*.70);
+        setBone(rig,'spine_02',-.10-.14*punch,drive);
+        setBone(rig,'spine_03',-.03-punch*.06,drive*.46);
+        setBone(rig,'neck_01',.04+punch*.05,-drive*.28);
+        // A wide martial base: the supporting knee compresses while the hip on
+        // the punching side drives forward. This keeps Fury out of the old T-pose.
+        aimBone(rig,`thigh_${lead}`,side*.05,-.95,.23);aimBone(rig,`calf_${lead}`,-side*.02,-.97,-.20);
+        aimBone(rig,`thigh_${guard}`,-side*.05,-.98,-.10);aimBone(rig,`calf_${guard}`,side*.02,-.95,-.28);
+        if(rig.root)rig.root.position.y+=(.014+.026*punch);
+        setBone(rig,`clavicle_${lead}`,-.03-punch*.08,-side*(.08+.10*recoil));
+        setBone(rig,`clavicle_${guard}`,.02,side*.05);
       } else if(state.melee!=null){
-        // Wind-up -> follow-through. Slicing Winds alternates hands so its
-        // three rapid strikes visibly travel left, right, left.
-        const s=state.meleeStrike||0; // 0..1..0
-        const ang=(RIG_T.meleeWind - (RIG_T.meleeWind+RIG_T.meleeSwing)*s)*RIG_T.meleeSign;
-        const left=Number(state.meleeSide||1)<0;
-        armPose(rig,left?'l':'r',ang,left ? .20 : -.20);
-        setBone(rig,left?'lowerarm_l':'lowerarm_r',elbow+s*.6,0);
-        armPose(rig,left?'r':'l',left?armR:armL);
-        setBone(rig,left?'lowerarm_r':'lowerarm_l',elbow,0);
-        setBone(rig,'spine_02',breathe+m*.05,(left?1:-1)*s*.25);
+        const p=Math.max(0,Math.min(1,state.meleeProgress??state.melee??0));
+        const style=state.meleeStyle||'generic',left=Number(state.meleeSide||1)<0,side=left?-1:1;
+        _atk=attackWeightFor(style);
+        const s=contactPulse(p);
+        const active=left?'l':'r',guard=left?'r':'l';
+        /* Pelvis-first kinetic chain. The hips open ahead of the swing and the chest
+           follows, so the strike reads as driven from the ground up rather than thrown
+           with the arm. Style branches below may override any of these. */
+        const pHip=phaseAt(p,_atk.lead),pChest=phaseAt(p,_atk.lead*.45);
+        const hipDrive=side*attackKey(pHip,-.30,.52,.24)*_atk.body;
+        const hipSink=attackKey(pHip,.06,.16,.08)*_atk.body;
+        setBone(rig,'pelvis',hipSink,hipDrive);
+        setBone(rig,'spine_01',attackKey(pChest,-.04,-.14,-.07)*_atk.body,side*attackKey(pChest,-.22,.40,.18)*_atk.body);
+        const generic=()=>{
+          const cut=attackKey(p,.42,-1.42,-.58)*RIG_T.meleeSign;
+          armPose(rig,active,cut,-side*.18);setBone(rig,`lowerarm_${active}`,elbow+s*.48,0);
+          armPose(rig,guard,left?armR:armL);setBone(rig,`lowerarm_${guard}`,elbow,0);
+          setBone(rig,'spine_02',breathe+m*.05,side*attackKey(p,-.20,.34,.18));
+        };
+        if(style==='shadowNight'){
+          const lead=attackKey(p,.34,-1.52,-.64),off=attackKey(p,-.28,-1.02,-.44),twist=side*attackKey(p,-.46,.68,.26);
+          armPose(rig,active,lead,-side*attackKey(p,.20,-.44,-.18));armPose(rig,guard,off,side*.28);
+          setBone(rig,`lowerarm_${active}`,elbow+attackKey(p,.18,.72,.36),-side*.10*s);setBone(rig,`lowerarm_${guard}`,elbow*1.45,side*.08*s);
+          setBone(rig,'spine_01',attackKey(p,-.05,-.19,-.08),twist*.55);setBone(rig,'spine_02',attackKey(p,.02,-.24,-.08),twist);setBone(rig,'spine_03',-.03,twist*.54);
+          setBone(rig,`clavicle_${active}`,-.08,-side*attackKey(p,-.12,.24,.08));setBone(rig,`clavicle_${guard}`,.03,side*.10);
+          setBone(rig,`thigh_${active}`,legL+.18*s,-side*.10*s);setBone(rig,`thigh_${guard}`,legR+.08*s,side*.08*s);
+        }else if(style==='shadowPounce'){
+          const thrust=attackKey(p,.24,-1.64,-.88);
+          armPose(rig,'l',thrust,-.18);armPose(rig,'r',thrust,.18);
+          setBone(rig,'lowerarm_l',elbow+attackKey(p,elbow*.5,-elbow-.05,-elbow*.35),0);setBone(rig,'lowerarm_r',elbow+attackKey(p,elbow*.5,-elbow-.05,-elbow*.35),0);
+          setBone(rig,'pelvis',attackKey(p,.10,.22,.08),side*attackKey(p,-.12,.18,.06));setBone(rig,'spine_01',attackKey(p,.04,-.32,-.18),0);setBone(rig,'spine_02',attackKey(p,.12,-.52,-.24),side*.10*s);setBone(rig,'spine_03',attackKey(p,.04,-.22,-.10),0);
+          setBone(rig,`clavicle_${active}`,-.10,-side*.12);setBone(rig,`clavicle_${guard}`,-.04,side*.06);setBone(rig,`thigh_${active}`,legL+.34*s,-side*.12);setBone(rig,`thigh_${guard}`,legR-.18*s,side*.08);
+        }else if(style==='shadowViper'){
+          const rip=attackKey(p,-.18,-1.72,-.46),twist=side*attackKey(p,.28,-.58,-.20);
+          armPose(rig,active,rip,side*attackKey(p,-.42,.46,.18));armPose(rig,guard,-.72,-side*.42);
+          setBone(rig,`lowerarm_${active}`,elbow+attackKey(p,.48,.10,.62),0);setBone(rig,`lowerarm_${guard}`,elbow*1.55,0);
+          setBone(rig,'spine_01',attackKey(p,-.02,-.18,-.06),twist*.55);setBone(rig,'spine_02',attackKey(p,.08,-.30,-.10),twist);setBone(rig,'spine_03',0,twist*.58);setBone(rig,`clavicle_${active}`,-.10,-side*attackKey(p,.10,-.28,-.08));setBone(rig,`clavicle_${guard}`,.04,side*.12);
+        }else if(style==='shadowRib'){
+          const jab=attackKey(p,.18,-1.48,-.72);
+          armPose(rig,active,jab,-side*.10);armPose(rig,guard,-.74,side*.48);
+          setBone(rig,`lowerarm_${active}`,elbow+attackKey(p,elbow*.65,-elbow-.10,-elbow*.52),-side*.08*s);setBone(rig,`lowerarm_${guard}`,elbow*1.62,0);
+          setBone(rig,'spine_01',attackKey(p,.02,-.16,-.08),side*attackKey(p,-.14,.22,.08));setBone(rig,'spine_02',attackKey(p,.12,-.38,-.18),side*attackKey(p,-.24,.38,.14));setBone(rig,`clavicle_${active}`,-.12,-side*.18*s);setBone(rig,`thigh_${active}`,legL+.20*s,-side*.08);
+        }else if(style==='shadowGarrote'){
+          const hook=attackKey(p,.22,-1.30,-.74),cross=attackKey(p,.18,.62,.24);
+          armPose(rig,'l',hook,-cross);armPose(rig,'r',hook,cross);
+          setBone(rig,'lowerarm_l',elbow+attackKey(p,.18,.72,.48),-.12*s);setBone(rig,'lowerarm_r',elbow+attackKey(p,.18,.72,.48),.12*s);
+          setBone(rig,'spine_01',attackKey(p,.04,-.18,-.08),side*attackKey(p,-.12,.20,.08));setBone(rig,'spine_02',attackKey(p,.06,-.34,-.15),side*attackKey(p,-.20,.34,.12));setBone(rig,'spine_03',attackKey(p,0,-.10,-.04),side*.12*s);setBone(rig,'clavicle_l',-.12,-.14*s);setBone(rig,'clavicle_r',-.12,.14*s);
+        }else if(style==='shadowShiv'||style==='shadowGouge'){
+          const snap=attackKey(p,.18,-1.58,-.92);
+          armPose(rig,active,snap,style==='shadowGouge'?-side*.38:-side*.10);armPose(rig,guard,-.74,side*.52);
+          setBone(rig,`lowerarm_${active}`,elbow+attackKey(p,elbow*.7,(style==='shadowGouge'?-.16:.02)-elbow,-elbow*.38),0);setBone(rig,`lowerarm_${guard}`,elbow*1.65,0);
+          setBone(rig,'spine_01',attackKey(p,.02,-.12,-.05),side*attackKey(p,-.12,.18,.06));setBone(rig,'spine_02',attackKey(p,.08,-.26,-.11),side*attackKey(p,-.20,.32,.11));setBone(rig,`clavicle_${active}`,-.10,-side*.22*s);setBone(rig,`clavicle_${guard}`,.02,side*.10);
+        }else if(style==='shadowKick'){
+          armPose(rig,'l',-.72,-.46);armPose(rig,'r',-.72,.46);setBone(rig,'lowerarm_l',elbow*1.7,0);setBone(rig,'lowerarm_r',elbow*1.7,0);
+          const kick=attackKey(p,.24,-1.34,-.34),knee=attackKey(p,.72,.10,.48);
+          setBone(rig,left?'thigh_l':'thigh_r',kick,side*.12*s);setBone(rig,left?'calf_l':'calf_r',knee,0);
+          setBone(rig,'pelvis',attackKey(p,.06,.18,.06),side*attackKey(p,-.18,.34,.10));setBone(rig,'spine_01',attackKey(p,.04,-.14,-.05),-side*attackKey(p,-.10,.18,.06));setBone(rig,'spine_02',attackKey(p,.08,-.22,-.07),-side*attackKey(p,-.24,.42,.14));setBone(rig,'spine_03',0,-side*.14*s);
+        }else if(style==='warriorMortal'||style==='warriorSlicing'){
+          const cut=attackKey(p,.58,-1.74,-.68),brace=attackKey(p,.28,-1.08,-.58),twist=side*attackKey(p,-.46,.62,.28);
+          armPose(rig,'r',cut,-side*attackKey(p,.24,-.40,-.18));armPose(rig,'l',brace,side*.18);
+          setBone(rig,'lowerarm_r',elbow+attackKey(p,.08,.70,.36),0);setBone(rig,'lowerarm_l',elbow*1.38+attackKey(p,.08,.32,.16),0);
+          setBone(rig,'spine_02',attackKey(p,.10,-.26,-.12),twist);setBone(rig,'spine_03',0,twist*.42);
+          setBone(rig,'thigh_l',legL+.22*s,0);setBone(rig,'thigh_r',legR+.22*s,0);
+        }else if(style==='warriorWarbreaker'){
+          const slam=attackKey(p,.86,-1.92,-.82),brace=attackKey(p,.62,-1.34,-.70);
+          armPose(rig,'r',slam,-.12);armPose(rig,'l',brace,.12);
+          setBone(rig,'lowerarm_r',elbow+attackKey(p,.10,.82,.42),0);setBone(rig,'lowerarm_l',elbow+attackKey(p,.18,.62,.34),0);
+          setBone(rig,'spine_02',attackKey(p,.18,-.44,-.20),side*attackKey(p,-.12,.22,.08));setBone(rig,'spine_03',attackKey(p,.08,-.18,-.08),0);
+          setBone(rig,'thigh_l',legL+.30*s,0);setBone(rig,'thigh_r',legR+.30*s,0);setBone(rig,'calf_l',kneeL-.16*s,0);setBone(rig,'calf_r',kneeR-.16*s,0);
+        }else if(style==='warriorVictory'){
+          const rise=attackKey(p,-.34,-1.74,-.46),twist=side*attackKey(p,.34,-.48,-.18);
+          armPose(rig,'r',rise,side*attackKey(p,-.36,.34,.12));armPose(rig,'l',-.82,-side*.18);
+          setBone(rig,'lowerarm_r',elbow+attackKey(p,.56,.16,.48),0);setBone(rig,'lowerarm_l',elbow*1.45,0);
+          setBone(rig,'spine_02',attackKey(p,.10,-.22,-.06),twist);setBone(rig,'spine_03',0,twist*.38);
+        }else if(style==='warriorRend'){
+          const rake=attackKey(p,-.22,-1.78,-.54),twist=side*attackKey(p,.42,-.64,-.22);
+          armPose(rig,'r',rake,side*attackKey(p,-.52,.44,.18));armPose(rig,'l',-.70,-side*.22);
+          setBone(rig,'lowerarm_r',elbow+attackKey(p,.52,.18,.58),0);setBone(rig,'lowerarm_l',elbow*1.48,0);
+          setBone(rig,'spine_02',attackKey(p,.12,-.28,-.12),twist);setBone(rig,'spine_03',0,twist*.40);
+        }else if(style==='warriorPummel'){
+          const kick=attackKey(p,.22,-1.24,-.32),knee=attackKey(p,.78,.08,.52);
+          armPose(rig,'l',-.74,-.48);armPose(rig,'r',-.90,.40);setBone(rig,'lowerarm_l',elbow*1.65,0);setBone(rig,'lowerarm_r',elbow*1.45,0);
+          setBone(rig,left?'thigh_l':'thigh_r',kick,side*.10*s);setBone(rig,left?'calf_l':'calf_r',knee,0);
+          setBone(rig,'spine_02',attackKey(p,.10,-.20,-.08),side*attackKey(p,-.16,.25,.08));
+        }else if(style==='warriorCharge'){
+          armPose(rig,'l',-.88,-.22);armPose(rig,'r',-1.18,.18);setBone(rig,'lowerarm_l',elbow*1.8,0);setBone(rig,'lowerarm_r',elbow*1.35,0);
+          setBone(rig,'spine_02',attackKey(p,.12,-.48,-.22),0);setBone(rig,'thigh_l',legL-.22*s,0);setBone(rig,'thigh_r',legR+.30*s,0);
+        }else if(style==='windZephyr'||style==='windDisrupt'){
+          const thrust=attackKey(p,.28,-1.54,-.78),twist=side*attackKey(p,-.24,.38,.16);
+          armPose(rig,active,thrust,-side*.08);armPose(rig,guard,-.82,side*.56);
+          setBone(rig,`lowerarm_${active}`,elbow+attackKey(p,elbow*.55,(style==='windDisrupt'?.14:-.10)-elbow,-elbow*.48),0);setBone(rig,`lowerarm_${guard}`,elbow*1.72,0);
+          setBone(rig,'spine_02',attackKey(p,.10,-.22,-.10),twist);setBone(rig,'spine_03',0,twist*.40);
+        }else if(style==='windCloudstep'||style==='windRising'||style==='windDisabling'){
+          armPose(rig,'l',-.70,-.58);armPose(rig,'r',-.70,.58);setBone(rig,'lowerarm_l',elbow*1.8,0);setBone(rig,'lowerarm_r',elbow*1.8,0);
+          const high=style==='windRising',kick=attackKey(p,.30,high?-1.56:-1.30,high?-.48:-.34),knee=attackKey(p,.82,.10,.50);
+          setBone(rig,left?'thigh_l':'thigh_r',kick,side*(high?.20:.12)*s);setBone(rig,left?'calf_l':'calf_r',knee,0);setBone(rig,left?'thigh_r':'thigh_l',.18*s,0);
+          setBone(rig,'spine_02',attackKey(p,.10,-.20,-.08),side*attackKey(p,-.24,.38,.14));
+        }else if(style==='windValley'){
+          armPose(rig,'l',-.48,-attackKey(p,.20,.70,.28));armPose(rig,'r',-.48,attackKey(p,.20,.70,.28));setBone(rig,'lowerarm_l',elbow*1.28,0);setBone(rig,'lowerarm_r',elbow*1.28,0);
+          setBone(rig,left?'thigh_l':'thigh_r',attackKey(p,.22,-.94,-.28),-side*.40);setBone(rig,left?'calf_l':'calf_r',attackKey(p,.82,.18,.46),0);
+          setBone(rig,'spine_02',attackKey(p,.18,-.34,-.14),side*attackKey(p,-.42,.72,.24));
+        }else if(style==='windCyclone'||style==='windWhirling'){
+          const turn=side*attackKey(p,-.52,.84,.36),high=style==='windWhirling';
+          armPose(rig,'l',-.74,-turn);armPose(rig,'r',-.74,turn);setBone(rig,'lowerarm_l',elbow*1.05,0);setBone(rig,'lowerarm_r',elbow*1.05,0);
+          setBone(rig,left?'thigh_l':'thigh_r',attackKey(p,.28,high?-1.42:-1.02,-.36),side*.18);setBone(rig,left?'calf_l':'calf_r',attackKey(p,.76,.12,.44),0);
+          setBone(rig,'spine_02',attackKey(p,.12,-.24,-.10),turn);setBone(rig,'spine_03',0,turn*.42);
+        }else if(style==='windWindlord'){
+          const sweep=attackKey(p,.36,-1.46,-.62),cross=attackKey(p,.38,-.58,-.20);
+          armPose(rig,'l',sweep,-cross);armPose(rig,'r',sweep,cross);setBone(rig,'lowerarm_l',elbow+attackKey(p,.12,.56,.30),0);setBone(rig,'lowerarm_r',elbow+attackKey(p,.12,.56,.30),0);
+          setBone(rig,'spine_02',attackKey(p,.12,-.28,-.10),side*attackKey(p,-.36,.54,.20));
+        }else if(style==='paladinRighteous'){
+          const cut=attackKey(p,.48,-1.66,-.68),twist=side*attackKey(p,-.34,.48,.20);
+          armPose(rig,'r',cut,-side*attackKey(p,.24,-.34,-.14));armPose(rig,'l',-1.20,-.50);
+          setBone(rig,'lowerarm_r',elbow+attackKey(p,.10,.68,.34),0);setBone(rig,'lowerarm_l',elbow*.74,0);
+          setBone(rig,'spine_02',attackKey(p,.08,-.20,-.08),twist);setBone(rig,'spine_03',0,twist*.38);
+        }else if(style==='paladinHammer'){
+          const hammer=attackKey(p,.78,-1.72,-.72);
+          armPose(rig,'r',hammer,.08);armPose(rig,'l',-1.18,-.48);setBone(rig,'lowerarm_r',elbow+attackKey(p,.16,.72,.38),0);setBone(rig,'lowerarm_l',elbow*.76,0);
+          setBone(rig,'spine_02',attackKey(p,.14,-.32,-.14),side*attackKey(p,-.16,.28,.10));setBone(rig,'thigh_l',legL+.16*s,0);setBone(rig,'thigh_r',legR+.16*s,0);
+        }else generic();
+
+        // Whole-body follow-through. Individual clips author the striking limb;
+        // this layer supplies stance, weight transfer and counter-balance so attacks
+        // read from the silhouette instead of leaving a rigid torso over static legs.
+        if(style.startsWith('shadow')){
+          // Shadowblade clips deliberately do not share one generic stance. Each
+          // action carries a different centre of mass, torso silhouette and foot
+          // plant so the ability remains readable even before its VFX appears.
+          const drive=side*attackKey(p,-.24,.52,.18),drop=attackKey(p,.02,.16,.05);
+          if(style==='shadowNight'){
+            setBone(rig,'pelvis',drop*.42,drive*.72);setBone(rig,'spine_01',-.05-drop*.62,drive*.82);setBone(rig,'neck_01',.02,-drive*.30);
+            setBone(rig,`thigh_${active}`,legL+.22*s,-side*.18*s);setBone(rig,`thigh_${guard}`,legR+.06*s,side*.14);setBone(rig,`calf_${active}`,kneeL-.18*s,0);
+          }else if(style==='shadowPounce'){
+            setBone(rig,'pelvis',.08+.18*s,drive*.20);setBone(rig,'spine_01',-.10-.30*s,drive*.18);setBone(rig,'neck_01',.08+.08*s,-drive*.10);
+          }else if(style==='shadowViper'){
+            setBone(rig,'pelvis',drop*.50,-drive*.58);setBone(rig,'spine_01',-.03-drop*.48,-drive*.82);setBone(rig,'neck_01',.01,drive*.34);
+            setBone(rig,`thigh_${active}`,legL+.08*s,side*.18*s);setBone(rig,`thigh_${guard}`,legR+.20*s,-side*.14);
+          }else if(style==='shadowRib'){
+            setBone(rig,'pelvis',.04+.14*s,drive*.30);setBone(rig,'spine_01',-.05-.23*s,drive*.42);setBone(rig,'neck_01',.03+.06*s,-drive*.18);
+            setBone(rig,`thigh_${active}`,legL+.34*s,-side*.10);setBone(rig,`calf_${active}`,kneeL-.25*s,0);setBone(rig,`thigh_${guard}`,legR-.12*s,side*.08);
+          }else if(style==='shadowGarrote'){
+            setBone(rig,'pelvis',.06+.13*s,-drive*.18);setBone(rig,'spine_01',-.07-.20*s,drive*.34);setBone(rig,'neck_01',.05+.09*s,-drive*.22);
+            setBone(rig,'thigh_l',legL+.18*s,-.20);setBone(rig,'thigh_r',legR+.18*s,.20);setBone(rig,'calf_l',kneeL-.18*s,0);setBone(rig,'calf_r',kneeR-.18*s,0);
+          }else if(style==='shadowGouge'){
+            setBone(rig,'pelvis',drop*.36,-drive*.26);setBone(rig,'spine_01',-.02-.10*s,-drive*.52);setBone(rig,'neck_01',-.03,drive*.28);
+            setBone(rig,`thigh_${active}`,legL+.12*s,-side*.18);setBone(rig,`thigh_${guard}`,legR+.02*s,side*.14);
+          }else if(style==='shadowShiv'){
+            setBone(rig,'pelvis',.03+.10*s,drive*.22);setBone(rig,'spine_01',-.07-.15*s,drive*.38);setBone(rig,'neck_01',.04,-drive*.18);
+            setBone(rig,`thigh_${active}`,legL+.23*s,-side*.08);setBone(rig,`calf_${active}`,kneeL-.20*s,0);
+          }else if(style==='shadowKick'){
+            setBone(rig,'pelvis',.06+.10*s,-drive*.72);setBone(rig,'spine_01',-.03-.12*s,-drive*.76);setBone(rig,'neck_01',.02,drive*.30);
+          }
+          setBone(rig,`clavicle_${active}`,-.03-s*.08,-side*.14*s);setBone(rig,`clavicle_${guard}`,.02,side*.08*s);
+        }else if(style.startsWith('warrior')){
+          const drive=attackKey(phaseAt(p,.07),-.64,1.02,.72),sink=attackKey(p,.10,.30,.14);
+          setBone(rig,'pelvis',sink*.72,drive*.70);setBone(rig,'spine_01',-.06-sink*.72,drive*.64);setBone(rig,'spine_02',-.03,attackKey(p,-.12,.22,.14));setBone(rig,'neck_01',.03+sink*.18,-drive*.25);
+          setBone(rig,'clavicle_r',-.04-s*.08,-drive*.20);setBone(rig,'clavicle_l',-.02-s*.04,drive*.12);
+          if(!['warriorPummel','warriorCharge'].includes(style)){setBone(rig,'thigh_l',legL+.12+sink,-.12);setBone(rig,'thigh_r',legR+.12+sink,.12);setBone(rig,'calf_l',kneeL-.12-sink*.58,0);setBone(rig,'calf_r',kneeR-.12-sink*.58,0);setBone(rig,'foot_l',.04+s*.04,0);setBone(rig,'foot_r',.04+s*.04,0);}
+        }else if(style.startsWith('wind')){
+          const drive=side*attackKey(p,-.30,.50,.18),spring=attackKey(p,.04,.18,.07);
+          setBone(rig,'pelvis',spring*.42,drive*.58);setBone(rig,'spine_01',-.04-spring*.62,drive*.72);setBone(rig,'neck_01',.02+spring*.16,-drive*.30);
+          setBone(rig,`clavicle_${active}`,-.03-s*.06,-side*.10*s);setBone(rig,`clavicle_${guard}`,.01,side*.07*s);
+          if(['windZephyr','windDisrupt','windWindlord'].includes(style)){setBone(rig,'thigh_l',legL+.10+spring,-.12);setBone(rig,'thigh_r',legR+.10+spring,.12);setBone(rig,'calf_l',kneeL-.10-spring*.55,0);setBone(rig,'calf_r',kneeR-.10-spring*.55,0);}
+          else{const support=left?'r':'l';setBone(rig,`calf_${support}`,-.18-spring*.55,0);setBone(rig,`foot_${support}`,.06,0);}
+        }else if(style.startsWith('paladin')){
+          const drive=side*attackKey(p,-.20,.38,.16),brace=attackKey(p,.05,.16,.07);
+          setBone(rig,'pelvis',brace*.52,drive*.36);setBone(rig,'spine_01',-.03-brace*.55,drive*.62);setBone(rig,'neck_01',.02,-drive*.22);
+          setBone(rig,'clavicle_r',-.04-s*.06,-drive*.18);setBone(rig,'clavicle_l',-.02,drive*.10);
+          setBone(rig,'thigh_l',legL+.10+brace,-.10);setBone(rig,'thigh_r',legR+.10+brace,.10);setBone(rig,'calf_l',kneeL-.10-brace*.45,0);setBone(rig,'calf_r',kneeR-.10-brace*.45,0);
+        }
+        // Finish every authored strike by aiming the actual limb chains at
+        // anatomical targets.  Imported AetherKit bones do not share the
+        // guessed Euler axes used by the legacy animator, which was the source
+        // of backward elbows, locked knees and attacks that barely moved.
+        poseMeleeLimbs(rig,style,p,side);
+        if(rig.root){
+          const leap=(style==='shadowPounce'||style==='windCloudstep')?.075:
+                     (style==='windRising'||style==='windWhirling')?.13:
+                     style==='windCyclone'?.065:0;
+          rig.root.position.y+=leap*Math.sin(Math.PI*p)+.014*contactPulse(p);
+        }
       } else {
-        armPose(rig,'l', armL);
-        armPose(rig,'r', armR);
-        setBone(rig,'lowerarm_l', elbow, 0);
-        setBone(rig,'lowerarm_r', elbow, 0);
+        // Casters and melee should not share one run. Melee drive a bigger, lower arm
+        // swing; casters keep a shorter, higher carry as if holding a focus ready.
+        const meleeCls=rig.cls==='warrior'||rig.cls==='shadow'||rig.cls==='wind';
+        const swingScale=meleeCls?.42:.22, carry=meleeCls?.02:.16, fArm=meleeCls?.16:.30;
+        const armForwardL=-Math.sin(t)*swingScale*m,armForwardR=-Math.sin(t+Math.PI)*swingScale*m;
+        // Idle/run arms. The forearm needs a far stronger lateral component than the
+        // upper arm: aiming it mostly downward swings the hand back across the belly,
+        // which buried both hands inside the torso and read as missing arms. Measured
+        // against the rig, this hangs the hand at ~0.21 from the centreline, just
+        // outside the shoulder joint at 0.18 and under the elbow at 0.25.
+        aimBone(rig,'upperarm_l',-.24,-.955,armForwardL+.06+carry*m);aimBone(rig,'upperarm_r',.24,-.955,armForwardR+.06+carry*m);
+        aimBone(rig,'lowerarm_l',-1.00,-.42,.20+fArm*m+Math.max(0,-armForwardL)*.34);aimBone(rig,'lowerarm_r',1.00,-.42,.20+fArm*m+Math.max(0,-armForwardR)*.34);
+        // Melee lean into the run; casters stay upright to keep the focus level.
+        if(m>.01)setBone(rig,'spine_01',(meleeCls?-.10:-.04)*m,0);
       }
       if(state.mounted){
         // Saddle pose tuned from the visible model: opposite thigh-twist signs
@@ -465,18 +896,72 @@ const AetherKit=(()=>{
         setBone(rig,'lowerarm_r', elbow*1.42, 0);
       }
       const weaponRoots=rig.weaponRoots||[];
-      weaponRoots.forEach(root=>{if(root.userData.restQuat)root.quaternion.copy(root.userData.restQuat);});
+      weaponRoots.forEach(root=>{
+        root.visible=!state.castFury;
+        const aim=root.userData.gripAim;
+        /* Calibrate the grip once, on the first settled idle frame, against the hand as
+           it is actually posed. Baking it at build time used the T-pose hand, which is
+           why each rig drifted by a different amount and the Male_Ranger weapons ended
+           up pointing inward. Re-aiming every frame fixed the direction but pinned the
+           weapon in character space, so it stopped inheriting the arm's swing arc.
+           Calibrating once and then holding a constant local rotation gives both: a
+           correct outward rest aim, and a weapon that travels with the arm. */
+        if(aim&&rig.root&&root.parent){
+          if(!root.userData.gripFixed&&state.melee==null&&!state.spell&&!state.castFury&&(state.motion||0)<.02){
+            _gq.copy(rig.root.getWorldQuaternion(_gq2)).multiply(aim);
+            root.userData.gripFixed=root.parent.getWorldQuaternion(_gq3).invert().multiply(_gq).clone();
+          }
+          if(root.userData.gripFixed)root.quaternion.copy(root.userData.gripFixed);
+          else if(root.userData.restQuat)root.quaternion.copy(root.userData.restQuat);
+        }else if(root.userData.restQuat)root.quaternion.copy(root.userData.restQuat);
+      });
       if(state.melee!=null){
-        const slash=state.meleeStrike||0;
-        weaponRoots.forEach((root,i)=>{const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(-.34*slash,(i?-.28:.28)*slash,-1.08*slash*(i?-.75:1)));root.quaternion.multiply(q);});
+        const p=Math.max(0,Math.min(1,state.meleeProgress??state.melee??0)),style=state.meleeStyle||'generic',side=Number(state.meleeSide||1)<0?-1:1;
+        _atk=attackWeightFor(style);
+        /* The weapon is the last link in the chain, so it trails the body through
+           anticipation and early acceleration and then whips through the strike.
+           Sampling the curve slightly behind the body is what sells the weight. */
+        const slash=contactPulse(phaseAt(p,-_atk.lag));
+        weaponRoots.forEach((root,i)=>{let e;
+          // Weapons already inherit the animated hand. Only articulate the grip here;
+          // the former 70–100 degree counter-rotation made blades swing against the body.
+          if(style==='shadowKick')e=new THREE.Euler(-.12*slash,(i?-.12:.12)*slash,(i?-.28:.28)*slash);
+          else if(style.startsWith('shadow'))e=new THREE.Euler(-.12*slash,(i?-.08:.08)*slash,-side*(i?-1:1)*.20*slash);
+          else if(style.startsWith('warrior'))e=new THREE.Euler(-.18*slash,-.06*side*slash,-.24*side*slash);
+          else if(style.startsWith('wind'))e=new THREE.Euler(-.10*slash,(i?-.08:.08)*slash,-side*.18*slash);
+          else if(style.startsWith('paladin'))e=i?new THREE.Euler(-.05*slash,.05*slash,.08*slash):new THREE.Euler(-.14*slash,-.06*side*slash,-.22*side*slash);
+          else e=new THREE.Euler(-.12*slash,(i?-.08:.08)*slash,-.20*slash*(i?-.75:1));
+          root.quaternion.multiply(new THREE.Quaternion().setFromEuler(e));
+        });
       }else if(state.spell){
         weaponRoots.forEach((root,i)=>{const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(.12*Math.sin(time*7+i),0,.18*Math.sin(time*4+i)));root.quaternion.multiply(q);});
       }
-      if(rig.weaponTrail){const active=state.melee!=null;rig.weaponTrail.visible=active;rig.weaponTrail.material.opacity=active?.18+.68*(state.meleeStrike||0):0;rig.weaponTrail.scale.setScalar(1+(state.meleeStrike||0)*.4);rig.weaponTrail.rotation.z=-.7*(state.meleeStrike||0);}
+      if(rig.weaponTrail){const active=state.melee!=null,p=active?Math.max(0,Math.min(1,state.meleeProgress??state.melee??0)):0,contact=active?contactPulse(phaseAt(p,-_atk.lag)):0;rig.weaponTrail.visible=active&&contact>.04;rig.weaponTrail.material.opacity=active?.10+.56*contact:0;rig.weaponTrail.scale.setScalar(1+contact*.25);rig.weaponTrail.rotation.z=-Number(state.meleeSide||1)*.34*contact;}
       if(rig.spellFocus){rig.spellFocus.visible=!!state.spell;if(state.spell){const forge=.86+.34*Math.sin(time*10);rig.spellFocus.scale.setScalar(forge);rig.spellFocus.rotation.y+=dt*4.4;rig.spellFocus.children.forEach((p,i)=>{if(p.material)p.material.opacity=.52+.34*Math.sin(time*8+i);});}}
       const weaponParts=rig.weaponGlowParts||[];
       weaponParts.forEach((part,i)=>{if(part.material&&part.material.emissiveIntensity!==undefined)part.material.emissiveIntensity=.76+.48*Math.sin(time*4.7+i*.8)+(state.melee!=null||state.spell ? .44 : 0);});
       if(rig.weaponIllusion&&rig.weaponIllusion.tick)rig.weaponIllusion.tick(time,dt,state);
+      /* Settle. An attack used to end on its last frame and the very next frame
+         rendered the idle pose, which popped. Ease each posed bone toward the target
+         instead: effectively rigid through anticipation and the strike so impacts stay
+         crisp, then soft through recovery and the return to idle. */
+      const striking=state.melee!=null&&Math.max(0,Math.min(1,state.meleeProgress??state.melee??0))<_atk.contact;
+      /* Remember when a strike released so the first moments back in idle ease harder
+         than normal idle does; that is where the pop used to live. */
+      if(state.melee!=null)rig.__meleeEndAt=time;
+      const sinceAttack=rig.__meleeEndAt===undefined?9:(time-rig.__meleeEndAt);
+      const settleRate=striking?200:(state.melee!=null?20:(sinceAttack<.26?7:13));
+      const k=1-Math.exp(-Math.max(.0001,dt)*settleRate);
+      if(k<.999){
+        let prev=rig.__poseSmooth;
+        if(!prev)prev=rig.__poseSmooth={};
+        for(const name of SMOOTH_BONES){
+          const b=rig.bones[name]; if(!b)continue;
+          const last=prev[name];
+          if(last)b.quaternion.copy(last.slerp(b.quaternion,k));
+          else prev[name]=b.quaternion.clone();
+        }
+      }
     }catch(e){ /* never let animation crash the frame */ }
   }
 
@@ -642,9 +1127,9 @@ const AB={
  ],
  shadow:[
   {name:'Night Slash',icon:'🗡️',type:'damage',school:'physical',range:3.9,cast:0,cd:0,cost:18,value:59,tip:'Strike the selected enemy for 59 physical damage. Each hit builds a Shadow Mark; at 3 marks, Viper Cut becomes empowered.'},
-  {name:'Umbral Pounce',icon:'🌑',type:'leap',school:'shadow',range:18,cast:0,cd:14,cost:24,value:90,tip:'Leap to an enemy and strike for 90 damage. For 1.5 sec after landing, gain a 50% chance to dodge each incoming melee attack.'},
+  {name:'Umbral Pounce',icon:'🌑',type:'leap',school:'shadow',range:18,cast:0,cd:14,cost:24,value:90,tip:'Leap to an enemy and strike for 90 damage. For 1.5 sec after landing, move 30% faster and gain a 50% chance to dodge each incoming melee attack.'},
   {name:'Viper Cut',icon:'🦂',type:'dot',school:'shadow',range:3.9,cast:0,cd:9,cost:25,value:70,tip:'Deal 70 damage and poison the enemy for 8 sec. Consumes Venom Edge for a stronger strike and poison.'},
-  {name:'Smoke Veil',icon:'🌫️',type:'defensive',school:'shadow',range:0,cast:0,cd:38,cost:0,value:0,tip:'Reduce damage taken by 35% for 4 sec and gain +10% damage for 8 sec. Arms your next Night Slash to Cheap Shot for 3 sec and your next Ribbreaker to deploy Smoke Bomb.'},
+  {name:'Smoke Veil',icon:'🌫️',type:'defensive',school:'shadow',range:0,cast:0,cd:38,cost:0,value:0,tip:'Vanish into a smoke veil and gain +10% damage for 8 sec. Arms your next Night Slash to Cheap Shot for 3 sec and your next Ribbreaker to deploy Smoke Bomb.'},
   {name:'Blind',icon:'👁️',type:'blind',school:'shadow',range:15,cast:0,cd:40,cost:15,value:5,tip:'Blind the selected enemy, preventing actions for 5 sec. Damage breaks the effect. Long 40 sec setup cooldown.'},
   {name:'Ribbreaker',icon:'🩸',type:'singleStun',school:'physical',range:3.8,cast:0,cd:20,cost:30,value:35,tip:'Strike for 35 damage and stun the enemy for 4 sec. Landing it empowers your next Night Slash into Eviscerate for 45% more damage. With the Vendetta branch learned, Ribbreaker also applies Internal Bleeding for 6 sec. After Smoke Veil, it deploys Smoke Bomb.'},
   {name:'Shadow Kick',icon:'🥾',type:'shadowInterrupt',school:'physical',range:3.8,cast:0,cd:15,cost:10,value:36,tip:'Off-global melee kick. Deals 36 damage and, if the target is casting, interrupts and locks that school for 3 sec.'}
@@ -832,7 +1317,7 @@ const soulFear=AB.soul.find(a=>a.name==='Fear');if(soulFear)soulFear.cd=6;
 const soulSiphon=AB.soul.find(a=>a.name==='Essence Siphon');if(soulSiphon)soulSiphon.tip='Channel for 2.5 sec, draining the target every 0.5 sec and healing yourself. Soul Scar and Creeping Torment strengthen each tick. Press Essence Siphon again to stop the channel early.';
 Object.assign(TALENT_UNLOCKED_ABILITIES.shadow,{
  shadow_gouge:{name:'Gouge',icon:'👁️',type:'gouge',school:'shadow',range:5,cast:0,cd:24,cost:16,value:3,tip:'Gouge the eyes of a nearby enemy, preventing them from moving or acting for 3 sec. Any direct or periodic damage can end Gouge early. Learning Gouge also increases all Shadowblade damage by 10%.'},
- shadow_sap:{name:'Crimson Vial',icon:'🧪',type:'crimsonVial',school:'shadow',range:0,cast:0,cd:28,cost:0,value:.015,tip:'Drink a Crimson Vial and restore 1.5% of your maximum health every 1 sec for 10 sec, for 15% total health. This healing ignores dampening.'},
+ shadow_sap:{name:'Crimson Vial',icon:'🧪',type:'crimsonVial',school:'shadow',range:0,cast:0,cd:28,cost:0,value:.025,tip:'Restore 2.5% maximum health every second for 6 sec. Each different poison or bleed you have on one enemy within 25m adds 0.5% healing per tick, up to three effects (4% per tick). Uses the enemy with the most effects; does not stack across enemies. This healing ignores dampening. While active, deal 25% less damage.'},
  shadow_crimson_vial:{name:'Evasion',icon:'💨',type:'evasion',school:'shadow',range:0,cast:0,cd:38,cost:0,value:0,tip:'For 8 sec, gain a 70% chance to dodge incoming melee attacks. Evasion does not protect against spells or damage-over-time effects.'},
  shadow_shadowstep:{name:'Vendetta',icon:'🎯',type:'vendetta',school:'shadow',range:24,cast:0,cd:60,cost:6,value:0,tip:'Mark an enemy for 10 sec. Your Garrote, Internal Bleeding, poisons and bleeds tick twice as fast on that target. Vendetta does not add a separate flat damage bonus.'}
 });
@@ -843,6 +1328,10 @@ for(const cls of ['sage','pala','disc']){
  (AB[cls]||[]).forEach(a=>{if(a.cost>0)a.cost=Math.max(.5,Math.round(a.cost*.95*10)/10);});
  Object.values(TALENT_UNLOCKED_ABILITIES[cls]||{}).forEach(a=>{if(a.cost>0)a.cost=Math.max(.5,Math.round(a.cost*.95*10)/10);});
 }
+
+// Stormwarden pays 10% more mana for every baseline spell. Learned spells receive
+// the same increase after their existing talent-cost reduction in the sync step.
+(AB.storm||[]).forEach(a=>{if(a.cost>0)a.cost=Math.round(a.cost*1.10*10)/10;});
 
 // Spell descriptions are written as player instructions, not patch notes. The
 // renderer also adds a consistent targeting sentence to every spell so a new
@@ -869,7 +1358,7 @@ const ABILITY_TOOLTIP_REWRITES={
  'Meteor':'Choose a location within 25m. After a short warning, a meteor lands for 205 Fire damage to enemies in a 5.2m area and burns them for 5 sec. When it lands, your next Ember Lance deals 15% more damage, has its cooldown reset and can be fired between your other abilities.',
  'Shadowfury':'Choose a location within 20m. Enemies in the 4.5m circle take 42 Shadow damage and are stunned for 3 sec. Casting Shadowfury also makes your next Pandemic Bloom deal 20% more damage for 8 sec.',
  'Summon Infernal':'Choose a location within 22m. An Infernal crashes into the 5m area, dealing 90 Shadow damage and stunning enemies for 2 sec. Enemies struck by its landing or Immolation take 10% increased damage for 10 sec. It remains for 10 sec with 25% of your maximum health, chases the nearest enemy, damages enemies within 8m for 50 every 2 sec and restores 4 mana every second. Enemies can target and destroy it.',
- 'Umbral Pounce':'Leap to an enemy and strike for 90 damage. For 1.5 sec after landing, you have a 50% chance to dodge each incoming melee attack. This can be used immediately between your other abilities.',
+ 'Umbral Pounce':'Leap to an enemy and strike for 90 damage. For 1.5 sec after landing, move 30% faster and gain a 50% chance to dodge each incoming melee attack. This can be used immediately between your other abilities.',
  'Evasion':'For 8 sec, you have a 70% chance to dodge each incoming melee attack. It does not protect against spells or damage-over-time effects.',
  'Renewal Tide':'Instantly restore 782 health to yourself or an ally. Each cast also empowers your next Verdant Mend by 150%, making that heal 2.5 times as strong.',
  'Verdant Mend':'After a 1.5 sec cast, restore 202 health to yourself or an ally. If Renewal Tide has empowered this spell, the bonus is consumed and Verdant Mend heals for 150% more.',
@@ -891,7 +1380,7 @@ const ABILITY_TOOLTIP_REWRITES={
  'Victory Rush':'Strike an enemy and heal yourself. If Shield Wall has prepared Victory Rush, this cast consumes that preparation and heals 60% more.',
  'Mortal Swing':'Strike an enemy in melee range. Pummel can empower the next Mortal Swing by 30%; Warbreaker can add another 30% and trigger Slicing Winds; Sharpen Blade can make the hit reduce healing received.',
  'Pummel':'Interrupt an enemy cast and lock that spell school for 3 sec. A successful interrupt empowers your next Mortal Swing by 30%, plus 2% per Pummel Chain rank. This can be used immediately between your other abilities.',
- 'Bladestorm':'Spin for 4 sec while moving, repeatedly damaging and slowing nearby enemies. You are immune to stuns, roots and slows during the channel. Press Bladestorm again to cancel it. Every hit can trigger Shadowmoon Soul Fragments.',
+ 'Bladestorm':'Spin for 4 sec while moving, repeatedly damaging and slowing nearby enemies. You are immune to stuns, roots, slows, Fear and Hex during the channel. Press Bladestorm again to cancel it. Every hit can trigger Shadowmoon Soul Fragments.',
  'Living Bomb':'Apply a removable 6 sec fire effect. If it is not cleansed before expiring, it explodes for heavy area damage. It can be used immediately between your other abilities.',
  'Alter Time':'Save your health and location for 5 sec. Press Alter Time again, or let the effect expire, to return to that saved state. Its 60 sec cooldown begins when you return.',
  'Combustion':'For 8 sec, gain 80% critical strike chance and cast spells 15% faster. It can be activated immediately without delaying another ability.',
@@ -929,7 +1418,7 @@ const ABILITY_TOOLTIP_REWRITES={
  ,'Judgement':'Deal 165 Holy damage to an enemy, restore 8 mana and heal nearby allies for 101 health.'
  ,'Word of Glory':'Instantly restore 264 health to yourself or an ally. Use it for emergency recovery when there is no time to cast Holy Light.'
  ,'Blinding Light':'Disorient an enemy for 5 sec. Damage breaks the effect, and repeated incapacitating effects on the same target have shorter durations.'
- ,'Crimson Vial':'Drink a Crimson Vial and restore 1.5% of your maximum health every 1 sec for 10 sec, for 15% total health. This healing ignores dampening.'
+ ,'Crimson Vial':'Restore 2.5% maximum health every second for 6 sec. Each different poison or bleed you have on one enemy within 25m adds 0.5% healing per tick, up to three effects (4% per tick). Uses the enemy with the most effects; does not stack across enemies. This healing ignores dampening. While active, deal 25% less damage.'
  ,'Gouge':'Gouge the eyes of a nearby enemy, preventing them from moving or acting for 3 sec. Any direct or periodic damage can end Gouge early. Learning Gouge also increases all Shadowblade damage by 10%.'
  ,'Shiv':'Strike an enemy in melee range for 36 damage and slow them by 65% for 4 sec. Your poison damage against that target is increased by 30% for 8 sec.'
  ,'Viper Cut':'Strike an enemy for 70 damage and poison them for 8 sec. Consumes Venom Edge for a stronger initial strike and stronger poison.'
@@ -967,9 +1456,14 @@ function refreshAbilityTooltips(){
  Object.values(AB).flat().forEach(a=>{a.tip=playerFacingAbilityTooltip(a);});
  Object.values(TALENT_UNLOCKED_ABILITIES).flatMap(defs=>Object.values(defs||{})).forEach(a=>{a.tip=playerFacingAbilityTooltip(a);});
 }
+TALENT_UNLOCKED_ABILITIES.wind.wind_reverse_harm={name:'Reverse Harm',icon:'☯️',type:'reverseHarm',school:'nature',range:0,cast:0,cd:10,cost:0,value:.16,tip:'Heal yourself for 16% of your maximum health, ignoring dampening. Deal Nature damage equal to the health actually restored to the nearest enemy within 5m.'};
+SELF_ABILITY_TYPES.add('reverseHarm');
 refreshAbilityTooltips();
+for(const a of AB.pala)if(a.type==='bestowFaith')a.cost=0;
+TALENT_UNLOCKED_ABILITIES.pala.pala_judgement.cost=0;
+for(const cls of ['warrior','shadow','wind','pala'])for(const a of [...AB[cls],...Object.values(TALENT_UNLOCKED_ABILITIES[cls]||{})])if(a.range>0&&a.range<=5&&!SELF_ABILITY_TYPES.has(a.type))a.range+=.5;
 
-const SUPPORTED_TALENT_ABILITY_TYPES=new Set(['damage','heal','hot','bigHeal','shield','shieldSelf','defensive','warriorGuard','sharpenBlade','intercept','avatar','passiveOnly','monkDefensive','ironbark','natureSwiftness','undyingResolve','buff','blind','gouge','fear','cleanse','freedom','guardianAngel','root','slow','singleStun','groundStun','summonInfernal','windStun','leap','push','dot','livingBomb','combustion','flameShield','evasion','cloak','crimsonVial','internalBleeding','vendetta','totemMastery','healingStreamTotem','stormkeeper','frostShock','karma','tigereyeBrew','soulDrain','chaosBolt','holyShock','windlordStrike','chiBurst','touchOfDeath','stormbolt','fistsChannel','whirlingDragonPunch','meteor','bladestorm','warbreaker','victoryRush','shiv','tigersLust','bestowFaith','ghanir','flameShock','volcanicEruption','avengingWings','archangel','darkArchangel','angelicBody','alterTime']);
+const SUPPORTED_TALENT_ABILITY_TYPES=new Set(['reverseHarm','damage','heal','hot','bigHeal','shield','shieldSelf','defensive','warriorGuard','sharpenBlade','intercept','avatar','passiveOnly','monkDefensive','ironbark','natureSwiftness','undyingResolve','buff','blind','gouge','fear','cleanse','freedom','guardianAngel','root','slow','singleStun','groundStun','summonInfernal','windStun','leap','push','dot','livingBomb','combustion','flameShield','evasion','cloak','crimsonVial','internalBleeding','vendetta','totemMastery','healingStreamTotem','stormkeeper','frostShock','karma','tigereyeBrew','soulDrain','chaosBolt','holyShock','windlordStrike','chiBurst','touchOfDeath','stormbolt','fistsChannel','whirlingDragonPunch','meteor','bladestorm','warbreaker','victoryRush','shiv','tigersLust','bestowFaith','ghanir','flameShock','volcanicEruption','avengingWings','archangel','darkArchangel','angelicBody','alterTime']);
 function validateTalentAbilityDefinitions(){
  const missing=[];
  Object.entries(TALENT_UNLOCKED_ABILITIES||{}).forEach(([cls,defs])=>{
@@ -994,22 +1488,25 @@ function sanitizeWindwalkerAbilities(){
 function syncTalentUnlockedAbilities(){
  if(typeof AB==='undefined'||typeof progression==='undefined')return;sanitizeWindwalkerAbilities();
  if(!window.__AB_BASE)window.__AB_BASE=Object.fromEntries(Object.entries(AB).map(([k,v])=>[k,v.map(a=>({...a}))]));
+ let repairedTalentPool=false;
  if(typeof TALENT_TREES!=='undefined')Object.keys(TALENT_TREES).forEach(cls=>{
   const saved=progression.talents?.[cls];if(!saved)return;
-  pruneTalentCapstoneOverflow(TALENT_TREES[cls],saved);
+  if(pruneTalentCapstoneOverflow(TALENT_TREES[cls],saved))repairedTalentPool=true;
   /* Drop ranks saved against nodes that no longer exist, so removed talents do not
      keep eating points out of the budget. */
   const ids=new Set((TALENT_TREES[cls]||[]).map(n=>n.id));
   Object.keys(saved).forEach(id=>{if(!ids.has(id))delete saved[id];});
  });
+ if(repairedTalentPool)saveProgression();
  Object.keys(window.__AB_BASE).forEach(cls=>{
   const learned=progression.talents?.[cls]||{};
   AB[cls]=window.__AB_BASE[cls].map(a=>({...a}));
+  if(cls==='flame'&&learned.flame_glacial_recovery){const ice=AB[cls].find(a=>a.type==='iceBlock');if(ice){ice.cd=40;ice.tip=ice.tip.replace('20%','26%');}}
   const defs=TALENT_UNLOCKED_ABILITIES[cls]||{};
   Object.entries(defs).forEach(([talentId,ability])=>{
    if((learned[talentId]||0)<=0||ability.type==='passiveOnly')return;
    const tuned={...ability,talentAbility:true};
-   if(tuned.cost&&!['sage','pala','disc'].includes(cls))tuned.cost=Math.max(1,Math.ceil(tuned.cost*.30));
+   if(tuned.cost&&!['sage','pala','disc'].includes(cls))tuned.cost=cls==='storm'?Math.round(Math.max(1,Math.ceil(tuned.cost*.30))*1.10*10)/10:Math.max(1,Math.ceil(tuned.cost*.30));
    if(cls==='soul'&&talentId==='soul_void_mend'){
     const replaced=AB[cls].findIndex(a=>a.name==='Unstable Affliction');
     if(replaced>=0)AB[cls].splice(replaced,1,tuned);
@@ -1027,10 +1524,50 @@ function syncTalentUnlockedAbilities(){
  if(window.game&&game.player){const needed=AB[game.player.cls].length;while(game.player.cds.length<needed)game.player.cds.push(0);}
 }
 
+// Each opponent owns its build and ability order. Never borrow the player's
+// selected talents just because both characters share a class.
+function buildUnitAbilities(cls,learned){
+ const list=(window.__AB_BASE?.[cls]||AB[cls]).map(a=>({...a}));
+ for(const [id,a] of Object.entries(TALENT_UNLOCKED_ABILITIES[cls]||{})){
+  if(!learned[id]||a.type==='passiveOnly')continue;
+  const tuned={...a,talentAbility:true};
+  if(tuned.cost&&!['sage','pala','disc'].includes(cls))tuned.cost=cls==='storm'?Math.round(Math.max(1,Math.ceil(tuned.cost*.30))*1.10*10)/10:Math.max(1,Math.ceil(tuned.cost*.30));
+  if(cls==='soul'&&id==='soul_void_mend'){
+   const i=list.findIndex(x=>x.name==='Unstable Affliction');if(i>=0)list[i]=tuned;else list.push(tuned);
+   const j=list.findIndex(x=>x.name==='Creeping Torment');if(j>=0)list[j]={...CHAOS_IMMOLATE_ABILITY};
+  }else if(!list.some(x=>x.name===a.name))list.push(tuned);
+ }
+ if(cls==='flame'&&learned.flame_glacial_recovery){const ice=list.find(a=>a.type==='iceBlock');if(ice){ice.cd=40;ice.tip=ice.tip.replace('20%','26%');}}
+ return list;
+}
+function randomBotTalents(cls,random=Math.random,budget=26){
+ const tree=talentTree(cls),ranks={};
+ // Per-match priorities keep a coherent build rather than independently
+ // rerolling individual decisions during combat.
+ const priority=new Map(tree.map(n=>[n.id,random()]));
+ for(let i=0;i<budget;i++){
+  const legal=tree.filter(n=>(ranks[n.id]||0)<n.max&&(!n.req?.length||n.req.some(id=>ranks[id]>0))&&!talentCapstoneBlocked(tree,id=>ranks[id]||0,n)&&(!n.choice||!tree.some(x=>x.id!==n.id&&x.choice===n.choice&&ranks[x.id]>0)));
+  legal.sort((a,b)=>(priority.get(b.id)+(b.unlockAbility?.35:0))-(priority.get(a.id)+(a.unlockAbility?.35:0)));
+  if(!legal.length)break;const node=legal[0];ranks[node.id]=(ranks[node.id]||0)+1;
+ }
+ return ranks;
+}
+function unitAbilities(unit){return unit?.botAbilities||AB[unit?.cls]||[];}
+function crimsonVialBonus(unit){
+ let count=0;
+ for(const enemy of unit.game.units){
+  if(!enemy.alive||enemy.team===unit.team||dist(unit,enemy)>25)continue;
+  const types=new Set(enemy.effects.filter(e=>e.time>0&&e.source===unit&&['poison','bleed'].includes(e.type)).map(e=>e.label||e.type));
+  count=Math.max(count,types.size);
+ }
+ return Math.min(3,count)*.005;
+}
+
 const EFFECT_META={volcanicEruptionReady:{label:'Volcanic Eruption Ready',icon:'🌋',buff:true},pandemicSurge:{label:'Pandemic Bloom +20%',icon:'🌑',buff:true},staticAegisGuard:{label:'Static Aegis Guard',icon:'🛡️',buff:true},furyStun:{label:'Pummeled',icon:'🥊',cc:true},stun:{label:'Stunned',icon:'⛔',cc:true},fear:{label:'Feared',icon:'😱',cc:true},poly:{label:'Polymorph',icon:'🐑',cc:true},sleep:{label:'Slumber',icon:'🌸',cc:true},blind:{label:'Blinded',icon:'👁️',cc:true},gouge:{label:'Gouged',icon:'👁️',cc:true},windIncap:{label:'Incapacitated',icon:'💫',cc:true},root:{label:'Rooted',icon:'🕸️',cc:true},slow:{label:'Snared',icon:'🐌',cc:true},frostShockAmp:{label:'Frost Shock · Arc/Fork +15%',icon:'❄️'},instantBolt:{label:'Hot Streak',icon:'✨',buff:true},interruptPower:{label:'Counterflare',icon:'🔶',buff:true},stormChance:{label:'Surge Chance',icon:'🎲',buff:true},tempestBolts:{label:'Tempest Bolts',icon:'⚡',buff:true},overload:{label:'Volcanic Overload',icon:'🌋',buff:true},cloudstepDashCd:{label:'Dash Recharge',icon:'💨',buff:true},shadowMarks:{label:'Shadow Marks',icon:'🗡️',buff:true},venomEdge:{label:'Venom Edge',icon:'🦂',buff:true},smokePower:{label:'Veiled Assault',icon:'🌫️',buff:true},evasion:{label:'Evasion',icon:'💨',buff:true},eviscerateReady:{label:'Eviscerate Ready',icon:'⚔️',buff:true},cheapReady:{label:'Cheap Shot Ready',icon:'🔪',buff:true},smokeBombReady:{label:'Smoke Bomb Ready',icon:'💣',buff:true},smokeBomb:{label:'Smoke Bomb',icon:'⚫',cc:true},cheapStun:{label:'Cheap Shot',icon:'🔪',cc:true},flow:{label:'Flow',icon:'👊',buff:true},tempestFlow:{label:'Tempest Flow',icon:'🌪️',buff:true},furyReady:{label:'Fury Ready',icon:'🥊',buff:true},furySequence:{label:'Fury Chain',icon:'☯️',buff:true},cinderStacks:{label:'Cinders',icon:'🔥',buff:true},meteorICD:{label:'Meteor CD',icon:'☄️',buff:true},meteorLance:{label:'Meteor Lance Ready',icon:'☄️',buff:true},soulScar:{label:'Soul Scar',icon:'🕯️'},agony:{label:'Torment',icon:'🪬'},unstableAffliction:{label:'Unstable Affliction',icon:'🟣'},interruptWard:{label:'Soul Barrier Ward',icon:'🔮',buff:true},burn:{label:'Burn',icon:'🔥'},poison:{label:'Poison',icon:'☠️'},hot:{label:'HoT',icon:'🍃'},shield:{label:'Shield',icon:'🛡️',buff:true},iceBlock:{label:'Ice Block',icon:'🧊',buff:true},infusion:{label:'Infusion of Light',icon:'✨',buff:true},sacrifice:{label:'Blessing of Sacrifice',icon:'🪽',buff:true},avengingWings:{label:'Avenging Wings',icon:'🪽',buff:true},divineSteed:{label:'Divine Steed',icon:'🐴',buff:true},burst:{label:'Burst',icon:'🌋',buff:true},defensive:{label:'Guard',icon:'🛡️',buff:true},natureSwiftness:{label:'Nature Swiftness',icon:'🌿',buff:true},ironbark:{label:'Ironbark',icon:'🌳',buff:true},shadowMendGuard:{label:'Shadow Mend Guard',icon:'🌓',buff:true},tigereyeBrew:{label:'Tigereye Brew',icon:'🍺',buff:true},undyingResolve:{label:'Undying Resolve',icon:'🟣',buff:true},bleed:{label:'Rend',icon:'🩸'},reflect:{label:'Spell Reflect',icon:'🛡️',buff:true},empoweredSwing:{label:'Empowered Slam',icon:'⚔️',buff:true},victoryRushBoost:{label:'Victory Rush Primed',icon:'🏆',buff:true},gushingWoundReady:{label:'Gushing Wound',icon:'🩸',buff:true},combustion:{label:'Combustion',icon:'🔥',buff:true},moltenArmor:{label:'Fire Shield',icon:'🛡️',buff:true},livingBomb:{label:'Living Bomb',icon:'💣'},cauterizeDoom:{label:'Cauterize',icon:'❤️‍🔥',buff:true},cloakShadows:{label:'Cloak of Shadows',icon:'🧥',buff:true},vendetta:{label:'Vendetta',icon:'🎯'},stealth:{label:'Stealth',icon:'👻',buff:true},tigereye:{label:'Tigereye Brew',icon:'🍺',buff:true},touchKarma:{label:'Touch of Karma',icon:'☯️',buff:true},tigersLust:{label:"Tiger's Lust",icon:'🐯',buff:true},risingSunReady:{label:'Rising Sun Kick',icon:'🌅',buff:true},ghanir:{label:"G'Hanir",icon:'🌲',buff:true},bestowFaith:{label:'Bestow Faith',icon:'🙏',buff:true},atonement:{label:'Atonement',icon:'✦',buff:true},painSuppression:{label:'Pain Suppression',icon:'🕊️',buff:true},discFade:{label:'Fade',icon:'🤍',buff:true},archangel:{label:'Archangel',icon:'🪽',buff:true},darkArchangel:{label:'Dark Archangel',icon:'🖤',buff:true},angelicBody:{label:'Angelic Body',icon:'💨',buff:true},radiantPenanceProc:{label:'Radiant Penance',icon:'🌠',buff:true},flameShock:{label:'Flame Shock',icon:'🔥'},shivPoisonAmp:{label:'Shiv Poison Vulnerability',icon:'☠️'},silence:{label:'Silenced',icon:'🤫',cc:true},karmaDot:{label:'Karma',icon:'☯️'},totemMastery:{label:'Totem Mastery',icon:'🪧',buff:true},stormkeeper:{label:'Stormkeeper',icon:'⛈️',buff:true},rushingJade:{label:'Rushing Jade Wind',icon:'🌀',buff:true}};
 EFFECT_META.touchOfDeath={label:'Touch of Death',icon:'☠️'};
 EFFECT_META.infernalExposure={label:'Infernal Vulnerability · +10%',icon:'🔥'};
 EFFECT_META.infernalLifetime={label:'Infernal Remaining',icon:'🔥',buff:true};
+EFFECT_META.pounceSpeed={label:'Umbral Momentum · +30% Speed',icon:'🌑',buff:true};
 EFFECT_META.freedom={label:'Blessing of Freedom · +30% Speed',icon:'🪽',buff:true};
 EFFECT_META.guardianImmunity={label:'Guardian Angel · Immune',icon:'👼',buff:true};
 EFFECT_META.guardianLifetime={label:'Val’kyr Remaining',icon:'👼',buff:true};
@@ -1050,8 +1587,8 @@ EFFECT_META.aftershockPower={label:'Aftershock',icon:'📡',buff:true};
 EFFECT_META.curseWeavingPower={label:'Curse Weaving',icon:'🪬',buff:true};
 EFFECT_META.immolate={label:'Immolate',icon:'🔥'};
 EFFECT_META.overheatPower={label:'Overheat',icon:'♨️',buff:true};
-function effectMeta(type){if(type.startsWith('lock_'))return {label:'Locked',icon:'🔒',cc:true}; return EFFECT_META[type]||{label:type,icon:'•'};}
-function isUntargetableStealth(u,viewer){return !!(u&&u.alive&&u.has&&u.has('stealth')&&viewer&&viewer.team!==u.team);} function crowdControlState(u){const order=['furyStun','cheapStun','fear','poly','sleep','gouge','blind','windIncap','stun','silence','root','lock_fire','lock_arcane','lock_nature','lock_storm','lock_physical','silence','slow'];for(const type of order){const e=u.effects.find(x=>x.type===type&&x.time>0); if(e)return {...effectMeta(type),type,time:e.time};}return null;} function centerControlState(u){const order=['furyStun','cheapStun','stun','fear','poly','sleep','gouge','blind','windIncap','root'];for(const type of order){const e=u.effects.find(x=>x.type===type&&x.time>0);if(e)return {...effectMeta(type),type,time:e.time};}return null;}
+function effectMeta(type){if(type.startsWith('lock_'))return {label:'Locked/Kicked',icon:'🔒',cc:true}; return EFFECT_META[type]||{label:type,icon:'•'};}
+function isUntargetableStealth(u,viewer){return !!(u&&u.alive&&u.has&&u.has('stealth')&&viewer&&viewer.team!==u.team);} function crowdControlState(u){const order=['furyStun','cheapStun','fear','poly','sleep','gouge','blind','windIncap','stun','silence','root','lock_fire','lock_arcane','lock_nature','lock_storm','lock_physical','silence','slow'];for(const type of order){const e=u.effects.find(x=>x.type===type&&x.time>0); if(e)return {...effectMeta(type),type,time:e.time};}return null;} function centerControlState(u){const order=['furyStun','cheapStun','stun','fear','poly','sleep','gouge','blind','windIncap','root'];for(const type of order){const e=u.effects.find(x=>x.type===type&&x.time>0);if(e)return {...effectMeta(type),type,time:e.time};}let lock=null;for(const e of u.effects){if(e.time>0&&e.type.startsWith('lock_')&&(!lock||e.time>lock.time))lock=e;}return lock?{...effectMeta(lock.type),type:lock.type,time:lock.time}:null;}
 const CLASS_MECHANICS={
  flame:'Counterflare and Frostfire Nova can be used between your other abilities. A successful Counterflare empowers two instant Cinder Bolts. Meteor is aimed on the ground and, after landing, empowers one rapid Ember Lance. Ice Block is your emergency immunity and recovery spell.',
  storm:'Keep Flame Shock active, use Skybreaker Pulse to ready one Volcanic Eruption, and cast Arc Spark to build your chance of triggering Storm Surge. Healing Surge provides recovery, while Static Aegis combines an absorption shield with 20% damage reduction.',
@@ -1666,7 +2203,7 @@ function enhanceTalentTreeNodes(){
  [
   ['flame',{id:'flame_dragon_breath',name:'Dragon Breath',icon:'🐉',x:16,y:92,max:1,req:['flame_ashen_vitality'],unlockAbility:true,desc:'Unlocks Dragon Breath: a short-range disorient for creating a clean follow-up cast or escaping melee pressure.'}],
   ['flame',{id:'flame_molten_armor',name:'Molten Armor',icon:'🪨',x:84,y:92,max:1,req:['flame_ashen_vitality'],unlockAbility:true,desc:'Unlocks Molten Armor: a self-shield for surviving offensive swaps without increasing your burst.'}],
-  ['warrior',{id:'war_heroic_leap',name:'Bladestorm',icon:'🦘',x:16,y:92,max:1,req:['war_plate_training'],unlockAbility:true,desc:'Unlocks Bladestorm: spin around dealing AoE damage and become immune to stuns, roots and slows during it.'}],
+  ['warrior',{id:'war_heroic_leap',name:'Bladestorm',icon:'🦘',x:16,y:92,max:1,req:['war_plate_training'],unlockAbility:true,desc:'Unlocks Bladestorm: spin around dealing AoE damage and become immune to stuns, roots, slows, Fear and Hex during it.'}],
   ['warrior',{id:'war_victory_rush',name:'Victory Rush',icon:'🏆',x:50,y:92,max:1,req:['war_plate_training'],unlockAbility:true,desc:'Unlocks Victory Rush: light enemy damage and a self-heal for sustain.'}],
   ['warrior',{id:'war_disarm',name:'Warbreaker',icon:'🪃',x:84,y:92,max:1,req:['war_plate_training'],unlockAbility:true,desc:'Unlocks Warbreaker: deal damage, empower the next Mortal Swing by 30%, then trigger three rapid Slicing Winds.'}],
   ['storm',{id:'storm_thunderstep',name:'Thunderstep',icon:'👣',x:16,y:92,max:1,req:['storm_static_hide'],unlockAbility:true,desc:'Unlocks Thunderstep: a short defensive reposition that knocks nearby enemies away.'}],
@@ -1762,7 +2299,7 @@ function refreshTalentDescriptions(){
   soul_summon_infernal:'Unlocks Summon Infernal: choose a ground location within 22m. The landing deals 90 Shadow damage and stuns enemies in the 5m area for 2 sec. Enemies struck by the landing or its Immolation take 10% increased damage for 10 sec. The killable Infernal lasts 10 sec with 25% of your maximum health, chases the nearest enemy, deals 50 damage within 8m every 2 sec and restores 4 mana every second.',
   flame_combustion:'Unlocks Combustion: gain 80% critical strike chance and cast spells 15% faster for 8 sec.',
   shadow_shadowstep:'Unlocks Vendetta: mark an enemy for 10 sec, causing your Garrote, Internal Bleeding, poisons and bleeds to tick twice as fast. Its cooldown is 60 sec.',
-  shadow_sap:'Unlocks Crimson Vial: restore 1.5% maximum health every second for 10 sec, for 15% total health. This healing ignores dampening.',
+  shadow_sap:'Unlocks Crimson Vial: restore 2.5% maximum health each second for 6 sec, plus 0.5% per different poison or bleed on one enemy within 25m (up to 4% per tick). Healing ignores dampening. Deal 25% less damage while active.',
   shadow_crimson_vial:'Unlocks Evasion: gain a 70% chance to dodge incoming melee attacks for 8 sec.',
   shadow_gouge:'Unlocks Gouge: prevent a nearby enemy from moving or acting for 3 sec. Any damage can break the effect. Learning Gouge also increases all Shadowblade damage by 10%.',
   shadow_garrote:'Unlocks Garrote: apply a strong 8 sec bleed. Garrote does not silence and ticks twice as fast during Vendetta.'
@@ -1796,7 +2333,7 @@ refreshSpecialisationChoices();
    Layout matches the original live arrangement: a diamond down to Wind Path, the
    specialisation hub flanked by Nimble Brew and Temple Guard, then the capstone row.
    Whirling Dragon Punch is baseline again, so the capstone pool is Touch of Karma,
-   Touch of Death and Strike of the Windlord: learn any two, in any combination, from
+   Touch of Death, Strike of the Windlord and Reverse Harm: learn any two from
    either specialisation branch. */
 {
  const windTree=TALENT_TREES.wind||[];
@@ -1827,7 +2364,7 @@ refreshSpecialisationChoices();
  [['wind_tiger_rush',36,82],['wind_karma',64,82],['wind_chi_burst',78,82]].forEach(([id,x,y])=>{
   const n=node(id);if(!n)return;
   delete n.choice;delete n.choiceLabel;delete n.choiceIcon;delete n.choiceDesc;
-  Object.assign(n,{x,y,max:1,req:['tigerdash','cyclonetech'],unlockAbility:true,capstone:true,capstoneGroup:'wind_capstone',capstoneLimit:2,desc:`${capstoneText[id]} Windwalker capstone: you may learn any two of Touch of Karma, Touch of Death and Strike of the Windlord.`});
+  Object.assign(n,{x,y,max:1,req:['tigerdash','cyclonetech'],unlockAbility:true,capstone:true,capstoneGroup:'wind_capstone',capstoneLimit:2,desc:`${capstoneText[id]} Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm.`});
  });
  /* Whirling Dragon Punch is baseline, not a talent. */
  delete TALENT_UNLOCKED_ABILITIES.wind.wind_whirling_dragon;
@@ -1850,7 +2387,7 @@ refreshSpecialisationChoices();
 
 /* Capstone pools: a set of nodes sharing a capstoneGroup from which only `capstoneLimit`
    may ever be learned, in any combination. Used by the Windwalker capstone row so that
-   Touch of Karma / Touch of Death / Strike of the Windlord / Whirling Dragon Punch are
+   Touch of Karma / Touch of Death / Strike of the Windlord / Reverse Harm are
    four independent nodes of which you pick any two. */
 function talentCapstoneBlocked(tree,rankOf,node){
  if(!node||!node.capstoneGroup||rankOf(node.id)>0)return false;
@@ -1863,6 +2400,8 @@ function pruneTalentCapstoneOverflow(tree,state){
  Object.values(groups).forEach(list=>{list.slice(list[0].capstoneLimit||2).forEach(n=>{delete state[n.id];changed=true;});});
  return changed;
 }
+TALENT_TREES.wind.push({id:'wind_reverse_harm',name:'Reverse Harm',icon:'☯️',x:19,y:82,max:1,req:['tigerdash','cyclonetech'],unlockAbility:true,capstone:true,capstoneGroup:'wind_capstone',capstoneLimit:2,desc:TALENT_UNLOCKED_ABILITIES.wind.wind_reverse_harm.tip+' 10 sec cooldown. Windwalker talents: choose any two of Strike of the Windlord, Touch of Karma, Touch of Death and Reverse Harm.'});
+{const bomb=TALENT_TREES.flame.find(n=>n.id==='flame_meteor_spear');TALENT_TREES.flame.push({id:'flame_glacial_recovery',name:'Glacial Recovery',icon:'🧊',x:Math.max(16,(bomb?.x||36)-18),y:bomb?.y||78,max:1,req:['meteorimpact'],desc:'Ice Block has a 40 sec cooldown (10 sec shorter) and restores 30% more health throughout its duration: 26% maximum health before dampening.'});}
 function talentTree(cls){return TALENT_TREES[cls]||TALENT_TREES.flame;}
 function talentRank(cls,id){return Number(classTalentState(cls)[id]||0);}
 function unitTalentRank(unit,id){return Number(unit&&unit.netTalents?unit.netTalents[id]||0:talentRank(unit?.cls,id));}
@@ -1872,7 +2411,7 @@ function availableTalentPoints(cls){return Math.max(0,earnedTalentPoints(cls)-sp
 function talentNodeAvailable(cls,node){const state=classTalentState(cls);if((state[node.id]||0)>=node.max)return false;if(talentCapstoneBlocked(talentTree(cls),id=>Number(state[id]||0),node))return false;if(node.req&&node.req.length&&!node.req.some(id=>(state[id]||0)>0))return false;if(node.choice&&talentTree(cls).some(n=>n.choice===node.choice&&n.id!==node.id&&(state[n.id]||0)>0))return false;return availableTalentPoints(cls)>0;}
 
 
-function windTigereyeTalentActive(u){return !!(u&&u.cls==='wind'&&progression?.talents?.wind?.wind_tigereye_brew);}
+function windTigereyeTalentActive(u){return !!(u&&u.cls==='wind'&&unitTalentRank(u,'wind_tigereye_brew'));}
 function windTigereyeStacks(u){return Math.max(0,Math.min(6,Number(u?.tigereyeStacks||0)));}
 function windTigereyeBuffMult(u){
  const buff=u?.has?.('tigereyeBrew');
@@ -1912,11 +2451,22 @@ function classTalentDamageMult(cls,c=null,t=null,label=''){
  if(cls==='wind'&&c)m*=windTigereyeBuffMult(c);
  return Number.isFinite(m)&&m>0?m:1;
 }
-function classTalentHealingMult(cls,c=null){let m=1+talentTree(cls).reduce((x,n)=>x+(talentRank(cls,n.id)*(n.effects?.healingPct||0))/100,0);if(cls==='sage')m*=.90;if(cls==='wind'&&c)m*=windTigereyeBuffMult(c);if(c?.has?.('totemMastery'))m*=1.05/1.03;return m;}function classTalentStaminaMult(cls){return 1+talentTree(cls).reduce((m,n)=>m+(talentRank(cls,n.id)*(n.effects?.staminaPct||0))/100,0);}window.TALENT_TREES=TALENT_TREES;
+function classTalentHealingMult(cls,c=null){let m=1+talentTree(cls).reduce((x,n)=>x+((c?unitTalentRank(c,n.id):talentRank(cls,n.id))*(n.effects?.healingPct||0))/100,0);if(cls==='sage')m*=.90;if(cls==='wind'&&c)m*=windTigereyeBuffMult(c);if(c?.has?.('totemMastery'))m*=1.05/1.03;return m;}function classTalentStaminaMult(cls,c=null){return 1+talentTree(cls).reduce((m,n)=>m+((c?unitTalentRank(c,n.id):talentRank(cls,n.id))*(n.effects?.staminaPct||0))/100,0);}window.TALENT_TREES=TALENT_TREES;
+
+const PLAYER_NICKNAME_KEY='aetherfallPlayerNickname';
+const RANKING_PLAYER_ID_KEY='aetherfallRankingPlayerId';
+const RANKING_PLAYER_TOKEN_KEY='aetherfallRankingPlayerToken';
+const RANKING_API='/api/offline-rankings';
+function sanitizePlayerNickname(value){return String(value||'').replace(/[<>]/g,'').replace(/\s+/g,' ').trim().slice(0,24);}
+function getPlayerNickname(){let value='';try{value=sanitizePlayerNickname(localStorage.getItem(PLAYER_NICKNAME_KEY)||'');}catch(e){}return value;}
+function setPlayerNickname(value){const nickname=sanitizePlayerNickname(value);if(nickname.length<2)return '';try{localStorage.setItem(PLAYER_NICKNAME_KEY,nickname);}catch(e){}return nickname;}
+function playerNickname(){return getPlayerNickname()||'Gladiator';}
+function rankingRandomValue(bytes=24){const values=new Uint8Array(bytes);crypto.getRandomValues(values);return Array.from(values,value=>value.toString(16).padStart(2,'0')).join('');}
+function rankingIdentity(){let playerId='',token='';try{playerId=localStorage.getItem(RANKING_PLAYER_ID_KEY)||'';token=localStorage.getItem(RANKING_PLAYER_TOKEN_KEY)||'';if(!/^[a-zA-Z0-9_-]{8,80}$/.test(playerId)){playerId=crypto.randomUUID?.()||rankingRandomValue(16);localStorage.setItem(RANKING_PLAYER_ID_KEY,playerId);}if(!/^[a-zA-Z0-9_-]{24,160}$/.test(token)){token=rankingRandomValue(32);localStorage.setItem(RANKING_PLAYER_TOKEN_KEY,token);}}catch(e){playerId=playerId||rankingRandomValue(16);token=token||rankingRandomValue(32);}return {playerId,token};}
 
 function defaultProgression(){
- const ratings={'1v1':{},'2v2':{},'3v3':{}},equipped={};GEAR_CLASSES.forEach(c=>{ratings['1v1'][c]=1600;ratings['2v2'][c]=1600;ratings['3v3'][c]=1600;equipped[c]={};});
- return {shards:900,ratings,equipped,inventory:[],matches:0,wins:0,duelMatches:0,duelWins:0,tournaments:0,tournamentCupRewarded:{},tournamentCupWins:{},achievements:{},achievementClasses:{},currentTitle:'',mounts:baselineMountIds(),activeMount:'skyhoof',mountSkins:{aethergladiatorwyrm:['default']},activeMountSkins:{aethergladiatorwyrm:'default'},talents:{},settings:{hideCombatText:false,hideLiveDetails:false,stackingNameplates:true,showTargetOfTarget:true,hudScale:1,raidFrameStyle:'detailed',showFPS:false,performanceMode:true,instantCamera:true,hudLayout:{}}};
+ const ratings={'1v1':{},'2v2':{},'3v3':{}},records={'1v1':{},'2v2':{},'3v3':{}},equipped={};GEAR_CLASSES.forEach(c=>{ratings['1v1'][c]=1600;ratings['2v2'][c]=1600;ratings['3v3'][c]=1600;records['1v1'][c]={matches:0,wins:0};records['2v2'][c]={matches:0,wins:0};records['3v3'][c]={matches:0,wins:0};equipped[c]={};});
+ return {shards:900,ratings,records,equipped,inventory:[],matches:0,wins:0,duelMatches:0,duelWins:0,tournaments:0,tournamentCupRewarded:{},tournamentCupWins:{},achievements:{},achievementClasses:{},currentTitle:'',mounts:baselineMountIds(),activeMount:'skyhoof',mountSkins:{aethergladiatorwyrm:['default']},activeMountSkins:{aethergladiatorwyrm:'default'},talents:{},settings:{hideCombatText:false,hideLiveDetails:false,stackingNameplates:true,showTargetOfTarget:true,hudScale:1,raidFrameStyle:'detailed',showFPS:false,performanceMode:true,instantCamera:true,screenEdgeAlerts:false,edgeAlertOpacity:.72,shareOfflineRankings:false,hudLayout:{}}};
 }
 const ACHIEVEMENTS=[
  {id:'rating1700',type:'rating',threshold:1700,icon:'🜂',name:'Gate Aspirant',title:'Gate Aspirant',rewardShards:750,desc:'Reach 1700 rating in any bracket on any class.'},
@@ -1973,7 +2523,8 @@ function bracketKey(mode){return mode==='3v3'?'3v3':mode==='1v1'?'1v1':'2v2';}
 function loadProgression(){
  let p;try{p=JSON.parse(localStorage.getItem('aetherProgression')||'null');}catch(e){p=null;}
  if(!p)p=defaultProgression();
- p.shards=Number.isFinite(p.shards)?p.shards:900;p.inventory=Array.isArray(p.inventory)?p.inventory:[];p.matches=p.matches||0;p.wins=p.wins||0;p.duelMatches=p.duelMatches||0;p.duelWins=p.duelWins||0;p.tournaments=p.tournaments||0;p.tournamentCupWins=p.tournamentCupWins&&typeof p.tournamentCupWins==='object'?p.tournamentCupWins:{};p.tournamentCupRewarded=p.tournamentCupRewarded&&typeof p.tournamentCupRewarded==='object'?p.tournamentCupRewarded:{};p.equipped=p.equipped||{};p.achievements=p.achievements&&typeof p.achievements==='object'?p.achievements:{};p.achievementClasses=p.achievementClasses&&typeof p.achievementClasses==='object'?p.achievementClasses:{};p.currentTitle=typeof p.currentTitle==='string'?p.currentTitle:'';p.talents=p.talents&&typeof p.talents==='object'?p.talents:{};p.settings=p.settings&&typeof p.settings==='object'?p.settings:{hideCombatText:false,hideLiveDetails:false,stackingNameplates:true,showTargetOfTarget:true,hudScale:1,raidFrameStyle:'detailed',showFPS:false,performanceMode:true,instantCamera:true,hudLayout:{}};p.mountSkins=p.mountSkins&&typeof p.mountSkins==='object'?p.mountSkins:{};p.activeMountSkins=p.activeMountSkins&&typeof p.activeMountSkins==='object'?p.activeMountSkins:{};p.mountSkins.aethergladiatorwyrm=Array.isArray(p.mountSkins.aethergladiatorwyrm)?p.mountSkins.aethergladiatorwyrm:['default'];if(!p.mountSkins.aethergladiatorwyrm.includes('default'))p.mountSkins.aethergladiatorwyrm.unshift('default');p.activeMountSkins.aethergladiatorwyrm=p.mountSkins.aethergladiatorwyrm.includes(p.activeMountSkins.aethergladiatorwyrm)?p.activeMountSkins.aethergladiatorwyrm:'default';if(typeof p.settings.hideCombatText!=='boolean')p.settings.hideCombatText=false;if(typeof p.settings.hideLiveDetails!=='boolean')p.settings.hideLiveDetails=false;if(typeof p.settings.stackingNameplates!=='boolean')p.settings.stackingNameplates=true;if(typeof p.settings.showTargetOfTarget!=='boolean')p.settings.showTargetOfTarget=true;if(!Number.isFinite(Number(p.settings.hudScale)))p.settings.hudScale=1;p.settings.hudScale=clamp(Number(p.settings.hudScale),.7,1.4);if(!['detailed','class'].includes(p.settings.raidFrameStyle))p.settings.raidFrameStyle='detailed';if(typeof p.settings.showFPS!=='boolean')p.settings.showFPS=false;if(typeof p.settings.performanceMode!=='boolean')p.settings.performanceMode=true;if(typeof p.settings.instantCamera!=='boolean')p.settings.instantCamera=true;if(!p.settings.hudLayout||typeof p.settings.hudLayout!=='object'||Array.isArray(p.settings.hudLayout))p.settings.hudLayout={};p=unlockEligibleMounts(p);
+ p.shards=Number.isFinite(p.shards)?p.shards:900;p.inventory=Array.isArray(p.inventory)?p.inventory:[];p.matches=p.matches||0;p.wins=p.wins||0;p.duelMatches=p.duelMatches||0;p.duelWins=p.duelWins||0;p.tournaments=p.tournaments||0;p.tournamentCupWins=p.tournamentCupWins&&typeof p.tournamentCupWins==='object'?p.tournamentCupWins:{};p.tournamentCupRewarded=p.tournamentCupRewarded&&typeof p.tournamentCupRewarded==='object'?p.tournamentCupRewarded:{};p.equipped=p.equipped||{};p.achievements=p.achievements&&typeof p.achievements==='object'?p.achievements:{};p.achievementClasses=p.achievementClasses&&typeof p.achievementClasses==='object'?p.achievementClasses:{};p.currentTitle=typeof p.currentTitle==='string'?p.currentTitle:'';p.talents=p.talents&&typeof p.talents==='object'?p.talents:{};p.settings=p.settings&&typeof p.settings==='object'?p.settings:{hideCombatText:false,hideLiveDetails:false,stackingNameplates:true,showTargetOfTarget:true,hudScale:1,raidFrameStyle:'detailed',showFPS:false,performanceMode:true,instantCamera:true,screenEdgeAlerts:false,edgeAlertOpacity:.72,hudLayout:{}};p.mountSkins=p.mountSkins&&typeof p.mountSkins==='object'?p.mountSkins:{};p.activeMountSkins=p.activeMountSkins&&typeof p.activeMountSkins==='object'?p.activeMountSkins:{};p.mountSkins.aethergladiatorwyrm=Array.isArray(p.mountSkins.aethergladiatorwyrm)?p.mountSkins.aethergladiatorwyrm:['default'];if(!p.mountSkins.aethergladiatorwyrm.includes('default'))p.mountSkins.aethergladiatorwyrm.unshift('default');p.activeMountSkins.aethergladiatorwyrm=p.mountSkins.aethergladiatorwyrm.includes(p.activeMountSkins.aethergladiatorwyrm)?p.activeMountSkins.aethergladiatorwyrm:'default';if(typeof p.settings.hideCombatText!=='boolean')p.settings.hideCombatText=false;if(typeof p.settings.hideLiveDetails!=='boolean')p.settings.hideLiveDetails=false;if(typeof p.settings.stackingNameplates!=='boolean')p.settings.stackingNameplates=true;if(typeof p.settings.showTargetOfTarget!=='boolean')p.settings.showTargetOfTarget=true;if(!Number.isFinite(Number(p.settings.hudScale)))p.settings.hudScale=1;p.settings.hudScale=clamp(Number(p.settings.hudScale),.7,1.4);if(!['detailed','class'].includes(p.settings.raidFrameStyle))p.settings.raidFrameStyle='detailed';if(typeof p.settings.showFPS!=='boolean')p.settings.showFPS=false;if(typeof p.settings.performanceMode!=='boolean')p.settings.performanceMode=true;if(typeof p.settings.instantCamera!=='boolean')p.settings.instantCamera=true;if(typeof p.settings.screenEdgeAlerts!=='boolean')p.settings.screenEdgeAlerts=false;p.settings.edgeAlertOpacity=clamp(Number(p.settings.edgeAlertOpacity)||.72,.2,1);if(!p.settings.hudLayout||typeof p.settings.hudLayout!=='object'||Array.isArray(p.settings.hudLayout))p.settings.hudLayout={};p=unlockEligibleMounts(p);
+  if(typeof p.settings.shareOfflineRankings!=='boolean')p.settings.shareOfflineRankings=false;
   const savedHighestRating=(()=>{
    const rs=p.ratings||{};
    const vals=[];
@@ -1992,7 +2543,8 @@ function loadProgression(){
   if(shadowmoon)return {...item,legendaryId:'shadowmoon',rarity:'legendary',name:'Shadowmoon',flavour:'A prestigious runebound axe. Its spiked crescent edges drink the echoes left behind by every melee strike.',effect:shadowmoonEffectText()};
   return {...item,rarity:item.rarity||rarityForIlvl(item.ilvl),name:gearName(item.classKey,item.slot,item.ilvl),flavour:item.flavour||gearFlavour(item.classKey)};
  });
- GEAR_CLASSES.forEach(c=>{if(!Number.isFinite(p.ratings['1v1'][c]))p.ratings['1v1'][c]=1600;if(!Number.isFinite(p.ratings['2v2'][c]))p.ratings['2v2'][c]=1600;if(!Number.isFinite(p.ratings['3v3'][c]))p.ratings['3v3'][c]=1600;if(!p.equipped[c])p.equipped[c]={};});
+ p.records=p.records&&typeof p.records==='object'?p.records:{'1v1':{},'2v2':{},'3v3':{}};['1v1','2v2','3v3'].forEach(mode=>{if(!p.records[mode]||typeof p.records[mode]!=='object')p.records[mode]={};});
+ GEAR_CLASSES.forEach(c=>{if(!Number.isFinite(p.ratings['1v1'][c]))p.ratings['1v1'][c]=1600;if(!Number.isFinite(p.ratings['2v2'][c]))p.ratings['2v2'][c]=1600;if(!Number.isFinite(p.ratings['3v3'][c]))p.ratings['3v3'][c]=1600;['1v1','2v2','3v3'].forEach(mode=>{const record=p.records[mode][c];p.records[mode][c]={matches:Math.max(0,Number(record?.matches)||0),wins:Math.max(0,Number(record?.wins)||0)};});if(!p.equipped[c])p.equipped[c]={};});
  const cupSkins=p.mountSkins?.chronocrown_protodrake||[];
  GEAR_CLASSES.forEach(c=>{if(cupSkins.includes(chronocrownSkinIdForClass(c)))p.tournamentCupWins[c]=true;});
  const cupClasses=GEAR_CLASSES.filter(c=>p.tournamentCupWins[c]);
@@ -2011,8 +2563,22 @@ function classRating(cls,mode='2v2'){return progression.ratings[bracketKey(mode)
 function addClassRating(cls,mode,amount){const key=bracketKey(mode);progression.ratings[key][cls]=classRating(cls,key)+amount;return progression.ratings[key][cls];}
 function saveProgression(){localStorage.setItem('aetherProgression',JSON.stringify(progression));window.progression=progression;}
 function highestArenaRating(){return Math.max(...['1v1','2v2','3v3'].flatMap(mode=>GEAR_CLASSES.map(c=>classRating(c,mode))));}
+let rankingPlayersCache=[];
+let rankingPublishTimer=0;
+function localRankingProfile(){
+ const {playerId}=rankingIdentity();let highestRating=-Infinity,highestClass='flame',highestMode='2v2';
+ ['1v1','2v2','3v3'].forEach(mode=>GEAR_CLASSES.forEach(cls=>{const rating=classRating(cls,mode);if(rating>highestRating){highestRating=rating;highestClass=cls;highestMode=mode;}}));
+ const ratings={},records={},talents={},gear={};['1v1','2v2','3v3'].forEach(mode=>{ratings[mode]={};records[mode]={};GEAR_CLASSES.forEach(cls=>{ratings[mode][cls]=classRating(cls,mode);const record=progression.records?.[mode]?.[cls]||{matches:0,wins:0};records[mode][cls]={matches:Math.max(0,Number(record.matches)||0),wins:Math.max(0,Number(record.wins)||0)};});});GEAR_CLASSES.forEach(cls=>{talents[cls]=Object.fromEntries(Object.entries(progression.talents?.[cls]||{}).filter(([,rank])=>Number(rank)>0).map(([id,rank])=>[id,Math.max(1,Math.min(10,Math.round(Number(rank)||0)))]));const loadout=progression.equipped?.[cls]||{};gear[cls]=GEAR_SLOTS.map(slot=>progression.inventory.find(item=>item?.id===loadout[slot]&&item.classKey===cls&&item.slot===slot)).filter(Boolean).map(item=>({slot:item.slot,ilvl:Math.max(910,Math.min(1000,Math.round(Number(item.ilvl)||910))),statA:CUSTOM_GEAR_STATS.includes(item.statA)?item.statA:'Vitality',statB:CUSTOM_GEAR_STATS.includes(item.statB)?item.statB:'Versatility',...(item.legendaryId==='shadowmoon'?{legendaryId:'shadowmoon'}:{})}));});
+ return {playerId,nickname:playerNickname(),title:playerTitleLabel(highestClass),ratings,records,talents,gear,matches:Math.max(0,Number(progression.matches)||0),wins:Math.max(0,Number(progression.wins)||0),highestRating,highestClass,highestMode,updatedAt:Date.now(),local:true};
+}
+async function rankingRequest(options={}){const response=await fetch(RANKING_API,{cache:'no-store',...options,headers:{'content-type':'application/json',...(options.headers||{})}});let data={};try{data=await response.json();}catch(e){}if(!response.ok)throw new Error(data.error||`Rankings request failed (${response.status})`);return data;}
+async function publishOfflineRanking(force=false){if(!force&&!progression.settings?.shareOfflineRankings)return null;const identity=rankingIdentity(),profile=localRankingProfile(),data=await rankingRequest({method:'POST',body:JSON.stringify({...profile,...identity})});if(data.player){rankingPlayersCache=[data.player,...rankingPlayersCache.filter(player=>player.playerId!==data.player.playerId)];}return data.player||null;}
+async function removeOfflineRanking(){const identity=rankingIdentity();await rankingRequest({method:'DELETE',body:JSON.stringify(identity)});rankingPlayersCache=rankingPlayersCache.filter(player=>player.playerId!==identity.playerId);}
+function queueRankingPublish(delay=900){if(!progression.settings?.shareOfflineRankings)return;clearTimeout(rankingPublishTimer);rankingPublishTimer=setTimeout(()=>publishOfflineRanking().catch(error=>console.warn('Ranking sync deferred:',error.message)),delay);}
+async function fetchOfflineRankings(){const data=await rankingRequest();rankingPlayersCache=Array.isArray(data.players)?data.players:[];return rankingPlayersCache;}
 function ratingTierMeta(r){if(r>=2400)return {name:'Aether Gladiator',icon:'🐲',css:'#dcb7ff'};if(r>=2200)return {name:'Aether Legend',icon:'💀',css:'#f5d27a'};if(r>=2000)return {name:'Mythical Elite',icon:'🏅',css:'#ffaf68'};if(r>=1800)return {name:'Challenger',icon:'⚔️',css:'#b388ff'};if(r>=1700)return {name:'Combatant',icon:'🛡️',css:'#7dc5ff'};return {name:'Unranked',icon:'✦',css:'#9db2c7'};}
-function unlockedItemLevel(){  const steps=Math.max(0,Math.floor((highestArenaRating()-1600)/50));  return Math.min(990,910+steps*5); }
+function ratedBotItemLevel(rating){const steps=Math.max(0,Math.floor((Math.max(1600,Number(rating)||1600)-1600)/50));return Math.min(990,910+steps*5);}
+function unlockedItemLevel(){return ratedBotItemLevel(highestArenaRating());}
 function gearUpgradeStep(ilvl){return ilvl<950?Math.min(950,ilvl+5):Math.min(990,Math.ceil((ilvl+1)/10)*10);}
 function gearUpgradeCost(item){const next=gearUpgradeStep(item.ilvl);return Math.max(0,260+(next-950)*18);}
 function canUpgradeGear(item){return !!(item&&item.ilvl>=950&&item.ilvl<990&&gearUpgradeStep(item.ilvl)<=unlockedItemLevel());}
@@ -2061,6 +2627,27 @@ function createShadowmoonItem(statA,statB){
   effect:shadowmoonEffectText()};
 }
 
+// Free only instance-owned GPU resources; shared imported assets remain reusable.
+function disposeAetherObject(root){
+ if(!root?.traverse)return;
+ const geometries=new Set(),materials=new Set(),textures=new Set(),skeletons=new Set();
+ root.traverse(node=>{
+  if(node.userData?.aetherOnDispose){const release=node.userData.aetherOnDispose;delete node.userData.aetherOnDispose;release();}
+  if(node.geometry&&!node.isSprite&&!node.geometry.userData?.aetherShared)geometries.add(node.geometry);
+  if(node.skeleton)skeletons.add(node.skeleton);
+  const list=Array.isArray(node.material)?node.material:[node.material];
+  for(const material of list){
+   if(!material||material.userData?.aetherShared)continue;
+   materials.add(material);
+   for(const value of Object.values(material))if(value?.isTexture&&!value.userData?.aetherShared)textures.add(value);
+  }
+ });
+ for(const skeleton of skeletons)skeleton.dispose?.();
+ for(const geometry of geometries)geometry.dispose?.();
+ for(const material of materials)material.dispose?.();
+ for(const texture of textures)texture.dispose?.();
+}
+
 class Arena {
  constructor(scene){
   this.scene=scene;
@@ -2073,7 +2660,7 @@ class Arena {
   this.setTheme('random');
  }
  clear(){
-  while(this.root.children.length) this.root.remove(this.root.children[0]);
+  while(this.root.children.length){const child=this.root.children[0];this.root.remove(child);disposeAetherObject(child);}
  }
  setTheme(theme='random'){
   const pick = theme==='random' ? (Math.random()<0.5?'runestone':'serpent') : theme;
@@ -2250,7 +2837,7 @@ class Arena {
 }
 
 class Character {
- constructor(game,o){Object.assign(this,o);this.game=game;this.netId=(o&&o.netId!=null)?o.netId:(Character._nid=(Character._nid||0)+1);this.info=CLASS_INFO[this.cls];this.gearStats=(this.isPlayer&&game)?game.getEquippedStats(this.cls):((this.team==='ally'&&game)?game.getAllyScaledStats(this.cls):((this.team==='enemy'&&game)?game.getEnemyScaledStats(this.cls):blankStats()));this.gearPieceCount=this.isPlayer&&game?game.getEquippedItems(this.cls).length:((this.team==='ally'&&game)?(game.allyGearProfile||[]).length:((this.team==='enemy'&&game)?(game.enemyGearProfile||[]).length:0));const baseHp=(this.cls==='sage'||this.cls==='pala'||this.cls==='disc')?BALANCE.healerHP:BALANCE.dpsHP,staminaHealth=Math.round((this.gearStats.Stamina||0)*.78),vitalityHealth=Math.min(300,Math.round((this.gearStats.Vitality||0)*.50));this.maxHp=Math.round((baseHp+staminaHealth+vitalityHealth)*classTalentStaminaMult(this.cls)*1.10);this.hp=this.maxHp;const baseResource=this.info.resource==='mana'?100+Math.min(60,Math.round((this.gearStats.Mana||0)*.18)):100;this.maxResource=this.cls==='soul'?Math.round(baseResource*1.15):baseResource;this.resource=this.maxResource;this.alive=true;this.shield=0;this.gcd=0;this.cds=Array(AB[this.cls].length).fill(0);this.tempestLock=0;this.effects=[];this._effectCache=new Map();this._effectCacheToken=-1;this.cast=null;this.dr={stun:{level:0,until:0},incap:{level:0,until:0},disorient:{level:0,until:0},fear:{level:0,until:0},root:{level:0,until:0}};this.stats={damage:0,healing:0,absorb:0,interrupts:0,kb:0,damageByAbility:{},damageByTarget:{},healingByAbility:{},healingByTarget:{}};this.velocity={x:0,z:0};this.walkPhase=Math.random()*Math.PI*2;this.motion=0;this.lastX=this.x;this.lastZ=this.z;this.visualX=this.x;this.visualZ=this.z;this.jumpY=0;this.jumpVel=0;this.mounted=false;this.combatUntil=0;this.trinketCd=0;this.basicAttackCd=.25+Math.random()*.35;this.combatAnim=null;this.aiMountDelay=.15+Math.random()*.45;this.moveSpeed=5.15;this.createMesh();}
+ constructor(game,o){Object.assign(this,o);this.game=game;this.netId=(o&&o.netId!=null)?o.netId:(Character._nid=(Character._nid||0)+1);this.info=CLASS_INFO[this.cls];this.gearStats=(this.isPlayer&&game)?game.getEquippedStats(this.cls):((this.team==='ally'&&game)?game.getAllyScaledStats(this.cls):((this.team==='enemy'&&game)?game.getEnemyScaledStats(this.cls):blankStats()));this.gearPieceCount=this.isPlayer&&game?game.getEquippedItems(this.cls).length:((this.team==='ally'&&game)?(game.allyGearProfile||[]).length:((this.team==='enemy'&&game)?(game.enemyGearProfile||[]).length:0));const baseHp=(this.cls==='sage'||this.cls==='pala'||this.cls==='disc')?BALANCE.healerHP:BALANCE.dpsHP,staminaHealth=Math.round((this.gearStats.Stamina||0)*.78),vitalityHealth=Math.min(300,Math.round((this.gearStats.Vitality||0)*.50));this.maxHp=Math.round((baseHp+staminaHealth+vitalityHealth)*classTalentStaminaMult(this.cls,this)*1.10);this.hp=this.maxHp;const baseResource=this.info.resource==='mana'?100+Math.min(60,Math.round((this.gearStats.Mana||0)*.18)):100;this.maxResource=this.cls==='soul'?Math.round(baseResource*1.15):baseResource;this.resource=this.maxResource;this.alive=true;this.cauterizeConsumed=!!o?.cauterizeConsumed;this.shield=0;this.gcd=0;this.cds=Array(unitAbilities(this).length).fill(0);this.tempestLock=0;this.effects=[];this._effectCache=new Map();this._effectCacheToken=-1;this.cast=null;this.dr={stun:{level:0,until:0},incap:{level:0,until:0},disorient:{level:0,until:0},fear:{level:0,until:0},root:{level:0,until:0}};this.stats={damage:0,healing:0,absorb:0,interrupts:0,kb:0,damageByAbility:{},damageByTarget:{},healingByAbility:{},healingByTarget:{}};this.velocity={x:0,z:0};this.walkPhase=Math.random()*Math.PI*2;this.motion=0;this.lastX=this.x;this.lastZ=this.z;this.visualX=this.x;this.visualZ=this.z;this.jumpY=0;this.jumpVel=0;this.mounted=false;this.combatUntil=0;this.trinketCd=0;this.basicAttackCd=.25+Math.random()*.35;this.combatAnim=null;this.aiMountDelay=.15+Math.random()*.45;this.moveSpeed=5.15;this.createMesh();}
  createMesh(){
   this.mesh=new THREE.Group();
   const teamCol=this.team==='ally'?COLORS.ally:COLORS.enemy;
@@ -2434,7 +3021,7 @@ class Character {
   this.plateHud={cc:this.plate.querySelector('.plate-cc'),name:this.plate.querySelector('.plate-name'),hp:this.plate.querySelector('.hp'),shield:this.plate.querySelector('.shield-fill'),cast:this.plate.querySelector('.plate-cast'),castHead:this.plate.querySelector('.plate-cast-head'),castFill:this.plate.querySelector('.plate-cast-track span')};
   $('#worldLabels').appendChild(this.plate);
  }
- createMountAppearance(){const def=mountDefinition(this.isPlayer?progression.activeMount:'skyhoof');this.mountData=def;if(this.mountVisual&&this.mountVisual.parent)this.mountVisual.parent.remove(this.mountVisual);this.mountVisual=buildMountVisual(def,false);this.mountLegs=this.mountVisual.userData.legs||[];this.mountHeadPivot=this.mountVisual.userData.headPivot||null;this.mountAura=this.mountVisual.userData.ring||null;this.mountVisual.visible=false;this.mesh.add(this.mountVisual);}
+ createMountAppearance(def=mountDefinition(this.isPlayer?progression.activeMount:'skyhoof')){this.mountData=def;if(this.mountVisual){this._keepVisible?.delete(this.mountVisual);if(this.mountVisual.parent)this.mountVisual.parent.remove(this.mountVisual);this.game.queueDispose(this.mountVisual);}this.mountVisual=buildMountVisual(def,false);this.mountLegs=this.mountVisual.userData.legs||[];this.mountHeadPivot=this.mountVisual.userData.headPivot||null;this.mountAura=this.mountVisual.userData.ring||null;this.mountVisual.visible=!!this.mounted;this.mesh.add(this.mountVisual);this._keepVisible?.add(this.mountVisual);}
  has(type){const token=this.game?.effectQueryFrame||0;if(this._effectCacheToken!==token){this._effectCacheToken=token;this._effectCache.clear();}if(this._effectCache.has(type)){const cached=this._effectCache.get(type);return cached&&cached.time>0?cached:undefined;}const found=this.effects.find(e=>e.type===type&&e.time>0);this._effectCache.set(type,found||null);return found;}
  effect(type,duration,data={}){
   this._effectCache?.delete(type);
@@ -2452,7 +3039,7 @@ class Character {
     this.game.vfxRing(this,0x79dfff,2.5);this.game.vfxGlyph(this,0xd7f5ff,.9);
     return cue;
    }
-   const slot=(AB[this.cls]||[]).findIndex(a=>a.name==='Alter Time');
+   const slot=(unitAbilities(this)||[]).findIndex(a=>a.name==='Alter Time');
    const temporal={type:'alterTime',time:5,tick:1,x:this.x,z:this.z,hp:this.hp,slot};
    this.effects.push(temporal);this.game.vfxAlterTimeClock(this,5);this.game.vfxRing(this,0x79dfff,2.2);this.game.vfxGlyph(this,0xd7f5ff,.8);
    return temporal;
@@ -2461,6 +3048,7 @@ class Character {
    data={...data,pct:.30};
    this.effects=this.effects.filter(e=>e.type!=='warbreakerDamage');
   }
+  if(['bleed','poison'].includes(type)&&data.source?.cls==='shadow')data={...data,effectKey:`${type}:${data.source.netId}:${data.label||type}`};
   const effectKey=data.effectKey||'';
   const existing=this.effects.find(e=>e.type===type&&(!effectKey||(e.effectKey||'')===effectKey));
   if(existing){if(['soulScar','agony','immolate','unstableAffliction'].includes(type)&&data.source?.cls==='soul'){const rank=unitTalentRank(data.source,'soul_curse_weaving');if(rank>0){data.source.effects=data.source.effects.filter(e=>e.type!=='curseWeavingPower');data.source.effect('curseWeavingPower',10,{pct:rank*.02});data.source.game.float(data.source,`CURSE WEAVING · NEXT HIT +${rank*2}%`,'info');}}existing.time=duration;Object.assign(existing,data);return existing;}
@@ -2473,15 +3061,15 @@ class Character {
   this.effects.push(e);if(type==='evasion')this.game?.vfxEvasion?.(this,duration);return e;
  }
  removeDispellable(){const order=['poly','sleep','gouge','blind','windIncap','fear','root','slow','livingBomb','karmaDot'];for(const type of order){const i=this.effects.findIndex(e=>e.type===type);if(i>=0){this.effects.splice(i,1);this._effectCache?.clear();return type;}}return null;}
- update(dt){if(!this.alive)return;if(this.gearAppearance?.userData?.tick)this.gearAppearance.userData.tick(dt);this.gcd=Math.max(0,this.gcd-dt);this.basicAttackCd=Math.max(0,(this.basicAttackCd||0)-dt);this.trinketCd=Math.max(0,this.trinketCd-dt);this.tempestLock=Math.max(0,(this.tempestLock||0)-dt);for(let i=0;i<this.cds.length;i++)this.cds[i]=Math.max(0,this.cds[i]-dt);
+ update(dt){if(!this.alive)return;if(this.gearAppearance?.userData?.tick)this.gearAppearance.userData.tick(dt);const cauterizeDoom=this.has('cauterizeDoom');if(cauterizeDoom&&!this.game.netGuest)this.hp=Math.min(this.hp,Math.max(1,Math.floor(this.maxHp*.30*Math.max(0,cauterizeDoom.time)/5)));this.gcd=Math.max(0,this.gcd-dt);this.basicAttackCd=Math.max(0,(this.basicAttackCd||0)-dt);this.trinketCd=Math.max(0,this.trinketCd-dt);this.tempestLock=Math.max(0,(this.tempestLock||0)-dt);for(let i=0;i<this.cds.length;i++)this.cds[i]=Math.max(0,this.cds[i]-dt);
   if(this.cls==='flame'&&this.cast&&!this.cast.temperedFocusChecked){this.cast.temperedFocusChecked=true;const rank=unitTalentRank(this,'flame_tempered_focus'),pressured=rank>0&&this.game.units.some(u=>u.team!==this.team&&u.alive&&dist(this,u)<=8);if(pressured){this.effect('temperedFocus',2,{reduction:rank*.02});this.game.float(this,`TEMPERED FOCUS · ${rank*2}% WALL`,'info');}}
-  const manaGear=1+Math.min(.30,(this.gearStats.Mana||0)*.00075);const disciplineManaMult=this.cls==='disc'?.88:1;const regen=this.info.resource==='energy'?BALANCE.energyRegen:((this.cls==='soul'?1.30:this.cls==='storm'?1.20:1)*((this.cls==='sage'||this.cls==='pala'||this.cls==='disc')?BALANCE.healerManaRegen:BALANCE.manaRegen)*manaGear*disciplineManaMult);this.resource=clamp(this.resource+regen*dt,0,this.maxResource);
+  const manaGear=1+Math.min(.30,(this.gearStats.Mana||0)*.00075);const disciplineManaMult=this.cls==='disc'?.88:1;const regen=this.info.resource==='energy'?BALANCE.energyRegen:((this.cls==='soul'?1.30:this.cls==='storm'?1.20:1)*((this.cls==='sage'||this.cls==='pala'||this.cls==='disc')?BALANCE.healerManaRegen:BALANCE.manaRegen)*manaGear*disciplineManaMult);if(!this.game.netGuest)this.resource=clamp(this.resource+regen*dt,0,this.maxResource);
   if(this.trainingDummy){const floor=this.maxHp*.80;if(this.hp<=floor+.5)this.dummyRegen=true;if(this.dummyRegen){this.hp=Math.min(this.maxHp,this.hp+this.maxHp*.11*dt);if(this.hp>=this.maxHp-.5)this.dummyRegen=false;}}
   const alterReturn=this.effects.find(e=>e.type==='alterTime'&&e.time>0&&e.time<=dt);
   if(alterReturn){this.x=alterReturn.x;this.z=alterReturn.z;this.hp=clamp(alterReturn.hp,1,this.maxHp);this.game.arena.constrain(this);const slot=Number(alterReturn.slot);if(Number.isInteger(slot)&&slot>=0)this.cds[slot]=60;if(this.alterTimeFx?.obj)this.alterTimeFx.obj.dead=true;this.alterTimeFx=null;this.game.vfxRing(this,0x79dfff,2.5);this.game.vfxGlyph(this,0xd7f5ff,.9);this.game.float(this,'ALTER TIME · RETURNED','info');}
   this.effects=this.effects.filter(e=>{e.time-=dt;if(this.game.netGuest){if(e.time<=0&&e.type==='shield')this.shield=0;return e.time>0;}if(['burn','poison','hot','trail','soulScar','agony','unstableAffliction','iceBlock','bleed','livingBomb','cauterizeDoom','karmaDot','flameShock','sharpenRenewal','slicingWinds'].includes(e.type)){e.tick-=dt;if(e.tick<=0){const vendettaFast=(e.source?.cls==='shadow'&&['bleed','poison'].includes(e.type)&&this.has('vendetta')?.source===e.source);const ghanirFast=e.type==='hot'&&e.source?.has&&e.source.has('ghanir');e.tick+=vendettaFast?Math.max(.35,(e.interval||1)*.5):(ghanirFast?Math.max(.25,(e.interval||1)*.5):(e.interval||1));if(e.type==='bladestorm'){this.game.units.filter(u=>u.team!==this.team&&u.alive&&dist(this,u)<=5.2).forEach(u=>this.game.damage(this,u,e.value||22,'Bladestorm Tick'));this.game.vfxCyclone(this,COLORS.warrior,.55);/* BLADESTORM TICK */}else if(e.type==='sharpenRenewal'){const amount=Math.round(this.maxHp*.03),actual=Math.min(this.maxHp-this.hp,amount);if(actual>0){this.hp+=actual;this.stats.healing+=actual;this.stats.healingByAbility['Sharpen Blade']=(this.stats.healingByAbility['Sharpen Blade']||0)+actual;this.stats.healingByTarget[this.name]=(this.stats.healingByTarget[this.name]||0)+actual;this.game.float(this,actual,'heal');this.game.vfxBurst(this,0xd83b77,.48);}e.ticks=(e.ticks||1)-1;if(e.ticks<=0)e.time=0;}else if(e.type==='slicingWinds'){const target=e.target,slash=Number(e.slashIndex||0);if(target?.alive&&dist(this,target)<=7&&this.game.arena.los(this,target)){this.game.animateAction(this,{type:'mortalSwing',school:'physical'});if(this.combatAnim)this.combatAnim.direction=slash%2?-1:1;this.game.damage(this,target,e.value||42,'Slicing Winds');this.game.vfxSlicingWinds(this,target,slash);this.game.audio.playSample('fast_swing',{gain:.42,rate:1.08+slash*.08,cooldown:0,source:this});}e.slashIndex=slash+1;e.ticks=(e.ticks||1)-1;if(e.ticks<=0)e.time=0;}else if(e.type==='hot')this.game.heal(e.source,this,e.value,e.label||'Healing over Time');else if(e.type==='iceBlock')this.game.heal(this,this,e.value,'Ice Block');else if(e.type==='agony'){this.game.damage(e.source,this,e.value*(e.stacks||1),'Creeping Torment');e.stacks=Math.min(4,(e.stacks||1)+1);}else if(e.type==='unstableAffliction'){this.game.damage(e.source,this,e.value*(e.stacks||1),'Unstable Affliction');}else if(e.type==='livingBomb'){this.game.damage(e.source,this,e.value,'Living Bomb');}else if(e.type==='flameShock'){this.game.damage(e.source,this,e.value,'Flame Shock');}else if(e.type==='cauterizeDoom'){this.hp=Math.min(this.hp,Math.max(1,this.maxHp*(e.time/5)*.30));}else{const labels={burn:'Burn',poison:'Poison',trail:'Ember Trail',soulScar:'Soul Scar',bleed:'Rend'};const periodicValue=e.type==='poison'&&this.has('shivPoisonAmp')?e.value*1.30:e.value;this.game.damage(e.source,this,periodicValue,(e.label||labels[e.type]||e.type)+' Tick');}}}if(e.time<=0&&e.type==='shield')this.shield=0;if(e.time<=0&&e.type==='livingBomb'&&this.alive){this.game.damage(e.source,this,e.explodeValue||180,'Living Bomb Explosion');this.game.vfxNova(this,COLORS.fire,2.1,18);this.game.float(this,'LIVING BOMB EXPLODES','error');}if(e.time<=0&&e.type==='bestowFaith'&&this.alive&&e.source?.alive){this.game.heal(e.source,this,e.value||240,'Bestow Faith');this.game.vfxNova(this,COLORS.holy,1.7,14);this.game.vfxGlyph(this,COLORS.holy,.82);this.game.float(this,'BESTOW FAITH','heal');}if(e.time<=0&&e.type==='touchOfDeath'&&this.alive&&e.source?.alive){const burst=Math.max(0,Math.round((e.accumulated||0)*.20));if(burst>0){this.game.damage(e.source,this,burst,'Touch of Death');this.game.vfxNova(this,0xd46cff,2.2,18);this.game.vfxGlyph(this,0xffd36b,.9);this.game.float(this,`TOUCH OF DEATH ${burst}`,'error');}}if(e.time<=0&&e.type==='cauterizeDoom'&&this.alive){this.hp=0;this.die(e.source||null);}return e.time>0;});
-  if(this.cast){this.cast.left-=dt;if(this.game.netGuest||(this.game.netSession&&this.game.netSession.role==='guest')){if(this.cast.left<=0)this.cast=null;}else{if(this.cast.channel){this.cast.tick-=dt;if(this.cast.tick<=0){this.cast.tick+=this.cast.interval;this.game.channelTick(this,this.cast);}}if(this.cast.left<=0){const c=this.cast;this.cast=null;this.game.completeCast(this,c);}}}
-  const smoke=this.has('defensive');const meleeBase=5.15,isCaster=['flame','storm','soul'].includes(this.cls),isHealer=['sage','pala','disc'].includes(this.cls);this.moveSpeed=isCaster?meleeBase*1.15:isHealer?meleeBase*1.05:meleeBase;if(smoke&&this.cls==='shadow')this.moveSpeed=6.75;if(this.mounted)this.moveSpeed*=1.42;if(this.has('tigersLust'))this.moveSpeed*=Number(this.has('tigersLust').speed||1.70);if(this.has('freedom'))this.moveSpeed*=Number(this.has('freedom').speed||1.30);if(this.has('divineSteed'))this.moveSpeed=(meleeBase*1.05)*1.65;if(this.has('discFade'))this.moveSpeed*=Number(this.has('discFade').speed||1.25);if(this.has('angelicBody'))this.moveSpeed*=Number(this.has('angelicBody').speed||1.30);if(this.has('cauterizeDoom'))this.moveSpeed*=1.50;if(this.modelGroup)this.modelGroup.scale.setScalar(this.has('avatar')?1.24:1);
+if(this.cast){this.cast.left-=dt;if(this.game.netGuest||(this.game.netSession&&this.game.netSession.role==='guest')){if(this.cast.left<=0){const completed=this.cast;this.cast=null;if(completed.special==='netMount')this.game.completeCast(this,completed);}}else{if(this.cast.channel){this.cast.tick-=dt;if(this.cast.tick<=0){this.cast.tick+=this.cast.interval;this.game.channelTick(this,this.cast);}}if(this.cast.left<=0){const c=this.cast;this.cast=null;this.game.completeCast(this,c);}}}
+const smoke=this.has('defensive');const meleeBase=5.15,isCaster=['flame','storm','soul'].includes(this.cls),isHealer=['sage','pala','disc'].includes(this.cls);this.moveSpeed=isCaster?meleeBase*1.15:isHealer?meleeBase*1.05:meleeBase;if(smoke&&this.cls==='shadow')this.moveSpeed=6.75;if(this.mounted)this.moveSpeed*=1.704;if(this.has('pounceSpeed'))this.moveSpeed*=Number(this.has('pounceSpeed').speed||1.30);if(this.has('tigersLust'))this.moveSpeed*=Number(this.has('tigersLust').speed||1.70);if(this.has('freedom'))this.moveSpeed*=Number(this.has('freedom').speed||1.30);if(this.has('divineSteed'))this.moveSpeed=(meleeBase*1.05)*1.65;if(this.has('discFade'))this.moveSpeed*=Number(this.has('discFade').speed||1.25);if(this.has('angelicBody'))this.moveSpeed*=Number(this.has('angelicBody').speed||1.30);if(this.has('cauterizeDoom'))this.moveSpeed*=1.50;if(this.modelGroup)this.modelGroup.scale.setScalar(this.has('avatar')?1.24:1);
   const poly=!!this.has('poly');
   const frameDistance=Math.hypot(this.x-this.lastX,this.z-this.lastZ);
   const immobilised=poly||this.has('sleep')||this.has('gouge')||this.has('blind')||this.has('windIncap')||this.has('fear')||this.has('iceBlock')||this.has('stun')||this.has('cheapStun')||this.has('furyStun')||this.has('root')||!!(this.cast&&!this.cast.moveCast);
@@ -2497,7 +3085,11 @@ class Character {
   this.handL.position.set(-.54,.77+bob*.35,0);this.handR.position.set(.54,.77+bob*.35,0);
   this.torso.position.y=1.18+bob;this.pelvis.position.y=.55+bob*.45;
   this.torso.rotation.x=this.motion*.055;this.torso.rotation.z=0;
-  const activeCast=this.cast&&this.cast.special!=='mount'&&!poly;
+  /* This used to end on `&& !poly`, so it evaluated to the boolean true rather than
+     the cast itself. Every `activeCast.a` read was therefore undefined, which meant
+     Fists of Fury never matched its name check and silently used the generic caster
+     pose instead of its martial channel. */
+  const activeCast=(!poly&&this.cast&&this.cast.special!=='mount')?this.cast:null;
   this.castOrb.visible=!!activeCast;
   if(activeCast){
     const pulse=.88+Math.sin(this.game.time*13)*.18;
@@ -2519,9 +3111,12 @@ class Character {
     const progress=1-(this.combatAnim.until-this.game.time)/this.combatAnim.dur;
     const strike=Math.sin(Math.min(1,progress)*Math.PI);
     if(this.combatAnim.type==='melee'){
-      const left=Number(this.combatAnim.direction||1)<0,arm=left?this.armL:this.armR,hand=left?this.handL:this.handR,side=left?-1:1;
-      arm.rotation.x=-1.75*strike;arm.rotation.z=side*(-.18-.35*strike);
-      hand.position.set(side*.47,1.05,-.62*strike);this.torso.rotation.z=-side*.10*strike;
+      const left=Number(this.combatAnim.direction||1)<0,arm=left?this.armL:this.armR,hand=left?this.handL:this.handR,side=left?-1:1,style=this.combatAnim.style||'generic';
+      if(style==='shadowCross'){this.armL.rotation.x=-1.72*strike;this.armR.rotation.x=-1.72*strike;this.armL.rotation.z=.72*side*strike;this.armR.rotation.z=-.72*side*strike;this.handL.position.set(-.38,1.04,-.60*strike);this.handR.position.set(.38,1.04,-.60*strike);this.torso.rotation.z=-side*.22*strike;}
+      else if(style.startsWith('warrior')){this.armL.rotation.x=-1.28*strike;this.armR.rotation.x=-2.18*strike;this.handL.position.set(-.34,1.18,-.38*strike);this.handR.position.set(.40,1.25,-.72*strike);this.torso.rotation.x=-.20*strike;this.torso.rotation.z=-side*.24*strike;}
+      else if(style.startsWith('wind')){this.armL.rotation.x=-.84*strike;this.armR.rotation.x=-1.46*strike;const kick=left?this.legL:this.legR;kick.rotation.x=-1.22*strike;this.torso.rotation.z=-side*.30*strike;hand.position.set(side*.44,1.08,-.48*strike);}
+      else if(style.startsWith('paladin')){this.armR.rotation.x=-2.02*strike;this.armR.rotation.z=-side*.38*strike;this.armL.rotation.x=-1.34;this.armL.rotation.z=.58;this.handR.position.set(.46,1.12,-.66*strike);this.handL.position.set(-.38,1.18,-.30);this.torso.rotation.z=-side*.16*strike;}
+      else{arm.rotation.x=-1.75*strike;arm.rotation.z=side*(-.18-.35*strike);hand.position.set(side*.47,1.05,-.62*strike);this.torso.rotation.z=-side*.10*strike;}
     }else{
       this.armL.rotation.x=-1.18*strike;this.armR.rotation.x=-1.18*strike;
       this.handL.position.set(-.39,1.2,-.34*strike);this.handR.position.set(.39,1.2,-.34*strike);
@@ -2572,7 +3167,7 @@ class Character {
   this.mesh.scale.x=poly?1.14:1; this.mesh.scale.y=poly?1.14:1; this.mesh.scale.z=poly?1.14:1;
   this.bodyMat.emissiveIntensity=poly?.42:.24;
   let renderX=this.x,renderZ=this.z;if(this.dashTween){this.dashTween.left=Math.max(0,this.dashTween.left-dt);const p=1-this.dashTween.left/this.dashTween.total;renderX=this.dashTween.from.x+(this.dashTween.to.x-this.dashTween.from.x)*p;renderZ=this.dashTween.from.z+(this.dashTween.to.z-this.dashTween.from.z)*p;if(this.dashTween.left<=0)this.dashTween=null;}
-  if(this.ai&&!this.game.netGuest){const follow=1-Math.exp(-42*dt);this.visualX+=(renderX-this.visualX)*follow;this.visualZ+=(renderZ-this.visualZ)*follow;}else{this.visualX=renderX;this.visualZ=renderZ;}if(this.isPlayer&&((this.jumpY||0)>0||(this.jumpVel||0)!==0)){this.jumpVel-=15.5*dt;this.jumpY=Math.max(0,(this.jumpY||0)+this.jumpVel*dt);if(this.jumpY<=0){this.jumpY=0;this.jumpVel=0;}}this.mesh.position.set(this.visualX,this.jumpY||0,this.visualZ);const actionFacing=!!(this.cast&&this.cast.target)||(this.combatAnim&&this.combatAnim.until>this.game.time);const face=(this.cast&&this.cast.target)||(this.game.target===this.game.player?null:this.game.target);if(this.isPlayer&&!poly&&!actionFacing){const y=this.game.cameraRig.facingYaw??this.game.cameraRig.yaw;this.mesh.rotation.y=Math.atan2(-Math.sin(y),-Math.cos(y));}else if(face&&face!==this&&face.alive&&!poly)this.mesh.rotation.y=Math.atan2(face.x-this.x,face.z-this.z);if(this.has('bladestorm'))this.mesh.rotation.y+=dt*17;const targeted=this.game.target===this;this.selectRing.visible=targeted;if(targeted){this.selectRing.rotation.z+=dt*2.8;this.selectRing.material.opacity=.82+.18*Math.sin(this.game.time*7);}if(this.targetBeacon){this.targetBeacon.visible=false;this.targetBeacon.rotation.y+=dt*2.2;this.targetBeacon.children.forEach((c,i)=>{if(c.material)c.material.opacity=.48+.24*Math.sin(this.game.time*5+i);});}this.aura.material.opacity=this.alive?.86:.12;
+  if(this.ai&&!this.game.netGuest){const follow=1-Math.exp(-42*dt);this.visualX+=(renderX-this.visualX)*follow;this.visualZ+=(renderZ-this.visualZ)*follow;}else{this.visualX=renderX;this.visualZ=renderZ;}if(this.isPlayer&&((this.jumpY||0)>0||(this.jumpVel||0)!==0)){this.jumpVel-=15.5*dt;this.jumpY=Math.max(0,(this.jumpY||0)+this.jumpVel*dt);if(this.jumpY<=0){this.jumpY=0;this.jumpVel=0;}}this.mesh.position.set(this.visualX,this.jumpY||0,this.visualZ);const furyFacing=this.cast?.a?.type==='fistsChannel'&&this.game.target?.alive&&this.game.target.team!==this.team?this.game.target:null;const castFacing=furyFacing||(this.cast&&this.cast.target);const actionFacing=!!castFacing||(this.combatAnim&&this.combatAnim.until>this.game.time);const face=castFacing||(this.game.target===this.game.player?null:this.game.target);if(this.isPlayer&&!poly&&!actionFacing){const y=this.game.cameraRig.facingYaw??this.game.cameraRig.yaw;this.mesh.rotation.y=Math.atan2(-Math.sin(y),-Math.cos(y));}else if((this.isPlayer||!this.game.netGuest)&&face&&face!==this&&face.alive&&!poly)this.mesh.rotation.y=Math.atan2(face.x-this.x,face.z-this.z);if(this.game.netGuest&&!this.isPlayer&&Number.isFinite(this.netFacing))this.mesh.rotation.y+=Math.atan2(Math.sin(this.netFacing-this.mesh.rotation.y),Math.cos(this.netFacing-this.mesh.rotation.y))*(1-Math.exp(-dt*35));if(this.has('bladestorm'))this.mesh.rotation.y+=dt*17;const targeted=this.game.target===this;this.selectRing.visible=targeted;if(targeted){this.selectRing.rotation.z+=dt*2.8;this.selectRing.material.opacity=.82+.18*Math.sin(this.game.time*7);}if(this.targetBeacon){this.targetBeacon.visible=false;this.targetBeacon.rotation.y+=dt*2.2;this.targetBeacon.children.forEach((c,i)=>{if(c.material)c.material.opacity=.48+.24*Math.sin(this.game.time*5+i);});}this.aura.material.opacity=this.alive?.86:.12;
   if(this.rig){
     const fury=activeCast&&activeCast.a&&activeCast.a.name==='Fists of Fury';
     const st={motion:this.motion,phase:this.walkPhase,time:this.game.time,spell:false,castFury:false,melee:null,meleeStrike:0,mounted:!!(this.mounted||this.has('divineSteed'))};
@@ -2581,7 +3176,10 @@ class Character {
       else if(this.combatAnim&&this.combatAnim.until>this.game.time){
         const progress=1-(this.combatAnim.until-this.game.time)/this.combatAnim.dur;
         const strike=Math.sin(Math.min(1,progress)*Math.PI);
-        if(this.combatAnim.type==='melee'){ st.melee=progress; st.meleeStrike=strike; st.meleeSide=Number(this.combatAnim.direction||1); } else { st.spell=true; }
+        if(this.combatAnim.type==='melee'){
+          st.melee=progress;st.meleeProgress=progress;st.meleeStrike=strike;
+          st.meleeSide=Number(this.combatAnim.direction||1);st.meleeStyle=this.combatAnim.style||'generic';
+        } else { st.spell=true; }
       }
       const tier=this.game.performanceTier||0,poseDivisor=tier>=2?(this.isPlayer?2:3):(tier===1&&!this.isPlayer?2:1),poseOffset=this.isPlayer?0:Math.max(0,this.game.units.indexOf(this));
       if(((this.game.visualFrame||0)+poseOffset)%poseDivisor===0)AetherKit.pose(this.rig,st,dt*poseDivisor);
@@ -2605,11 +3203,11 @@ class Character {
  this.game.vfxBurst(source,COLORS.fire,.42);
  if(source.hp<=0)this.game.kill(source,this);
 }if(source){const ability=label||'Damage';source.stats.damage+=amount;source.stats.damageByAbility[ability]=(source.stats.damageByAbility[ability]||0)+amount;source.stats.damageByTarget[this.name]=(source.stats.damageByTarget[this.name]||0)+amount;}this.game.float(this,amount,'damage');this.game.flash(this.mesh,0xff4c48);}
-  if(this.hp<=0){if(this.cls==='flame'&&talentRank(this.cls,'flame_cauterize')>0&&!this.has('cauterizeUsed')){this.hp=Math.round(this.maxHp*.30);this.effect('cauterizeUsed',9999);this.effect('cauterizeDoom',5,{source});this.game.vfxNova(this,COLORS.fire,2.4,20);this.game.vfxOrbit(this,COLORS.fire,1.5);this.game.float(this,'CAUTERIZE · 5s','error');this.game.audio.play('fire');}else this.die(source);}}
- receiveHeal(source,amount,label='Healing'){if(!this.alive)return;if(this.has('smokeBomb')&&source&&source!==this){this.game.float(this,'HEAL BLOCKED','error');return;}if(this.has('sharpenedWound'))amount*=.60;amount*=1-this.game.dampening;const actual=Math.min(this.maxHp-this.hp,Math.round(amount));if(actual<=0)return;this.hp+=actual;if(source){const ability=label||'Healing';source.stats.healing+=actual;source.stats.healingByAbility[ability]=(source.stats.healingByAbility[ability]||0)+actual;source.stats.healingByTarget[this.name]=(source.stats.healingByTarget[this.name]||0)+actual;}this.game.float(this,actual,'heal');this.game.vfxBurst(this,0x63f5b0,.7);}
+  if(this.hp<=0){if(this.cls==='flame'&&unitTalentRank(this,'flame_cauterize')>0&&!this.cauterizeConsumed){this.cauterizeConsumed=true;this.hp=Math.round(this.maxHp*.30);this.effect('cauterizeUsed',9999);this.effect('cauterizeDoom',5,{source});this.game.vfxNova(this,COLORS.fire,2.4,20);this.game.vfxOrbit(this,COLORS.fire,1.5);this.game.float(this,'CAUTERIZE · FINAL 5 SEC','error');this.game.audio.play('fire');}else this.die(source);}}
+ receiveHeal(source,amount,label='Healing'){if(!this.alive)return;if(this.has('smokeBomb')&&source&&source!==this){this.game.float(this,'HEAL BLOCKED','error');return;}if(this.has('sharpenedWound'))amount*=.60;if(label!=='Reverse Harm')amount*=1-this.game.dampening;const actual=Math.min(this.maxHp-this.hp,Math.round(amount));if(actual<=0)return;this.hp+=actual;if(source){const ability=label||'Healing';source.stats.healing+=actual;source.stats.healingByAbility[ability]=(source.stats.healingByAbility[ability]||0)+actual;source.stats.healingByTarget[this.name]=(source.stats.healingByTarget[this.name]||0)+actual;}this.game.float(this,actual,'heal');this.game.vfxBurst(this,0x63f5b0,.7);}
  fallToGround(){if(this.castOrb)this.castOrb.visible=false;if(this.palaWings)this.palaWings.visible=false;if(this.discWings)this.discWings.visible=false;if(this.divineSteedMount)this.divineSteedMount.visible=false;if(this.aura)this.aura.visible=false;if(this.selectRing)this.selectRing.visible=false;if(this.targetBeacon)this.targetBeacon.visible=false;const side=this.team==='ally'?-1:1;if(this.modelGroup){this.modelGroup.position.y=.18;this.modelGroup.rotation.x=.10;this.modelGroup.rotation.z=side*Math.PI*.5;}else{this.mesh.position.y=.18;this.mesh.rotation.z=side*Math.PI*.5;}}
  die(killer){this.game.audio.play('death',this);this.alive=false;this.hp=0;this.cast=null;this.mounted=false;if(this.mountVisual)this.mountVisual.visible=false;if(this.gearAppearance)this.gearAppearance.visible=false;if(this.prestigeVisual)this.prestigeVisual.visible=false;this.fallToGround();if(killer){killer.stats.kb++;}/* Death now applies one lightweight fallen-body pose instead of leaving the character standing or traversing the full model tree. */this.game.float(this,'DEFEATED','error');this.game.log(`${this.name} was defeated.`);if(this.game.target===this)this.game.target=null;}
- destroy(){this.game.clearTotemMasteryVisuals?.(this);this.game.clearCombustionVisuals?.(this);this.game.scene.remove(this.mesh);this.plate.remove();}
+ destroy(){if(this.destroyed)return;this.destroyed=true;this.restoreAvatarMaterials?.();this.game.clearTotemMasteryVisuals?.(this);this.game.clearCombustionVisuals?.(this);this.game.scene.remove(this.mesh);this.game.queueDispose(this.mesh);this.plate.remove();}
 }
 const aetherBaseTakeDamage=Character.prototype.takeDamage;
 Character.prototype.takeDamage=function(source,amount,label){
@@ -2640,6 +3238,7 @@ class AIController {
  constructor(game,unit){
   this.game=game;this.u=unit;this.wait=Math.random()*.35;this.reactiveWait=Math.random()*.08;this.focus=null;this.nextFocusAt=0;this.healFocus=null;this.healFocusUntil=0;this.trinketDecision=null;this.dispelDecision=null;this.reactiveHealth=new Map();
   this.moveIntent=null;this.route=null;this.stuckTime=0;this.lastMoveX=unit.x;this.lastMoveZ=unit.z;this.openerHold=2.2+Math.random()*1.8;this.discKitePlan=null;
+  this.duelKiteUntil=0;this.incomingThreatPlan=null;this.lastThreatActionAt=-99;
  }
  ratingProfile(base){
   const playerClass=this.game.player?.cls||this.u.cls,mode=bracketKey(this.game.mode||'2v2');
@@ -2651,12 +3250,14 @@ class AIController {
  update(dt){
   const u=this.u;if(!u.alive||this.game.phase!=='fight'||this.game.paused)return;
   this.tickMovement(dt);
+  if(u.cls==='wind'&&unitTalentRank(u,'wind_reverse_harm')&&u.hp/u.maxHp<.88&&!u.cast){const i=unitAbilities(u).findIndex(a=>a.type==='reverseHarm');if(i>=0&&this.game.tryAbility(u,i,u,false))return;}
   const d=this.ratingProfile(DIFFICULTY[this.game.difficulty]);
   this.reactiveWait-=dt;
   if(this.reactiveWait<=0){
    this.reactiveWait=[.16,.12,.085,.06,.045][d.tier]||.16;
    const reactiveAllies=this.game.units.filter(x=>x.team===u.team&&x.alive);
    const reactiveEnemies=this.game.units.filter(x=>x.team!==u.team&&x.alive&&!isUntargetableStealth(x,u));
+   if(this.predictiveIncomingResponse(reactiveEnemies,d))return;
    const hardLocked=['furyStun','cheapStun','stun','poly','sleep','blind','windIncap','fear','iceBlock'].some(type=>u.has(type));
    if(!hardLocked){
     if((u.cls==='sage'||u.cls==='pala'||u.cls==='disc')&&this.antiMageHealerResponse(reactiveAllies,reactiveEnemies))return;if((u.cls==='sage'||u.cls==='pala'||u.cls==='disc')&&this.reactiveHealerEmergency(reactiveAllies,reactiveEnemies,d))return;
@@ -2723,7 +3324,7 @@ class AIController {
   return rate;
  }
  readyAbilityIndex(unit,names){
-  const arr=AB[unit?.cls]||[];
+  const arr=unitAbilities(unit);
   for(const name of names){
    const i=arr.findIndex(a=>a.name===name||a.type===name);
    if(i<0)continue;
@@ -2782,7 +3383,7 @@ class AIController {
  }
  useReactiveAbility(index,target,label){
   const u=this.u;if(index<0)return false;
-  const requested=AB[u.cls]?.[index];
+  const requested=unitAbilities(u)?.[index];
   // The emergency evaluator runs several times during a cast. Keep an
   // already-useful cast committed instead of cancelling and restarting the
   // exact same spell on the exact same ally (the Shadow Mend loop).
@@ -2859,7 +3460,7 @@ class AIController {
    if(ghanir>=0&&!u.has('ghanir')&&(target.has('hot')||allies.some(a=>a.has('hot')))&&state.hp<.86&&(state.burst>=2.0||state.drop>.08)&&this.useReactiveAbility(ghanir,u,"G'Hanir"))return true;
    if(iron>=0&&!target.has('defensive')&&state.hp<.80&&(state.burst>=2.4||state.drop>.11)&&this.useReactiveAbility(iron,target,'Ironbark'))return true;
    if((state.hp<.60||state.drop>.16||state.burst>=4.0)&&tide>=0&&this.useReactiveAbility(tide,target,'Renewal Tide'))return true;
-   const tideIndex=(AB[u.cls]||[]).findIndex(a=>a.name==='Renewal Tide');
+   const tideIndex=(unitAbilities(u)||[]).findIndex(a=>a.name==='Renewal Tide');
    if(tideIndex>=0&&u.cds[tideIndex]>1&&swift>=0&&(state.hp<.66||severe)&&this.useReactiveAbility(swift,u,'Nature Swiftness'))return true;
    const injured=allies.filter(a=>a.hp/a.maxHp<.64).length;
    if(injured>=2&&blossom>=0&&this.useReactiveAbility(blossom,target,'Spirit Blossom'))return true;
@@ -2878,6 +3479,86 @@ class AIController {
   if(!lethal)return false;
   // High-frequency defensive reaction only. Positioning and counter-pressure remain in the normal decision loop.
   return !!this.game.tryBotEmergencyDefensive?.(u);
+ }
+ incomingCastThreat(enemies,d){
+  const u=this.u,controlTypes=new Set(['poly','sleep','fear','groundStun']);
+  let best=null;
+  for(const caster of enemies){
+   const cast=caster.cast,a=cast?.a,target=cast?.target;
+   if(!cast||cast.channel||!a||target!==u||cast.left<=.03||!this.game.arena.los(caster,u))continue;
+   const name=String(a.name||''),type=String(a.type||''),control=controlTypes.has(type);
+   if(!control&&Number(a.value||0)<=0)continue;
+   let base=Math.max(0,Number(a.value||0));
+   if(name==='Chaos Bolt')base*=1.65;
+   const hp=u.hp/u.maxHp,damageShare=base/Math.max(1,u.maxHp),projected=(u.hp-Math.max(0,base-(u.shield||0)))/u.maxHp;
+   const weights={'Chaos Bolt':5.2,'Volcanic Eruption':3.6,'Meteor':3.5,'Ember Lance':2.25,'Cinder Bolt':1.25,'Arc Spark':1.15,'Prism Hex':2.8,'Fear':2.75,'Lullaby Bloom':2.65,'Shadowfury':3.0};
+   let score=(weights[name]||0)+damageShare*4.2+(1-hp)*2.1;
+   if(this.game.unitUnderMajorOffensive?.(u))score+=1.25;
+   if(projected<.52)score+=1.1;if(projected<.30)score+=1.7;
+   if(control)score+=u.trinketCd>0?.25:.65;
+   const window=.72+d.tier*.12+(name==='Chaos Bolt'?.38:control?.18:0);
+   const dangerous=score>=3.0||projected<.44||name==='Chaos Bolt';
+   if(!dangerous||cast.left>window)continue;
+   const threat={caster,cast,a,name,type,control,base,score,projected,left:cast.left,magic:a.school!=='physical'};
+   if(!best||threat.score>best.score||threat.score===best.score&&threat.left<best.left)best=threat;
+  }
+  return best;
+ }
+ threatPillarPlan(threat){
+  const u=this.u;
+  if(this.incomingThreatPlan?.cast===threat.cast&&this.incomingThreatPlan.until>this.game.time)return this.incomingThreatPlan;
+  const point=this.pillarKitePoint(threat.caster,u),distance=point?dist(u,point):Infinity;
+  this.incomingThreatPlan={cast:threat.cast,point,distance,until:this.game.time+Math.max(.25,threat.left+.2)};
+  return this.incomingThreatPlan;
+ }
+ predictiveIncomingResponse(enemies,d){
+  const u=this.u;if(u.has('iceBlock'))return true;
+  const threat=this.incomingCastThreat(enemies,d);if(!threat){this.incomingThreatPlan=null;return false;}
+  const cc=this.game.breakableControl(u),severe=threat.score>=4.4||threat.projected<.38||threat.name==='Chaos Bolt';
+  if(cc&&cc.type!=='root'){
+   if(u.cls==='flame'&&(threat.projected<.25||u.trinketCd>0&&threat.left<.48)){
+    const ice=this.readyAbilityIndex(u,['Ice Block','iceBlock']);
+    if(ice>=0&&this.useReactiveAbility(ice,u,`predicted ${threat.name}`)){this.lastThreatActionAt=this.game.time;return true;}
+   }
+   if(severe&&u.trinketCd<=0&&threat.left<=1.15){
+    if(this.game.useTrinket(u,true)){this.trinketDecision=null;this.lastThreatActionAt=this.game.time;return true;}
+   }
+   return false;
+  }
+
+  // Prefer denying the cast with positioning when the pillar is genuinely reachable.
+  const plan=this.threatPillarPlan(threat),speed=Math.max(1,Number(u.moveSpeed||5));
+  if(!cc&&plan.point&&plan.distance/speed<=Math.max(.15,threat.left-.06)){
+   this.moveToPoint(plan.point.x,plan.point.z,Math.max(.45,threat.left+.18));
+   this.lastThreatActionAt=this.game.time;return true;
+  }
+
+  // A Flame Duelist can blink an already-valid escape line before spending a major wall.
+  if(u.cls==='flame'&&plan.point&&plan.distance<=17&&this.game.arena.blockingPillar(threat.caster,plan.point)){
+   const step=this.readyAbilityIndex(u,['Blazing Step']);
+   if(step>=0&&threat.left>.28){
+    this.moveToPoint(plan.point.x,plan.point.z,Math.max(.5,threat.left+.15));
+    if(this.useReactiveAbility(step,u,`blink line on ${threat.name}`)){this.lastThreatActionAt=this.game.time;return true;}
+   }
+  }
+
+  const alreadyTraded=['alterTime','reflect','cloakShadows','touchKarma','warriorGuard','undyingResolve','staticAegisGuard','painSuppression','discFade','ironbark'].some(type=>u.has(type));
+  if(alreadyTraded)return true;
+
+  // Class-aware trades: reflect or immunise magic, then use the lighter survival tools.
+  if(u.cls==='warrior'&&threat.magic){const i=this.readyAbilityIndex(u,['Spell Reflection','reflect']);if(i>=0&&this.useReactiveAbility(i,u,`reflect ${threat.name}`))return true;}
+  if(u.cls==='shadow'&&threat.magic){const i=this.readyAbilityIndex(u,['Cloak of Shadows','cloak']);if(i>=0&&this.useReactiveAbility(i,u,`cloak ${threat.name}`))return true;}
+  if(u.cls==='flame'&&!u.has('alterTime')){const i=this.readyAbilityIndex(u,['Alter Time']);if(i>=0&&this.useReactiveAbility(i,u,`alter ${threat.name}`))return true;}
+  if(u.cls==='wind'){const i=this.readyAbilityIndex(u,['Touch of Karma','karma','Willow Guard','monkDefensive']);if(i>=0&&this.useReactiveAbility(i,u,`trade ${threat.name}`))return true;}
+  if(u.cls==='storm'){const i=this.readyAbilityIndex(u,['Static Aegis','Grounding Aegis']);if(i>=0&&this.useReactiveAbility(i,u,`aegis ${threat.name}`))return true;}
+  if(u.cls==='soul'){const i=this.readyAbilityIndex(u,severe?['Dark Pact','Undying Resolve']:['Dark Pact']);if(i>=0&&this.useReactiveAbility(i,u,`ward ${threat.name}`))return true;}
+  if(u.cls==='pala'){const i=this.readyAbilityIndex(u,['Divine Protection','paladinGuard']);if(i>=0&&this.useReactiveAbility(i,u,`guard ${threat.name}`))return true;}
+  if(u.cls==='disc'){const i=this.readyAbilityIndex(u,['Pain Suppression','Fade','discFade']);if(i>=0&&this.useReactiveAbility(i,u,`guard ${threat.name}`))return true;}
+  if(u.cls==='sage'){const i=this.readyAbilityIndex(u,['Ironbark']);if(i>=0&&this.useReactiveAbility(i,u,`guard ${threat.name}`))return true;}
+  if(u.cls==='warrior'&&!threat.magic){const i=this.readyAbilityIndex(u,['Shield Wall','warriorGuard']);if(i>=0&&this.useReactiveAbility(i,u,`wall ${threat.name}`))return true;}
+  if(u.cls==='flame'&&severe){const i=this.readyAbilityIndex(u,['Ice Block','iceBlock']);if(i>=0&&this.useReactiveAbility(i,u,`block ${threat.name}`))return true;}
+  if(plan.point){this.moveToPoint(plan.point.x,plan.point.z,Math.max(.45,threat.left+.18));return true;}
+  return false;
  }
  stopMove(clearRoute=true){this.moveIntent=null;if(clearRoute){this.route=null;this.stuckTime=0;}}
  moveToward(target,away=false){
@@ -2987,7 +3668,7 @@ class AIController {
   const injured=allies.filter(a=>a.alive&&!a.has('smokeBomb')&&a.hp/a.maxHp<.90).sort((a,b)=>this.healUrgency(b,enemies)-this.healUrgency(a,enemies));
   if(injured.length<2||injured.some(a=>a.hp/a.maxHp<.54))return false;
   const usable=target=>dist(u,target)<=28&&this.game.arena.los(u,target);
-  const use=(name,target)=>{const i=AB[u.cls].findIndex(a=>a.name===name);if(i<0||u.cds[i]>0||u.resource<(AB[u.cls][i].cost||0)||!usable(target))return false;return this.game.tryAbility(u,i,target,false)===true;};
+  const use=(name,target)=>{const i=unitAbilities(u).findIndex(a=>a.name===name);if(i<0||u.cds[i]>0||u.resource<(unitAbilities(u)[i].cost||0)||!usable(target))return false;return this.game.tryAbility(u,i,target,false)===true;};
   if(u.cls==='sage'){
    for(const target of injured){if(!this.hasNamedHot(target,'Rejuvenate',2.5)&&use('Rejuvenate',target))return true;}
    for(const target of injured){if(!this.hasNamedHot(target,'Blooming Echo',2.5)&&use('Blooming Echo',target))return true;}
@@ -3037,8 +3718,8 @@ class AIController {
   if(kill)return false;
   const controls={flame:['Prism Hex','Frostfire Nova'],warrior:['Stormbolt','Intimidating Shout'],wind:['Incapacitate','Valley Sweep'],shadow:['Blind','Ribbreaker'],storm:['Static Snare']}[u.cls]||[];
   for(const name of controls){
-   const i=AB[u.cls].findIndex(a=>a.name===name);if(i<0||u.cds[i]>0||u.resource<(AB[u.cls][i].cost||0))continue;
-   const a=AB[u.cls][i],selfCast=['Intimidating Shout','Valley Sweep'].includes(name),max=selfCast?(a.range||8):(a.range||22);
+   const i=unitAbilities(u).findIndex(a=>a.name===name);if(i<0||u.cds[i]>0||u.resource<(unitAbilities(u)[i].cost||0))continue;
+   const a=unitAbilities(u)[i],selfCast=['Intimidating Shout','Valley Sweep'].includes(name),max=selfCast?(a.range||8):(a.range||22);
    if(dist(u,threat)>max+.5||!this.game.arena.los(u,threat)||this.ccValue(threat,a.type||'stun')<=0)continue;
    if(this.game.tryAbility(u,i,selfCast?u:threat,false)){this.focus=threat;this.nextFocusAt=this.game.time+1.1;return true;}
   }
@@ -3049,8 +3730,8 @@ class AIController {
  selfSaveAbility(names,target=null){
   const u=this.u;target=target||u;
   for(const name of names){
-   const i=AB[u.cls].findIndex(a=>a.name===name||a.type===name);
-   if(i>=0&&u.cds[i]<=0&&u.resource>=(AB[u.cls][i].cost||0)){
+   const i=unitAbilities(u).findIndex(a=>a.name===name||a.type===name);
+   if(i>=0&&u.cds[i]<=0&&u.resource>=(unitAbilities(u)[i].cost||0)){
     if(this.game.tryAbility(u,i,target))return true;
    }
   }
@@ -3098,14 +3779,102 @@ class AIController {
   if(!target?.alive||u.cast||u.gcd>0||!this.game.arena.los(u,target))return false;
   const pressureNames={warrior:['Mortal Swing','Rend'],shadow:['Night Slash','Viper Cut'],wind:['Zephyr Palm','Cloudstep Kick'],storm:['Frost Shock']}[u.cls]||[];
   for(const name of pressureNames){
-   const index=AB[u.cls].findIndex(a=>a.name===name),a=index>=0?AB[u.cls][index]:null;
+   const index=unitAbilities(u).findIndex(a=>a.name===name),a=index>=0?unitAbilities(u)[index]:null;
    if(!a||u.cds[index]>0||u.resource<(a.cost||0)||dist(u,target)>(a.range||0)+.35)continue;
    if(this.game.tryAbility(u,index,target,false)===true)return true;
   }
   return false;
  }
+ duelCoverPoint(threat){
+  const u=this.u;let best=null,bestDistance=Infinity;
+  for(const p of this.game.arena.pillars||[]){
+   const angle=Math.atan2(p.z-threat.z,p.x-threat.x),radius=p.r+1.6;
+   for(const offset of [-.55,0,.55]){
+    const point={x:p.x+Math.cos(angle+offset)*radius,z:p.z+Math.sin(angle+offset)*radius};
+    const distance=dist(u,point);
+    if(Math.abs(point.x)>BALANCE.arenaX-1.4||Math.abs(point.z)>BALANCE.arenaZ-1.4||distance>u.moveSpeed*1.6||distance>=bestDistance)continue;
+    if(!this.game.arena.los(threat,point)&&this.game.arena.los(u,point)){best=point;bestDistance=distance;}
+   }
+  }
+  return best;
+ }
+ duelResourceReserve(){
+  const u=this.u;if(this.game.mode!=='1v1'||u.hp/u.maxHp>=.70)return 0;
+  let reserve=0;const abilities=unitAbilities(u);
+  for(let i=0;i<abilities.length;i++){
+   const a=abilities[i];if(u.cds[i]>2)continue;
+   const sustain=['heal','healingStreamTotem','reverseHarm','victoryRush'].includes(a.type);
+   if(sustain&&(a.type==='reverseHarm'||(this.game.dampening||0)<.75))reserve=Math.max(reserve,a.cost||0);
+  }
+  return reserve;
+ }
+ duelSurvivalResponse(enemies,d){
+  const u=this.u;let target=null,nearest=Infinity;
+  for(const e of enemies){if(!e.alive||e.healingStreamTotem||e.summonedUnit||e.summonKind||isUntargetableStealth(e,u))continue;const distance=dist(u,e);if(distance<nearest){target=e;nearest=distance;}}
+  if(!target)return false;
+  const now=this.game.time,hp=u.hp/u.maxHp,targetHp=target.hp/target.maxHp,los=this.game.arena.los(u,target);
+  const melee=['shadow','wind','warrior'].includes(u.cls),enemyMelee=['shadow','wind','warrior'].includes(target.cls);
+  // Only visible active effects and casts, plus our own health/resources/cooldowns.
+  const enemyBurst=los&&!!this.game.majorOffensiveActiveOnUnit?.(target),ownBurst=!!this.game.majorOffensiveActiveOnUnit?.(u);
+  const protectedTarget=!!this.game.majorDefensiveActive?.(target)||!!target.has('undyingResolve');
+  const previous=this.duelObservation,elapsed=previous&&previous.target===target?now-previous.time:0;
+  const drop=elapsed>.02&&elapsed<2?Math.max(0,(previous.hp-hp)/elapsed):0;
+  this.duelObservation={target,time:now,hp};
+  const lethalRisk=hp<.24||drop>.10&&hp<.55||enemyBurst&&hp<.48;
+  const connected=los&&nearest<=(melee?4.8:24);
+  const commit=connected&&!protectedTarget&&!lethalRisk&&(targetHp<.22||hp>.48&&(ownBurst||targetHp<hp-.22));
+  // Never restart a useful heal at each decision tick.
+  if(u.cast&&u.cast.target===u&&['heal','hot'].includes(u.cast.a?.type))return true;
+  let used=false;
+  if(u.cls==='flame'){
+   if(hp<.66&&(!commit||enemyBurst))used=this.selfSaveAbility(['Fire Shield','Molten Armor','Alter Time']);
+   if(!used&&(hp<.27||enemyBurst&&hp<.38))used=this.selfSaveAbility(['Ice Block']);
+  }else if(u.cls==='shadow'){
+   if(hp<.66)used=this.selfSaveAbility(['Crimson Vial']);
+   if(!used&&(hp<.45||enemyBurst&&hp<.62))used=this.selfSaveAbility(enemyMelee?['Evasion','Smoke Veil']:['Cloak of Shadows','Smoke Veil']);
+  }else if(u.cls==='wind'){
+   if((u.has('root')||u.has('slow'))&&!commit)used=this.selfSaveAbility(["Tiger's Lust"]);
+   if(!used&&(hp<.45||enemyBurst&&hp<.62))used=this.selfSaveAbility(['Touch of Karma','Willow Guard','monkDefensive']);
+  }else if(u.cls==='warrior'){
+   const victory=unitAbilities(u).findIndex(a=>a.name==='Victory Rush');
+   if(victory>=0&&u.cds[victory]<=0&&u.resource>=(unitAbilities(u)[victory].cost||0)&&hp<.70&&dist(u,target)<=4.8&&this.game.arena.los(u,target))used=this.game.tryAbility(u,victory,target)===true;
+   if(!used&&(hp<.41||enemyBurst&&hp<.60))used=this.selfSaveAbility(['Shield Wall','warriorGuard']);
+  }else if(u.cls==='storm'){
+   if(hp<.72&&!commit&&(this.game.dampening||0)<.75){
+    used=this.selfSaveAbility(['Healing Stream Totem']);
+    const safeHeal=!los||nearest>(enemyMelee?8:25)||this.hasSetupCC(target)||!!this.game.majorDefensiveActive?.(u);
+    if(!used&&(safeHeal||hp<.32))used=this.selfSaveAbility(['Healing Surge']);
+   }
+   if(!used&&(hp<.47||enemyBurst&&hp<.62))used=this.selfSaveAbility(['Static Aegis','Grounding Aegis']);
+  }else if(u.cls==='soul'){
+   if(hp<.70&&!commit&&los&&nearest<=20&&(this.game.dampening||0)<.8&&this.ccValue(target,'fear')>0&&!this.hasSetupCC(target))used=this.selfSaveAbility(['Mortal Horror'],target);
+   if(!used&&hp<.31)used=this.selfSaveAbility(['Undying Resolve']);
+   if(!used&&(hp<.56||enemyBurst&&hp<.68))used=this.selfSaveAbility(['Dark Pact']);
+  }
+  if(used){this.focus=target;return true;}
+  if(commit){if(this.duelKiteUntil>now)this.stopMove();this.duelKiteUntil=0;return false;}
+  // A reset must buy something: avoid active burst/defenses or recover a near-ready save.
+  // It expires even if health stays low; four seconds of normal pressure follow each reset.
+  let recoverySoon=false;
+  const abilities=unitAbilities(u);
+  for(let i=0;i<abilities.length;i++)if(['heal','reverseHarm','victoryRush','crimsonVial','shieldSelf'].includes(abilities[i].type)&&u.cds[i]>0&&u.cds[i]<=2.2&&hp<.65){recoverySoon=true;break;}
+  const needsReset=!commit&&(enemyBurst&&hp<.72||protectedTarget||lethalRisk&&recoverySoon);
+  if(needsReset&&nearest<18&&now>=(this.duelResetReadyAt||0)&&now>=this.duelKiteUntil){this.duelKiteUntil=now+1.6;this.duelResetReadyAt=now+5.6;this.duelCover=null;}
+  if(now<this.duelKiteUntil&&needsReset){
+   if(!enemyMelee){
+    if(this.duelCover===null)this.duelCover=this.duelCoverPoint(target)||false;
+    if(this.duelCover&&!this.game.arena.los(target,this.duelCover))this.moveToPoint(this.duelCover.x,this.duelCover.z,.5);
+    else this.moveToward(target,true);
+   }else this.moveToward(target,true);
+   if(!protectedTarget)this.kitePressure(target);
+   return true;
+  }
+  if(this.duelKiteUntil){this.duelKiteUntil=0;this.duelCover=null;this.stopMove();}
+  return false;
+ }
  dpsSurvivalResponse(allies,enemies,d){
   const u=this.u;if(['sage','pala','disc'].includes(u.cls)||!enemies.length)return false;
+  if(this.game.mode==='1v1')return this.duelSurvivalResponse(enemies,d);
   const healer=allies.find(a=>a!==u&&a.alive&&['sage','pala','disc'].includes(a.cls));
   const hp=u.hp/u.maxHp;
 
@@ -3135,7 +3904,7 @@ class AIController {
    // If taking some pressure but not lethal, use a light/self-sustain button without giving up uptime.
    if(incomingCast&&hp<.78){
     if(u.cls==='wind')this.selfSaveAbility(['Willow Guard','monkDefensive']);
-    if(u.cls==='warrior'){const vr=AB[u.cls].findIndex(a=>a.name==='Victory Rush');if(vr>=0&&u.cds[vr]<=0&&primary&&dist(u,primary)<=4.8&&this.game.arena.los(u,primary)&&hp<.76)this.game.tryAbility(u,vr,primary);}
+    if(u.cls==='warrior'){const vr=unitAbilities(u).findIndex(a=>a.name==='Victory Rush');if(vr>=0&&u.cds[vr]<=0&&primary&&dist(u,primary)<=4.8&&this.game.arena.los(u,primary)&&hp<.76)this.game.tryAbility(u,vr,primary);}
     if(u.cls==='shadow'&&hp<.70)this.selfSaveAbility(['Crimson Vial']);
    }
    return false;
@@ -3150,7 +3919,7 @@ class AIController {
    if(u.cls==='flame'&&(hp<.42||realMajor&&hp<.58))this.selfSaveAbility(['Ice Block']);
    if(u.cls==='shadow'){if(hp<.56)this.selfSaveAbility(['Crimson Vial']);if(hp<.60||realMajor&&hp<.72)this.selfSaveAbility(['Evasion','Cloak of Shadows','Smoke Veil']);}
    if(u.cls==='wind'){if(hp<.58||realMajor&&hp<.72)this.selfSaveAbility(['Touch of Karma','Willow Guard','monkDefensive']);if((u.has('root')||u.has('slow'))&&primary)this.selfSaveAbility(["Tiger's Lust"]);}
-   if(u.cls==='warrior'){if(hp<.58||realMajor&&hp<.70)this.selfSaveAbility(['Shield Wall','warriorGuard']);const vr=AB[u.cls].findIndex(a=>a.name==='Victory Rush');if(vr>=0&&u.cds[vr]<=0&&primary&&dist(u,primary)<=4.8&&this.game.arena.los(u,primary)&&hp<.72)this.game.tryAbility(u,vr,primary);}
+   if(u.cls==='warrior'){if(hp<.58||realMajor&&hp<.70)this.selfSaveAbility(['Shield Wall','warriorGuard']);const vr=unitAbilities(u).findIndex(a=>a.name==='Victory Rush');if(vr>=0&&u.cds[vr]<=0&&primary&&dist(u,primary)<=4.8&&this.game.arena.los(u,primary)&&hp<.72)this.game.tryAbility(u,vr,primary);}
    if(u.cls==='storm'&&(hp<.58||realMajor&&hp<.70))this.selfSaveAbility(['Static Aegis','Grounding Aegis']);
    if(u.cls==='soul'&&(hp<.62||realMajor&&hp<.74))this.selfSaveAbility(['Undying Resolve','Dark Pact']);
   }
@@ -3522,9 +4291,9 @@ class AIController {
     'Sharpen Blade','Intercept','Warbreaker','Avatar','Stormbolt','Victory Rush','Bladestorm'
    ];
    for(const name of names){
-    const i=AB[u.cls].findIndex(a=>a.name===name);
+    const i=unitAbilities(u).findIndex(a=>a.name===name);
     if(i<0)continue;
-    const a=AB[u.cls][i];
+    const a=unitAbilities(u)[i];
     if(u.cds[i]>0||u.resource<(a.cost||0))continue;
     let target=t0,self=false;
     const t=killTarget||t0,td=dist(u,t),los=this.game.arena.los(u,t),hp=u.hp/u.maxHp,thp=t.hp/t.maxHp;
@@ -3575,7 +4344,7 @@ class AIController {
     }else if(name==='Tigereye Brew'){
      const stacks=windTigereyeStacks(u);
      if(u.has('tigereyeBrew')||stacks<=0)continue;
-     const burstReady=!!(u.has('furyReady')||u.has('tempestFlow')||AB[u.cls].some((x,idx)=>x.name==='Strike of the Windlord'&&u.cds[idx]<=0&&td<=4.4));
+     const burstReady=!!(u.has('furyReady')||u.has('tempestFlow')||unitAbilities(u).some((x,idx)=>x.name==='Strike of the Windlord'&&u.cds[idx]<=0&&td<=4.4));
      if(!(stacks>=10||(stacks>=6&&(pressureWindow||burstReady||thp<.72))))continue;
      self=true;target=u;
     }else if(name==='Living Bomb'){
@@ -3585,7 +4354,7 @@ class AIController {
      if(name==='Volcanic Eruption'&&!u.has('volcanicEruptionReady'))continue;
 	     if(!pressureWindow&&thp>.88&&['Meteor Spear','Meteor','Volcanic Eruption','Pandemic Bloom','Chaos Bolt'].includes(name))continue;
      target=t;
-    }else if(name==='Whirling Dragon Punch'){const fistsIndex=(AB[u.cls]||[]).findIndex(spell=>spell.type==='fistsChannel');const nearby=enemies.filter(enemy=>enemy.alive&&dist(u,enemy)<=5.5&&this.game.arena.los(u,enemy));if(fistsIndex<0||u.cds[fistsIndex]<=0||!nearby.length||!u.has('tigereyeBrew'))continue;target=u;
+    }else if(name==='Whirling Dragon Punch'){const fistsIndex=(unitAbilities(u)||[]).findIndex(spell=>spell.type==='fistsChannel');const nearby=enemies.filter(enemy=>enemy.alive&&dist(u,enemy)<=5.5&&this.game.arena.los(u,enemy));if(fistsIndex<0||u.cds[fistsIndex]<=0||!nearby.length||!u.has('tigereyeBrew'))continue;target=u;
     }else if(name==='Stormbolt'){
      const cc=pickCCTarget(a.range||22,'stun')||t;
      if(!cc||!this.game.arena.los(u,cc)||dist(u,cc)>(a.range||22)+.5||cc.has('stun')||cc.has('cheapStun')||cc.has('furyStun'))continue;
@@ -3627,6 +4396,7 @@ class AIController {
      const caster=enemies.find(e=>e.alive&&e.cast&&!e.cast.uninterruptible&&dist(u,e)<=4.8&&this.game.arena.los(u,e));
      if(!caster)continue; target=caster;
     }
+    if(this.game.mode==='1v1'&&!self&&target?.team!==u.team&&['damage','dot','monkFinisher','windlordStrike','summonInfernal'].includes(a.type)&&thp>.22&&u.resource-(a.cost||0)<this.duelResourceReserve())continue;
     const used=this.game.tryAbility(u,i,target,false);
     if(used===true){this.stopMove();return true;}
    }
@@ -3673,11 +4443,11 @@ class AIController {
   const enemyHealer=enemies.find(e=>(e.cls==='sage'||e.cls==='pala'||e.cls==='disc')&&e.alive);
   if(enemyHealer&&enemyHealer.cast&&dist(u,enemyHealer)<23&&this.game.arena.los(u,enemyHealer)&&Math.random()<d.interrupt&&u.cls==='flame'&&u.cds[5]<=0){this.game.tryAbility(u,5,enemyHealer);return;}if(u.cls==='storm'&&u.cds[6]<=0){const shearTarget=enemies.find(e=>e.alive&&e.cast&&dist(u,e)<=25&&this.game.arena.los(u,e));if(shearTarget&&Math.random()<d.interrupt){this.game.tryAbility(u,6,shearTarget);return;}}
   if(u.cls==='flame'){
-    const fireShield=AB[u.cls].findIndex(a=>a.name==='Fire Shield'||a.name==='Molten Armor'||a.name==='Alter Time');
+    const fireShield=unitAbilities(u).findIndex(a=>a.name==='Fire Shield'||a.name==='Molten Armor'||a.name==='Alter Time');
     if(fireShield>=0&&u.cds[fireShield]<=0&&u.hp/u.maxHp<.68&&enemies.some(e=>this.attacking(u,e)||dist(e,u)<8)){this.game.tryAbility(u,fireShield,u);return;}
-    const combust=AB[u.cls].findIndex(a=>a.name==='Combustion');
+    const combust=unitAbilities(u).findIndex(a=>a.name==='Combustion');
     if(combust>=0&&u.cds[combust]<=0&&!u.has('combustion')&&u.hp/u.maxHp>.35&&dist(u,t)<=26&&this.game.arena.los(u,t)&&t.hp/t.maxHp>.28){this.game.tryAbility(u,combust,u);return;}
-    const bomb=AB[u.cls].findIndex(a=>a.name==='Living Bomb');
+    const bomb=unitAbilities(u).findIndex(a=>a.name==='Living Bomb');
     if(bomb>=0&&u.cds[bomb]<=0&&!t.has('livingBomb')&&dist(u,t)<=24&&this.game.arena.los(u,t)&&!this.hasSetupCC(t)){this.game.tryAbility(u,bomb,t);return;}
     if(dist(u,t)<=8&&u.cds[2]<=0){this.game.tryAbility(u,2,u);return;}
     if(u.cds[1]<=0){this.game.tryAbility(u,1,t);return;}this.game.tryAbility(u,0,t);
@@ -3693,20 +4463,20 @@ class AIController {
       return score(b)-score(a);
     })[0];
     if(closeCaster&&u.cds[6]<=0&&u.resource>=10&&(expert||Math.random()<d.interrupt)){this.game.tryAbility(u,6,closeCaster);return;}
-    const vial=AB[u.cls].findIndex(a=>a.name==='Crimson Vial');
+    const vial=unitAbilities(u).findIndex(a=>a.name==='Crimson Vial');
     if(vial>=0&&u.cds[vial]<=0&&u.hp/u.maxHp<.55){this.game.tryAbility(u,vial,u);return;}
-    const evasion=AB[u.cls].findIndex(a=>a.name==='Evasion'||a.name==='Cloak of Shadows');
+    const evasion=unitAbilities(u).findIndex(a=>a.name==='Evasion'||a.name==='Cloak of Shadows');
     if(evasion>=0&&u.cds[evasion]<=0&&u.hp/u.maxHp<.70&&enemies.some(e=>this.attacking(u,e)||dist(e,u)<6)){this.game.tryAbility(u,evasion,u);return;}
     if(dist(u,t)>3.6&&dist(u,t)<=18&&u.cds[1]<=0&&u.resource>=24){this.game.tryAbility(u,1,t);return;}
-    const blind=AB[u.cls].findIndex(a=>a.name==='Blind');
+    const blind=unitAbilities(u).findIndex(a=>a.name==='Blind');
     const hasPressureDot=!!(t.has('bleed')||t.has('poison'));
     const setupReady=!defended&&(targetHp<.84||hasPressureDot||!this.game.botCanSelfSaveSoon?.(t));
     if(blind>=0&&enemyHealer&&enemyHealer!==t&&u.cds[blind]<=0&&dist(u,enemyHealer)<=15&&this.game.arena.los(u,enemyHealer)&&this.ccValue(enemyHealer,'incap')>0&&!this.hasSetupCC(enemyHealer)&&setupReady&&(expert||Math.random()<.58)){
       this.game.tryAbility(u,blind,enemyHealer);return;
     }
     if(!u.has('smokePower')&&u.cds[3]<=0&&u.cds[5]<=0&&!defended&&(healerLocked||targetHp<.76||hasPressureDot&&targetHp<.88)){this.game.tryAbility(u,3,u);return;}
-    const vend=AB[u.cls].findIndex(a=>a.name==='Vendetta');
-    const gar=AB[u.cls].findIndex(a=>a.name==='Garrote');
+    const vend=unitAbilities(u).findIndex(a=>a.name==='Vendetta');
+    const gar=unitAbilities(u).findIndex(a=>a.name==='Garrote');
     if(gar>=0&&u.cds[gar]<=0&&dist(u,t)<=4.5&&this.game.arena.los(u,t)&&!t.has('bleed')){this.game.tryAbility(u,gar,t);return;}
     if(vend>=0&&u.cds[vend]<=0&&dist(u,t)<=24&&this.game.arena.los(u,t)&&!t.has('vendetta')&&!defended&&hasPressureDot&&(healerLocked||targetHp<.72||this.game.unitUnderMajorOffensive?.(t))){this.game.tryAbility(u,vend,t);return;}
     if(u.has('venomEdge')&&u.cds[2]<=0){this.game.tryAbility(u,2,t);return;}
@@ -3715,7 +4485,7 @@ class AIController {
     this.game.tryAbility(u,0,t);
   }
   if(u.cls==='wind'){
-    const brewIndex=AB[u.cls].findIndex(a=>a.name==='Tigereye Brew');
+    const brewIndex=unitAbilities(u).findIndex(a=>a.name==='Tigereye Brew');
     const brewStacks=windTigereyeStacks(u);
     const windPressure=t.hp/t.maxHp<.72||this.hasSetupCC(enemies.find(e=>e.alive&&(e.cls==='sage'||e.cls==='pala'||e.cls==='disc')));
     if(brewIndex>=0&&!u.has('tigereyeBrew')&&(brewStacks>=6||(brewStacks>=4&&(windPressure||u.has('tempestFlow')))||(brewStacks>=2&&t.hp/t.maxHp<.34))){
@@ -3725,42 +4495,42 @@ class AIController {
     if(dist(u,t)>3.8&&u.cds[1]<=0&&!u.has('cloudstepDashCd')){if(this.game.tryAbility(u,1,t))return;if(dist(u,t)>4.1){this.moveToward(t,false);return;}}
     const closeCaster=enemies.find(e=>e.alive&&e.cast&&dist(u,e)<=3.5&&this.game.arena.los(u,e));
     if(closeCaster&&u.cds[3]<=0){this.game.tryAbility(u,3,closeCaster);return;}
-    const strikeIndex=AB[u.cls].findIndex(a=>a.name==='Strike of the Windlord');
-    if(strikeIndex>=0&&u.cds[strikeIndex]<=0&&u.resource>=(AB[u.cls][strikeIndex].cost||0)&&dist(u,t)<=4.2&&this.game.arena.los(u,t)&&(u.has('tigereyeBrew')||t.hp/t.maxHp<.90||u.cds[1]>0)){this.game.tryAbility(u,strikeIndex,t);return;}
+    const strikeIndex=unitAbilities(u).findIndex(a=>a.name==='Strike of the Windlord');
+    if(strikeIndex>=0&&u.cds[strikeIndex]<=0&&u.resource>=(unitAbilities(u)[strikeIndex].cost||0)&&dist(u,t)<=4.2&&this.game.arena.los(u,t)&&(u.has('tigereyeBrew')||t.hp/t.maxHp<.90||u.cds[1]>0)){this.game.tryAbility(u,strikeIndex,t);return;}
     if(u.has('risingSunReady')&&dist(u,t)<=3.6&&this.game.arena.los(u,t)){this.game.tryAbility(u,0,t);return;}
-    const deathIndex=AB[u.cls].findIndex(a=>a.name==='Touch of Death');
+    const deathIndex=unitAbilities(u).findIndex(a=>a.name==='Touch of Death');
     if(deathIndex>=0&&u.cds[deathIndex]<=0&&!t.has('touchOfDeath')&&dist(u,t)<=4.3&&this.game.arena.los(u,t)&&u.has('tigereyeBrew')){this.game.tryAbility(u,deathIndex,t);return;}
-    const fistsIndex=AB[u.cls].findIndex(a=>a.name==='Fists of Fury');
-    if(fistsIndex>=0&&u.cds[fistsIndex]<=0&&u.resource>=(AB[u.cls][fistsIndex].cost||0)&&dist(u,t)<=5.1&&this.game.arena.los(u,t)&&(u.has('tigereyeBrew')||windPressure||t.hp/t.maxHp<.86)){this.game.tryAbility(u,fistsIndex,u);return;}
-    const dragonIndex=AB[u.cls].findIndex(a=>a.name==='Whirling Dragon Punch');
+    const fistsIndex=unitAbilities(u).findIndex(a=>a.name==='Fists of Fury');
+    if(fistsIndex>=0&&u.cds[fistsIndex]<=0&&u.resource>=(unitAbilities(u)[fistsIndex].cost||0)&&dist(u,t)<=5.1&&this.game.arena.los(u,t)&&(u.has('tigereyeBrew')||windPressure||t.hp/t.maxHp<.86)){this.game.tryAbility(u,fistsIndex,u);return;}
+    const dragonIndex=unitAbilities(u).findIndex(a=>a.name==='Whirling Dragon Punch');
     if(dragonIndex>=0&&u.cds[dragonIndex]<=0&&fistsIndex>=0&&u.cds[fistsIndex]>0&&dist(u,t)<=5.5&&this.game.arena.los(u,t)&&(u.has('tigereyeBrew')||windPressure)){this.game.tryAbility(u,dragonIndex,u);return;}
     if(u.cds[4]<=0&&dist(u,t)<=5.4&&t.hp/t.maxHp<.76&&this.ccValue(t,'stun')>0){this.game.tryAbility(u,4,t);return;}
     /* Zephyr Palm is the low-damage Flow builder; use it after Rising Sun, Strike, Fists, Touch of Death, interrupts and mobility have been considered. */this.game.tryAbility(u,0,t);
   }
   if(u.cls==='soul'){
-    const darkPact=AB[u.cls].findIndex(a=>a.name==='Dark Pact');
+    const darkPact=unitAbilities(u).findIndex(a=>a.name==='Dark Pact');
     if(darkPact>=0&&u.cds[darkPact]<=0&&u.hp/u.maxHp<.58){this.game.tryAbility(u,darkPact,u);return;}
     if(u.hp/u.maxHp<.48&&u.cds[5]<=0){this.game.tryAbility(u,5,u);return;}
     if(!t.has('soulScar')){this.game.tryAbility(u,0,t);return;}
     const hasSoulImmolate=t.effects.some(e=>e.type==='burn'&&e.label==='Immolate'&&e.source===u&&e.time>0);
     if(!t.has('agony')&&!hasSoulImmolate){this.game.tryAbility(u,1,t);return;}
-	    const chaos=AB[u.cls].findIndex(a=>a.name==='Chaos Bolt'),ua=t.has('unstableAffliction');
+	    const chaos=unitAbilities(u).findIndex(a=>a.name==='Chaos Bolt'),ua=t.has('unstableAffliction');
 	    if(chaos<0&&(!ua||(ua.stacks||1)<3)){this.game.tryAbility(u,2,t);return;}
-    const pandemic=AB[u.cls].findIndex(a=>a.name==='Pandemic Bloom');
-    const shadowfury=AB[u.cls].findIndex(a=>a.name==='Shadowfury');
+    const pandemic=unitAbilities(u).findIndex(a=>a.name==='Pandemic Bloom');
+    const shadowfury=unitAbilities(u).findIndex(a=>a.name==='Shadowfury');
     if(pandemic>=0&&shadowfury>=0&&u.cds[pandemic]<=0&&u.cds[shadowfury]<=0&&!u.has('pandemicSurge')&&dist(u,t)<=20&&this.game.arena.los(u,t)&&this.ccValue(t,'stun')>0){this.game.tryAbility(u,shadowfury,t);return;}
     if(pandemic>=0&&u.cds[pandemic]<=0&&dist(u,t)<=25&&this.game.arena.los(u,t)&&t.hp/t.maxHp<.88){this.game.tryAbility(u,pandemic,t);return;}
 	    if(chaos>=0&&u.cds[chaos]<=0&&dist(u,t)<=25&&this.game.arena.los(u,t)&&!this.hasSetupCC(t)){this.game.tryAbility(u,chaos,t);return;}
-	    const siphon=AB[u.cls].findIndex(a=>a.name==='Essence Siphon');
+	    const siphon=unitAbilities(u).findIndex(a=>a.name==='Essence Siphon');
 	    if(t.has('soulScar')&&(t.has('agony')||hasSoulImmolate)&&(chaos>=0||(ua?.stacks||0)>=3)&&siphon>=0&&u.cds[siphon]<=0){this.game.tryAbility(u,siphon,t);return;}
-    const horror=AB[u.cls].findIndex(a=>a.name==='Mortal Horror');
+    const horror=unitAbilities(u).findIndex(a=>a.name==='Mortal Horror');
     const enemyHealer=enemies.find(e=>e.alive&&(e.cls==='sage'||e.cls==='pala'||e.cls==='disc'));
     if(horror>=0&&enemyHealer&&enemyHealer!==t&&u.cds[horror]<=0&&dist(u,enemyHealer)<=20&&this.game.arena.los(u,enemyHealer)&&this.ccValue(enemyHealer,'fear')>0&&!this.hasSetupCC(enemyHealer)&&t.hp/t.maxHp<.78){this.game.tryAbility(u,horror,enemyHealer);return;}
     if(u.cds[4]<=0&&dist(u,t)<10){this.game.tryAbility(u,4,t);return;}
     this.game.tryAbility(u,0,t);return;
   }
   if(u.cls==='storm'){
-    const idx=name=>AB[u.cls].findIndex(a=>a.name===name);
+    const idx=name=>unitAbilities(u).findIndex(a=>a.name===name);
     const flameShock=idx('Flame Shock'),lava=idx('Volcanic Eruption'),chain=idx('Healing Surge'),stormkeeper=idx('Stormkeeper'),totem=idx('Totem Mastery'),frost=idx('Frost Shock'),skybreaker=idx('Skybreaker Pulse'),healingStream=idx('Healing Stream Totem'),thunderstep=idx('Thunderstep');
     const healer=enemies.find(e=>e.alive&&['sage','pala','disc'].includes(e.cls));
     const setup=!!(healer&&this.hasSetupCC(healer));
@@ -3776,12 +4546,12 @@ class AIController {
     // A Stormwarden is a damage dealer. Healing Surge is an emergency recovery tool and never
     // replaces pressure on a vulnerable enemy.
     const killPressure=targetHp<.46||setup||this.game.unitUnderMajorOffensive?.(t);
-    if(chain>=0&&u.cds[chain]<=0&&u.resource>=(AB[u.cls][chain].cost||0)&&selfHp<.38&&!killPressure){this.stopMove();this.game.tryAbility(u,chain,u);return;}
+    if(chain>=0&&u.cds[chain]<=0&&u.resource>=(unitAbilities(u)[chain].cost||0)&&selfHp<.38&&!killPressure){this.stopMove();this.game.tryAbility(u,chain,u);return;}
     if(selfHp<.40&&u.cds[3]<=0){this.game.tryAbility(u,3,u);return;}
 
     // Establish the DoT and offensive amplifiers before committing the stun. High-rated bots hold
     // the eruption until this setup exists, then unload the entire instant window together.
-    if(flameShock>=0&&u.resource>=(AB[u.cls][flameShock].cost||0)&&dist(u,t)<=25&&this.game.arena.los(u,t)&&(!mainShock||mainShock.time<=2.5)){this.game.tryAbility(u,flameShock,t);return;}
+    if(flameShock>=0&&u.resource>=(unitAbilities(u)[flameShock].cost||0)&&dist(u,t)<=25&&this.game.arena.los(u,t)&&(!mainShock||mainShock.time<=2.5)){this.game.tryAbility(u,flameShock,t);return;}
     if(totem>=0&&u.cds[totem]<=0&&!u.has('totemMastery')&&selfHp>.45&&visible.length&&(pressure||d.tier>=2)){this.game.tryAbility(u,totem,u);return;}
     if(stormkeeper>=0&&u.cds[stormkeeper]<=0&&!u.has('stormkeeper')&&selfHp>.48&&dist(u,t)<=25&&this.game.arena.los(u,t)&&(pressure||d.tier>=2)){this.game.tryAbility(u,stormkeeper,u);return;}
     if(skybreaker>=0&&u.cds[skybreaker]<=0&&dist(u,t)>7&&dist(u,t)<=15&&this.game.arena.los(u,t)&&(u.has('stormkeeper')||pressure)){this.moveToward(t,false);return;}
@@ -3796,27 +4566,27 @@ class AIController {
     // Forked Current and Arc Spark are the damage fillers. Cleave comes before optional recovery.
     if(u.cds[1]<=0&&visible.length>=2){this.game.tryAbility(u,1,t);return;}
     const hurtAlly=allies.filter(a=>a.alive&&dist(u,a)<=24&&this.game.arena.los(u,a)).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp)[0];
-    if(chain>=0&&hurtAlly&&hurtAlly.hp/hurtAlly.maxHp<.42&&targetHp>.54&&u.cds[chain]<=0&&u.resource>=(AB[u.cls][chain].cost||0)){this.stopMove();this.game.tryAbility(u,chain,hurtAlly);return;}
+    if(chain>=0&&hurtAlly&&hurtAlly.hp/hurtAlly.maxHp<.42&&targetHp>.54&&u.cds[chain]<=0&&u.resource>=(unitAbilities(u)[chain].cost||0)){this.stopMove();this.game.tryAbility(u,chain,hurtAlly);return;}
 
     // Use Frost Shock only to preserve distance or secure uptime, not as random filler.
     if(frost>=0&&u.cds[frost]<=0&&dist(u,t)>8&&dist(u,t)<=24&&this.game.arena.los(u,t)&&!t.has('slow')&&!t.has('root')&&enemies.some(e=>e.alive&&['shadow','wind','warrior'].includes(e.cls)&&this.attacking(u,e))){this.game.tryAbility(u,frost,t);return;}
     this.game.tryAbility(u,0,t);
   }
   if(u.cls==='warrior'){
-   const stormbolt=AB[u.cls].findIndex(a=>a.name==='Stormbolt');
+   const stormbolt=unitAbilities(u).findIndex(a=>a.name==='Stormbolt');
    const boltTarget=enemies.filter(e=>e.alive&&dist(u,e)<=22&&this.game.arena.los(u,e)&&!e.has('stun')).sort((a,b)=>(b.cast?2:0)+(1-b.hp/b.maxHp)-((a.cast?2:0)+(1-a.hp/a.maxHp)))[0];
    const opposingHealer=enemies.find(e=>e.alive&&['sage','pala','disc'].includes(e.cls));
    if(stormbolt>=0&&boltTarget&&u.cds[stormbolt]<=0&&(boltTarget.cast||boltTarget.hp/boltTarget.maxHp<.72||this.hasSetupCC(opposingHealer))){this.game.tryAbility(u,stormbolt,boltTarget);return;}
    if(dist(u,t)>3.7&&dist(u,t)<=17&&u.cds[1]<=0&&u.resource>=8){this.game.tryAbility(u,1,t);return;}
    const caster=enemies.find(e=>e.alive&&e.cast&&!e.cast.uninterruptible&&dist(u,e)<=4.5&&this.game.arena.los(u,e));
-   const skull=AB[u.cls].findIndex(a=>a.name==='Skullbreaker');
+   const skull=unitAbilities(u).findIndex(a=>a.name==='Skullbreaker');
    if(caster&&skull>=0&&u.cds[skull]<=0){this.game.tryAbility(u,skull,caster);return;}
    if(caster&&u.cds[3]<=0&&Math.random()<d.interrupt){this.game.tryAbility(u,3,caster);return;}
-   const intercept=AB[u.cls].findIndex(a=>a.name==='Intercept'),hurtPartner=allies.filter(a=>a!==u&&a.alive&&dist(u,a)<=25&&this.game.arena.los(u,a)).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp)[0];
+   const intercept=unitAbilities(u).findIndex(a=>a.name==='Intercept'),hurtPartner=allies.filter(a=>a!==u&&a.alive&&dist(u,a)<=25&&this.game.arena.los(u,a)).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp)[0];
    if(intercept>=0&&hurtPartner&&hurtPartner.hp/hurtPartner.maxHp<.45&&u.cds[intercept]<=0){this.game.tryAbility(u,intercept,hurtPartner);return;}
    if(u.hp/u.maxHp<.4&&u.cds[6]<=0){this.game.tryAbility(u,6,u);return;}
    if(u.cds[4]<=0&&enemies.some(e=>e.alive&&e.cast&&dist(u,e)<22)&&Math.random()<.5){this.game.tryAbility(u,4,u);return;}
-   const warbreaker=AB[u.cls].findIndex(a=>a.name==='Warbreaker');
+   const warbreaker=unitAbilities(u).findIndex(a=>a.name==='Warbreaker');
    if(warbreaker>=0&&u.cds[warbreaker]<=0&&dist(u,t)<=4.5&&this.game.arena.los(u,t)&&(t.hp/t.maxHp<.85||u.cds[0]<=0)){this.game.tryAbility(u,warbreaker,t);return;}
    if(!t.has('bleed')&&u.cds[2]<=0){this.game.tryAbility(u,2,t);return;}
    const warriorPeel=this.peelThreat(enemies,allies,8);
@@ -3831,8 +4601,8 @@ class AIController {
   if(!mages.length)return false;
   const mage=mages.slice().sort((a,b)=>dist(a,u)-dist(b,u))[0];
   const polymorphed=allies.filter(a=>a!==u&&a.alive&&a.has('poly')).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp)[0];
-  const cleanse=AB[u.cls].findIndex(a=>a.type==='cleanse');
-  const cleanseReady=cleanse>=0&&u.cds[cleanse]<=0&&u.resource>=(AB[u.cls][cleanse].cost||0);
+  const cleanse=unitAbilities(u).findIndex(a=>a.type==='cleanse');
+  const cleanseReady=cleanse>=0&&u.cds[cleanse]<=0&&u.resource>=(unitAbilities(u)[cleanse].cost||0);
 
   if(polymorphed){
    if(cleanseReady){
@@ -3841,7 +4611,7 @@ class AIController {
      if(u.cast){u.cast=null;this.game.float(u,'CANCEL CAST · DISPEL POLYMORPH','info');}u.gcd=0;
      if(this.game.tryAbility(u,cleanse,polymorphed,false)){this.stopMove();return true;}
     }else{
-     if(u.cast){u.cast=null;u.gcd=0;}if(u.cls==='disc'){const body=AB[u.cls].findIndex(a=>a.name==='Angelic Body');if(body>=0&&u.cds[body]<=0)this.game.tryAbility(u,body,u);}if(this.moveToHealLine(polymorphed,enemies,true))return true;
+     if(u.cast){u.cast=null;u.gcd=0;}if(u.cls==='disc'){const body=unitAbilities(u).findIndex(a=>a.name==='Angelic Body');if(body>=0&&u.cds[body]<=0)this.game.tryAbility(u,body,u);}if(this.moveToHealLine(polymorphed,enemies,true))return true;
     }
    }
 
@@ -3873,7 +4643,7 @@ class AIController {
   const u=this.u;if(allies.filter(a=>a.alive).length!==1)return false;
   const foe=enemies.filter(e=>e.alive).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp||dist(u,a)-dist(u,b))[0];
   if(!foe){this.stopMove();return true;}
-  this.focus=foe;const idx=name=>AB[u.cls].findIndex(a=>a.name===name),hp=u.hp/u.maxHp,los=this.game.arena.los(u,foe),range=dist(u,foe);
+  this.focus=foe;const idx=name=>unitAbilities(u).findIndex(a=>a.name===name),hp=u.hp/u.maxHp,los=this.game.arena.los(u,foe),range=dist(u,foe);
   if(u.cast)return true;
   if(u.cls==='pala'){
    const guard=idx('Divine Protection'),shock=idx('Holy Shock'),light=idx('Holy Light'),stun=idx('Hammer of Justice'),steed=idx('Divine Steed'),wings=idx('Avenging Wings'),judgement=idx('Judgement');
@@ -3936,15 +4706,15 @@ class AIController {
   }
   if((!this.game.arena.los(u,low)||dist(u,low)>27)&&u.cds[6]<=0&&!u.has('divineSteed')){this.game.tryAbility(u,6,u);return;}
   if(!this.game.arena.los(u,low)||dist(u,low)>27){if(u.cast&&hp<.55)u.cast=null;if(!u.cast)this.moveToward(low,false);return;}
-  const guardian=AB[u.cls].findIndex(a=>a.name==='Guardian Angel');
-  const word=AB[u.cls].findIndex(a=>a.name==='Word of Glory');
-  const toll=AB[u.cls].findIndex(a=>a.name==='Divine Toll');const faith=AB[u.cls].findIndex(a=>a.name==='Bestow Faith');
-  const sacrifice=AB[u.cls].findIndex(a=>a.name==='Blessing of Sacrifice');
-  const wings=AB[u.cls].findIndex(a=>a.name==='Avenging Wings');
+  const guardian=unitAbilities(u).findIndex(a=>a.name==='Guardian Angel');
+  const word=unitAbilities(u).findIndex(a=>a.name==='Word of Glory');
+  const toll=unitAbilities(u).findIndex(a=>a.name==='Divine Toll');const faith=unitAbilities(u).findIndex(a=>a.name==='Bestow Faith');
+  const sacrifice=unitAbilities(u).findIndex(a=>a.name==='Blessing of Sacrifice');
+  const wings=unitAbilities(u).findIndex(a=>a.name==='Avenging Wings');
   const teammateBurst=low&&low!==u&&(hp<.76||low.has('smokeBomb')||this.game.unitUnderBurst(low)||this.enemyBurstPotential(low,enemies)>=2.5);
   const majorBurst=this.game.unitUnderMajorOffensive(low)||low.has('smokeBomb')||this.game.unitUnderBurst(low)||this.enemyBurstPotential(low,enemies)>=2.5;
   const selfRisk=this.enemyBurstPotential(u,enemies)+(targeted?1.2:0)+(u.hp/u.maxHp<.70?1.4:0);
-  if(teammateBurst&&sacrifice>=0&&u.cds[sacrifice]<=0&&!low.has('sacrifice')&&u.resource>=(AB[u.cls][sacrifice].cost||0)){
+  if(teammateBurst&&sacrifice>=0&&u.cds[sacrifice]<=0&&!low.has('sacrifice')&&u.resource>=(unitAbilities(u)[sacrifice].cost||0)){
    if(u.cds[4]<=0&&!u.has('defensive')&&selfRisk>=2.2){this.game.tryAbility(u,4,u);return;}
    this.stopMove();this.game.tryAbility(u,sacrifice,low);return;
   }
@@ -3955,12 +4725,12 @@ class AIController {
    if(hp<.91&&u.cds[1]<=0&&u.resource>=9){this.stopMove();this.game.tryAbility(u,1,low);return;}
    if(hp<.86&&u.resource>=7&&!u.cast){this.stopMove();this.game.tryAbility(u,0,low);return;}
   }
-  if(hp<.34&&guardian>=0&&u.cds[guardian]<=0&&u.resource>=(AB[u.cls][guardian].cost||0)){this.stopMove();this.game.tryAbility(u,guardian,low);return;}
-  if(hp<.48&&word>=0&&u.cds[word]<=0&&u.resource>=(AB[u.cls][word].cost||0)){this.stopMove();this.game.tryAbility(u,word,low);return;}
-  if(hp<.56&&toll>=0&&u.cds[toll]<=0&&u.resource>=(AB[u.cls][toll].cost||0)){this.stopMove();this.game.tryAbility(u,toll,low);return;}
+  if(hp<.34&&guardian>=0&&u.cds[guardian]<=0&&u.resource>=(unitAbilities(u)[guardian].cost||0)){this.stopMove();this.game.tryAbility(u,guardian,low);return;}
+  if(hp<.48&&word>=0&&u.cds[word]<=0&&u.resource>=(unitAbilities(u)[word].cost||0)){this.stopMove();this.game.tryAbility(u,word,low);return;}
+  if(hp<.56&&toll>=0&&u.cds[toll]<=0&&u.resource>=(unitAbilities(u)[toll].cost||0)){this.stopMove();this.game.tryAbility(u,toll,low);return;}
   if(hp<.38&&low!==u&&u.cds[2]<=0&&u.resource>=12){this.stopMove();this.game.tryAbility(u,2,low);return;}
   if(hp<.76&&u.cds[1]<=0&&u.resource>=9){this.stopMove();this.game.tryAbility(u,1,low);return;}
-  if(faith>=0&&u.cds[faith]<=0&&!low.has('bestowFaith')&&hp<.88&&u.resource>=(AB[u.cls][faith].cost||0)){this.stopMove();this.game.tryAbility(u,faith,low);return;}
+  if(faith>=0&&u.cds[faith]<=0&&!low.has('bestowFaith')&&hp<.88&&u.resource>=(unitAbilities(u)[faith].cost||0)){this.stopMove();this.game.tryAbility(u,faith,low);return;}
   if(danger&&u.hp/u.maxHp<.65&&u.cds[4]<=0){this.game.tryAbility(u,4,u);return;}
   if((danger||peelThreat)&&u.cds[5]<=0&&dist(u,peelThreat||threat)<=10&&this.game.arena.los(u,peelThreat||threat)&&!(peelThreat||threat).has('stun')&&this.ccValue(peelThreat||threat,'stun')>0){this.stopMove();this.game.tryAbility(u,5,peelThreat||threat);return;}
   if(hp<.84&&u.resource>=7){
@@ -3971,10 +4741,10 @@ class AIController {
    }
    this.stopMove();this.game.tryAbility(u,0,low);return;}
   if(!danger&&hp>.84){const killable=enemies.find(e=>e.alive&&e.hp/e.maxHp<.34&&dist(u,e)<=28&&this.game.arena.los(u,e));if(killable){if(u.cds[5]<=0&&dist(u,killable)<=10&&this.ccValue(killable,'stun')>0){this.stopMove();this.game.tryAbility(u,5,killable);return;}if(u.cds[1]<=0&&u.resource>=9){this.stopMove();this.game.tryAbility(u,1,killable);return;}}}
-  const judgement=AB[u.cls].findIndex(a=>a.name==='Judgement'||a.name==='Judgment');
-  const blind=AB[u.cls].findIndex(a=>a.name==='Blinding Light');
+  const judgement=unitAbilities(u).findIndex(a=>a.name==='Judgement'||a.name==='Judgment');
+  const blind=unitAbilities(u).findIndex(a=>a.name==='Blinding Light');
   const killTarget=this.coordinatedTarget(enemies)||threat;
-  const offensiveToll=expert&&toll>=0&&u.cds[toll]<=0&&killTarget&&hp>.88&&u.hp/u.maxHp>.78&&u.resource>=(AB[u.cls][toll].cost||0)&&dist(u,killTarget)<=28&&this.game.arena.los(u,killTarget)&&(this.enemyHealerState(enemies).locked||killTarget.hp/killTarget.maxHp<.44||this.game.unitUnderMajorOffensive?.(killTarget));
+  const offensiveToll=expert&&toll>=0&&u.cds[toll]<=0&&killTarget&&hp>.88&&u.hp/u.maxHp>.78&&u.resource>=(unitAbilities(u)[toll].cost||0)&&dist(u,killTarget)<=28&&this.game.arena.los(u,killTarget)&&(this.enemyHealerState(enemies).locked||killTarget.hp/killTarget.maxHp<.44||this.game.unitUnderMajorOffensive?.(killTarget));
   if(offensiveToll){this.stopMove();this.game.tryAbility(u,toll,killTarget);return;}
   if(!danger&&hp>.84&&threat&&judgement>=0&&u.cds[judgement]<=0&&dist(u,threat)<=24&&this.game.arena.los(u,threat)&&(expert||u.resource<84)){this.stopMove();this.game.tryAbility(u,judgement,threat);return;}
   if(!danger&&hp>.92&&blind>=0&&u.cds[blind]<=0&&enemyHealer&&dist(u,enemyHealer)<=16&&this.game.arena.los(u,enemyHealer)&&this.ccValue(enemyHealer,'incap')>0&&!this.hasSetupCC(enemyHealer)){this.stopMove();this.game.tryAbility(u,blind,enemyHealer);return;}
@@ -3988,7 +4758,7 @@ class AIController {
   const available=allies.filter(a=>a.alive&&!a.has('smokeBomb'));
   const low=this.chooseHealTarget(available.length?available:allies,enemies);
   const hp=low.hp/low.maxHp,selfHp=u.hp/u.maxHp;
-  const idx=name=>AB[u.cls].findIndex(a=>a.name===name);
+  const idx=name=>unitAbilities(u).findIndex(a=>a.name===name);
   const smite=idx('Smite'),shield=idx('Power Shield'),penance=idx('Penance'),mend=idx('Shadow Mend'),solace=idx('Solace'),pain=idx('Pain Suppression'),radiance=idx('Ultimate Radiance'),purify=idx('Purify'),fear=idx('Psychic Scream'),fade=idx('Fade'),archangel=idx('Archangel'),darkArch=idx('Dark Archangel'),angelicBody=idx('Angelic Body');
   const expert=d.tier>=2||this.game.difficulty==='hard';
   const controlled=allies.filter(a=>a.alive&&a.effects.some(e=>['poly','sleep','blind','windIncap','fear','root','slow'].includes(e.type))).sort((a,b)=>(b.has('poly')?5:b.has('fear')?4:b.has('root')?2:1)-(a.has('poly')?5:a.has('fear')?4:a.has('root')?2:1))[0];
@@ -4001,7 +4771,7 @@ class AIController {
   const targeted=enemies.some(e=>this.attacking(u,e)||(e.cast&&e.cast.target===u));
   if((hp<.52||burst&&hp<.86||expert&&burstScore>=2.5&&hp<.90)&&pain>=0&&u.cds[pain]<=0&&!low.has('painSuppression')){if(u.cast){u.cast=null;u.gcd=0;}this.game.tryAbility(u,pain,low);return;}
   const splitPressure=allies.filter(a=>a.alive&&a.hp/a.maxHp<.82).length>=2&&allies.some(a=>a.hp/a.maxHp<.74);
-  if((hp<.38||splitPressure||burstScore>=3.5&&hp<.62)&&radiance>=0&&u.cds[radiance]<=0&&u.resource>=(AB[u.cls][radiance].cost||0)){if(u.cast){u.cast=null;u.gcd=0;}this.game.tryAbility(u,radiance,u);return;}
+  if((hp<.38||splitPressure||burstScore>=3.5&&hp<.62)&&radiance>=0&&u.cds[radiance]<=0&&u.resource>=(unitAbilities(u)[radiance].cost||0)){if(u.cast){u.cast=null;u.gcd=0;}this.game.tryAbility(u,radiance,u);return;}
   if((selfHp<.56||targeted&&selfHp<.80||selfBurst>=2.5&&selfHp<.86)&&fade>=0&&u.cds[fade]<=0){this.game.tryAbility(u,fade,u);return;}
 
   // Establish a safe pillar edge before choosing filler damage. Mobile
@@ -4017,12 +4787,12 @@ class AIController {
     const score=x=>this.healUrgency(x,enemies)+(x!==u?1.20:(targeted ? .55 : 0))+(x===low ? .45 : 0);
     return score(b)-score(a);
   })[0];
-  if(shield>=0&&u.cds[shield]<=0&&needsAtonement&&u.resource>=(AB[u.cls][shield].cost||0)&&!needsAtonement.has('shield')&&(expert||needsAtonement===low||needsAtonement.hp/needsAtonement.maxHp<.92)){this.game.tryAbility(u,shield,needsAtonement);return;}
+  if(shield>=0&&u.cds[shield]<=0&&needsAtonement&&u.resource>=(unitAbilities(u)[shield].cost||0)&&!needsAtonement.has('shield')&&(expert||needsAtonement===low||needsAtonement.hp/needsAtonement.maxHp<.92)){this.game.tryAbility(u,shield,needsAtonement);return;}
 
   const target=this.disciplineDamageTarget(allies,enemies);
   const partner=allies.find(a=>a!==u&&a.alive),partnerTarget=partner===this.game.player?this.game.target:partner?.ai?.focus;
   const atoned=allies.filter(a=>a.alive&&atonementTime(a)>0).length;
-  const penanceReady=penance>=0&&u.cds[penance]<=0&&u.resource>=(AB[u.cls][penance].cost||0);
+  const penanceReady=penance>=0&&u.cds[penance]<=0&&u.resource>=(unitAbilities(u)[penance].cost||0);
   const canDamage=!!(target&&dist(u,target)<=25&&this.game.arena.los(u,target));
 
   // Direct Shadow Mend is deliberately last-resort triage. It is used when an
@@ -4030,7 +4800,7 @@ class AIController {
   // about to land and offensive Penance cannot answer in time.
   const directMendTarget=low===u;
   const mendEmergency=(directMendTarget&&(selfHp<.66||targeted&&selfHp<.80||holyLocked&&selfHp<.84))||(!directMendTarget&&(hp<.46||holyLocked&&hp<.58||hp<.54&&burstScore>=3.2&&!penanceReady));
-  if(mendEmergency&&mend>=0&&u.resource>=(AB[u.cls][mend].cost||0)){this.stopMove();this.game.tryAbility(u,mend,low);return;}
+  if(mendEmergency&&mend>=0&&u.resource>=(unitAbilities(u)[mend].cost||0)){this.stopMove();this.game.tryAbility(u,mend,low);return;}
 
   if(u.has('radiantPenanceProc')&&atoned>=1&&penance>=0&&u.cds[penance]<=0&&target&&dist(u,target)<=25&&this.game.arena.los(u,target)){this.game.tryAbility(u,penance,target);return;}
   if(archangel>=0&&u.cds[archangel]<=0&&atoned>=1&&(hp<.84||burst||injured>=2)){this.game.tryAbility(u,archangel,u);return;}
@@ -4039,13 +4809,13 @@ class AIController {
   if(atoned&&canDamage){
    if(penanceReady&&(expert||hp<.96||burst||atoned>=2)){this.game.tryAbility(u,penance,target);return;}
    if(solace>=0&&u.cds[solace]<=0&&dist(u,target)<=25&&this.game.arena.los(u,target)){this.game.tryAbility(u,solace,target);return;}
-   if(!repositioning&&smite>=0&&u.resource>=(AB[u.cls][smite].cost||0)&&(expert||hp<.97)){this.stopMove();this.game.tryAbility(u,smite,target);return;}
+   if(!repositioning&&smite>=0&&u.resource>=(unitAbilities(u)[smite].cost||0)&&(expert||hp<.97)){this.stopMove();this.game.tryAbility(u,smite,target);return;}
   }
 
   // If no hostile target can be reached, direct healing prevents a helpless
   // stall, but still waits for a real emergency instead of spamming at 86%.
   if(!canDamage&&hp<.52&&penanceReady&&dist(u,low)<=25&&this.game.arena.los(u,low)){this.game.tryAbility(u,penance,low);return;}
-  if(!canDamage&&hp<.68&&mend>=0&&u.resource>=(AB[u.cls][mend].cost||0)){this.stopMove();this.game.tryAbility(u,mend,low);return;}
+  if(!canDamage&&hp<.68&&mend>=0&&u.resource>=(unitAbilities(u)[mend].cost||0)){this.stopMove();this.game.tryAbility(u,mend,low);return;}
   const close=enemies.find(e=>e.alive&&dist(u,e)<=8&&this.game.arena.los(u,e));
   if(close&&fear>=0&&u.cds[fear]<=0&&this.ccValue(close,'fear')>0&&(targeted||selfHp<.78||this.attacking(low,close))){this.game.tryAbility(u,fear,u);return;}
   if(partner&&dist(u,partner)>22){if(angelicBody>=0&&u.cds[angelicBody]<=0)this.game.tryAbility(u,angelicBody,u);this.moveToward(partner,false);return;}
@@ -4069,28 +4839,28 @@ class AIController {
    if(!u.cast){this.moveToward(swapThreat,true);return;}
   }
   if(!this.game.arena.los(u,low)||dist(u,low)>26){if(u.cast&&hp<.55)u.cast=null;if(!u.cast)this.moveToward(low,false);return;}
-  const ironbark=AB[u.cls].findIndex(a=>a.name==='Ironbark');const ghanir=AB[u.cls].findIndex(a=>a.name==="G'Hanir, the Mother Tree");
-  const natureSwift=AB[u.cls].findIndex(a=>a.name==='Nature Swiftness');
-  const gust=AB[u.cls].findIndex(a=>a.name==='Rejuvenate');
+  const ironbark=unitAbilities(u).findIndex(a=>a.name==='Ironbark');const ghanir=unitAbilities(u).findIndex(a=>a.name==="G'Hanir, the Mother Tree");
+  const natureSwift=unitAbilities(u).findIndex(a=>a.name==='Nature Swiftness');
+  const gust=unitAbilities(u).findIndex(a=>a.name==='Rejuvenate');
   const majorBurst=this.game.unitUnderMajorOffensive(low)||low.has('smokeBomb')||this.game.unitUnderBurst(low)||this.enemyBurstPotential(low,enemies)>=2.5;
   if(ghanir>=0&&u.cds[ghanir]<=0&&!u.has('ghanir')&&allies.some(a=>a.has('hot'))&&(hp<.86||majorBurst)){this.stopMove();this.game.tryAbility(u,ghanir,u);return;}
   const tideReady=(u.cds[3]<=0||u.has('natureSwiftness'))&&u.resource>=18;
   const tideNeeded=hp<.36||u.has('natureSwiftness')&&(hp<.76||majorBurst)||majorBurst&&hp<.54;
-  if(majorBurst&&hp<.86&&ironbark>=0&&u.cds[ironbark]<=0&&u.resource>=(AB[u.cls][ironbark].cost||0)){this.stopMove();this.game.tryAbility(u,ironbark,low);return;}
+  if(majorBurst&&hp<.86&&ironbark>=0&&u.cds[ironbark]<=0&&u.resource>=(unitAbilities(u)[ironbark].cost||0)){this.stopMove();this.game.tryAbility(u,ironbark,low);return;}
   if(tideNeeded&&tideReady){this.stopMove();this.game.tryAbility(u,3,low);return;}
   if((hp<.50||majorBurst&&hp<.80||low.has('smokeBomb')&&hp<.86)&&u.cds[3]>1.0&&natureSwift>=0&&u.cds[natureSwift]<=0){
    this.stopMove();this.game.tryAbility(u,natureSwift,u);return;
   }
   const proactiveHeal=low&&low.alive&&low!==u&&hp<.94&&dist(u,low)<=28&&this.game.arena.los(u,low);
   if(proactiveHeal&&!danger&&!partnerLocked){
-   if(hp<.92&&!this.hasNamedHot(low,'Rejuvenate',2.5)&&gust>=0&&u.cds[gust]<=0&&u.resource>=(AB[u.cls][gust].cost||0)){this.stopMove();this.game.tryAbility(u,gust,low);return;}
+   if(hp<.92&&!this.hasNamedHot(low,'Rejuvenate',2.5)&&gust>=0&&u.cds[gust]<=0&&u.resource>=(unitAbilities(u)[gust].cost||0)){this.stopMove();this.game.tryAbility(u,gust,low);return;}
    if(hp<.90&&!this.hasNamedHot(low,'Blooming Echo',2.5)&&u.cds[1]<=0&&u.resource>=8){this.stopMove();this.game.tryAbility(u,1,low);return;}
    if(hp<.86&&u.resource>=6&&!u.cast){this.stopMove();this.game.tryAbility(u,0,low);return;}
   }
   if(hp<.64&&u.cds[2]<=0&&u.resource>=10){this.stopMove();this.game.tryAbility(u,2,low);return;}
   if(danger&&u.cds[5]<=0&&(u.hp/u.maxHp<.78||dist(threat,u)<6)){this.game.tryAbility(u,5,u);return;}
   if((danger||peelThreat)&&hp>.45&&u.cds[6]<=0&&u.resource>=8&&u.cds[2]<9&&dist(u,peelThreat||threat)<=24&&this.game.arena.los(u,peelThreat||threat)&&!(peelThreat||threat).has('poly')&&!(peelThreat||threat).has('sleep')&&this.ccValue(peelThreat||threat,'incap')>0){const ccT=peelThreat||threat;this.game.tryAbility(u,6,ccT);this.moveToward(ccT,true);return;}
-  if(hp<.70&&!this.hasNamedHot(low,'Rejuvenate',1.5)&&gust>=0&&u.cds[gust]<=0&&u.resource>=(AB[u.cls][gust].cost||0)){this.stopMove();this.game.tryAbility(u,gust,low);return;}
+  if(hp<.70&&!this.hasNamedHot(low,'Rejuvenate',1.5)&&gust>=0&&u.cds[gust]<=0&&u.resource>=(unitAbilities(u)[gust].cost||0)){this.stopMove();this.game.tryAbility(u,gust,low);return;}
   if(hp<.68&&!this.hasNamedHot(low,'Blooming Echo',1.5)&&u.cds[1]<=0&&u.resource>=8){this.stopMove();this.game.tryAbility(u,1,low);return;}
   if(hp<.78&&u.resource>=6){
    const kicker=this.interruptThreat(enemies);
@@ -4100,7 +4870,7 @@ class AIController {
     if(!u.cast){this.moveToward(kicker,true);return;}
    }
    this.stopMove();this.game.tryAbility(u,0,low);return;}
-  const grasp=AB[u.cls].findIndex(a=>a.name==='Nature’s Grasp'||a.name==="Nature's Grasp");
+  const grasp=unitAbilities(u).findIndex(a=>a.name==='Nature’s Grasp'||a.name==="Nature's Grasp");
   if(stable&&enemyHealer&&grasp>=0&&u.cds[grasp]<=0&&dist(u,enemyHealer)<=24&&this.game.arena.los(u,enemyHealer)&&this.ccValue(enemyHealer,'root')>0&&!this.hasSetupCC(enemyHealer)){this.stopMove();this.game.tryAbility(u,grasp,enemyHealer);return;}
   if(stable&&enemyHealer&&u.cds[6]<=0&&u.resource>=8&&u.cds[2]<9&&dist(u,enemyHealer)<=24&&this.game.arena.los(u,enemyHealer)&&!enemyHealer.has('poly')&&!enemyHealer.has('sleep')&&this.ccValue(enemyHealer,'incap')>0){this.game.tryAbility(u,6,enemyHealer);this.moveToward(enemyHealer,false);return;}
   if(danger){if(u.cast&&u.hp/u.maxHp<.74)u.cast=null;if(!u.cast)this.moveToward(threat,true);}
@@ -4572,7 +5342,7 @@ class AudioManager {
 }
 
 class Game {
- constructor(){this.canvas=$('#gameCanvas');this.scene=new THREE.Scene();this.scene.background=new THREE.Color(0x0c1113);this.scene.fog=null;this.camera=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,.1,150);this.cameraRig={yaw:-Math.PI/2,facingYaw:-Math.PI/2,pitch:.34,distance:12.4,minDistance:6.8,maxDistance:26,dragging:false,freeLook:false,turning:false,leftMoved:false,startX:0,startY:0,lastX:0,lastY:0};this.camera.position.set(-12,6,0);this.renderer=new THREE.WebGLRenderer({canvas:this.canvas,antialias:true,powerPreference:'high-performance'});this.renderer.setPixelRatio(1);this.renderer.setSize(innerWidth,innerHeight,false);this.clock=new THREE.Clock();this.ray=new THREE.Raycaster();this.mouse=new THREE.Vector2();this.groundPlane=new THREE.Plane(new THREE.Vector3(0,1,0),0);this.groundTargeting=null;this.units=[];this.effects=[];this.disposeQueue=[];this.logs=[];this.keys={};this.target=null;this.player=null;this.phase='menu';this.finishPending=false;this.finishTimer=null;this.paused=false;this.time=0;this.dampening=0;this.difficulty='normal';this.mode='2v2';this.shake=0;this.audio=new AudioManager();this.menuPreviewRenderer=null;this.menuPreviewScene=null;this.menuPreviewCamera=null;this.menuPreviewModel=null;this.menuPreviewGearAppearance=null;this.menuPreviewYaw=.26;this.guideRenderer=null;this.guideScene=null;this.guideCamera=null;this.guideModel=null;this.guideYaw=0;this.guideDragging=false;this.armouryRenderer=null;this.armouryScene=null;this.armouryCamera=null;this.armouryModel=null;this.armouryGearAppearance=null;this.armouryTransmog=null;this.armouryYaw=.35;this.armouryDragging=false;this.collectionView='inventory';this.focusViewAbility={};this.encounterView=null;this.detailsSelection=null;this.achievementQueue=[];this.achievementShowing=false;this.hudEditMode=false;this.hudDrag=null;this.hudEditWasPaused=false;this.htmlCache=new WeakMap();this.textCache=new WeakMap();this.styleCache=new WeakMap();this.effectQueryFrame=0;this.renderScale=1;this.performanceTier=0;this.visualFrame=0;this.fpsFrames=0;this.fpsWindowStart=performance.now();this.currentFps=60;this.lowFpsWindows=0;this.highFpsWindows=0;this.nextHudRichUpdate=0;this.lastRenderRatio=0;this.setupScene();this.bindUI();this.setupHudEditor();this.applyHudScale();this.applyHudLayout();this.applyRenderQuality();this.animate();}
+ constructor(){this.canvas=$('#gameCanvas');this.scene=new THREE.Scene();this.scene.background=new THREE.Color(0x0c1113);this.scene.fog=null;this.camera=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,.1,150);this.cameraRig={yaw:-Math.PI/2,facingYaw:-Math.PI/2,pitch:.34,distance:12.4,minDistance:6.8,maxDistance:26,dragging:false,freeLook:false,turning:false,leftMoved:false,startX:0,startY:0,lastX:0,lastY:0};this.camera.position.set(-12,6,0);this.renderer=new THREE.WebGLRenderer({canvas:this.canvas,antialias:true,powerPreference:'high-performance'});this.renderer.setPixelRatio(1);this.renderer.setSize(innerWidth,innerHeight,false);this.clock=new THREE.Clock();this.ray=new THREE.Raycaster();this.mouse=new THREE.Vector2();this.groundPlane=new THREE.Plane(new THREE.Vector3(0,1,0),0);this.groundTargeting=null;this.units=[];this.effects=[];this.disposeQueue=[];this.logs=[];this.keys={};this.target=null;this.player=null;this.phase='menu';this.finishPending=false;this.finishTimer=null;this.paused=false;this.time=0;this.dampening=0;this.difficulty='normal';this.mode='2v2';this.shake=0;this.audio=new AudioManager();this.menuPreviewRenderer=null;this.menuPreviewScene=null;this.menuPreviewCamera=null;this.menuPreviewModel=null;this.menuPreviewGearAppearance=null;this.menuPreviewYaw=.26;this.guideRenderer=null;this.guideScene=null;this.guideCamera=null;this.guideModel=null;this.guideYaw=0;this.guideDragging=false;this.armouryRenderer=null;this.armouryScene=null;this.armouryCamera=null;this.armouryModel=null;this.armouryGearAppearance=null;this.armouryTransmog=null;this.armouryYaw=.35;this.armouryDragging=false;this.collectionView='inventory';this.focusViewAbility={};this.encounterView=null;this.detailsSelection=null;this.achievementQueue=[];this.achievementShowing=false;this.hudEditMode=false;this.hudDrag=null;this.hudEditWasPaused=false;this.htmlCache=new WeakMap();this.textCache=new WeakMap();this.styleCache=new WeakMap();this.effectQueryFrame=0;this.renderScale=1;this.performanceTier=0;this.visualFrame=0;this.fpsFrames=0;this.fpsWindowStart=performance.now();this.currentFps=60;this.lowFpsWindows=0;this.highFpsWindows=0;this.nextHudRichUpdate=0;this.lastRenderRatio=0;this.cameraFocus=new THREE.Vector3();this.cameraDesired=new THREE.Vector3();this.animationFrame=this.animate.bind(this);this.setupScene();this.bindUI();this.setupHudEditor();this.applyHudScale();this.applyHudLayout();this.applyRenderQuality();this.animate();}
  setupScene(){const amb=new THREE.HemisphereLight(0x99aeca,0x18221b,1.32);this.scene.add(amb);const sun=new THREE.DirectionalLight(0xf5d59a,1.55);sun.position.set(9,25,6);sun.castShadow=false;this.scene.add(sun);const rim=new THREE.PointLight(0x5f3cff,32,58);rim.position.set(-18,11,-10);this.scene.add(rim);const fire=new THREE.PointLight(0xff7a36,18,34);fire.position.set(18,6,8);this.scene.add(fire);this.arena=new Arena(this.scene);}
  warmEffectShaders(){
   if(this.effectShadersWarm||!this.renderer?.compile)return;
@@ -4590,7 +5360,7 @@ class Game {
  warmMatchRenderer(){if(!this.renderer?.compile||this.phase==='menu'||!this.units.length)return;const started=performance.now();try{this.warmEffectShaders();this.renderer.compile(this.scene,this.camera);this.shaderWarmupMs=performance.now()-started;this.shaderWarmupComplete=true;}catch(error){console.warn('Renderer warm-up skipped:',error);}}
  setHudHtml(element,html){if(!element||this.htmlCache.get(element)===html)return;element.innerHTML=html;this.htmlCache.set(element,html);}
  setHudText(element,value){if(!element)return;const text=String(value);if(this.textCache.get(element)===text)return;element.textContent=text;this.textCache.set(element,text);}
- setHudStyle(element,property,value){if(!element)return;let cache=this.styleCache.get(element);if(!cache){cache={};this.styleCache.set(element,cache);}if(cache[property]===value)return;element.style[property]=value;cache[property]=value;}
+ setHudStyle(element,property,value){if(!element)return;let cache=this.styleCache.get(element);if(!cache){cache={};this.styleCache.set(element,cache);}if(cache[property]===value)return;if(property.startsWith('--'))element.style.setProperty(property,value);else element.style[property]=value;cache[property]=value;}
  applyHudScale(){const scale=clamp(Number(progression.settings?.hudScale)||1,.7,1.4);progression.settings.hudScale=scale;const hud=$('#hud');if(hud)hud.style.setProperty('--hud-scale',String(scale));const input=$('#hudScale'),label=$('#hudScaleLabel');if(input)input.value=String(Math.round(scale*100));if(label)label.textContent=`${Math.round(scale*100)}%`;this.applyHudLayout();}
  applyRaidFrameStyle(){const style=progression.settings?.raidFrameStyle==='class'?'class':'detailed',hud=$('#hud'),input=$('#raidFrameStyle');hud?.classList.toggle('raid-frames-class',style==='class');if(input)input.value=style;}
  applyHudLayout(){const layout=progression.settings?.hudLayout||{},globalScale=clamp(Number(progression.settings?.hudScale)||1,.7,1.4);document.querySelectorAll('#hud .hud-widget').forEach(widget=>{const point=layout[widget.dataset.hudId]||{},x=Number.isFinite(Number(point.x))?Number(point.x):0,y=Number.isFinite(Number(point.y))?Number(point.y):0,localScale=clamp(Number(point.scale)||1,.5,1.8);widget.style.setProperty('--hud-x',`${x}px`);widget.style.setProperty('--hud-y',`${y}px`);widget.style.setProperty('--hud-widget-scale',String(localScale));widget.style.setProperty('--hud-combined-scale',String(globalScale*localScale));});this.applyRaidFrameStyle();}
@@ -4609,7 +5379,7 @@ class Game {
  recordFps(now,workMs=0){this.frameWorkMs=Number.isFinite(this.frameWorkMs)?this.frameWorkMs*.88+workMs*.12:workMs;this.fpsFrames++;const elapsed=now-this.fpsWindowStart;if(elapsed<900)return;this.currentFps=Math.max(1,Math.round(this.fpsFrames*1000/elapsed));this.fpsFrames=0;this.fpsWindowStart=now;const cost=this.frameWorkMs||0,critical=this.currentFps<22||cost>24,strained=!critical&&((this.currentFps<55&&cost>8.5)||cost>14),counter=$('#fpsCounter');if(counter){counter.textContent=`${this.currentFps} FPS · ${this.performanceLabel()}`;counter.classList.toggle('hidden',!progression.settings?.showFPS);counter.classList.toggle('fps-low',strained);counter.classList.toggle('fps-critical',critical);}this.updatePerformancePresentation();}
  bindUI(){
   $('#queueSelect').onchange=()=>{if($('#queueSelect').value==='training')$('#arenaSelect').value='training';else if($('#arenaSelect').value==='training')$('#arenaSelect').value='random';this.setArenaTheme($('#arenaSelect').value||'random');this.preview();this.refreshMenuProgress();};
-  $('#modeSelect').onchange=()=>{this.preview();this.refreshMenuProgress();if(!$('#armoury').classList.contains('hidden'))this.renderArmoury();};
+  $('#modeSelect').onchange=()=>{this.syncMenuCards();this.preview();this.refreshMenuProgress();if(!$('#armoury').classList.contains('hidden'))this.renderArmoury();};
   $('#classSelect').onchange=()=>{this.syncMenuCards();this.preview();this.refreshMenuProgress();};
   $('#difficultySelect').onchange=()=>this.preview();
   const arenaSel=$('#arenaSelect'); if(arenaSel) arenaSel.onchange=e=>{if(e.target.value==='training'&&$('#queueSelect').value!=='training'){$('#queueSelect').value='training';this.message?.('Queue Type changed to Training for the Training Grounds');}this.setArenaTheme(e.target.value);this.preview();this.refreshMenuProgress();};
@@ -4642,6 +5412,12 @@ class Game {
   $('#achievementsBtn').onclick=()=>this.openAchievements();$('#tournamentBtn').onclick=()=>this.openTournament();$('#closeTournament').onclick=()=>this.closeTournament();$('#startTournamentBtn').onclick=()=>this.startTournament();$('#playTournamentBtn').onclick=()=>this.playTournamentMatch();
   $('#closeAchievements').onclick=()=>this.closeAchievements();
   $('#menuSettings').onclick=()=>this.openSettings(false);
+  $('#localRankingsBtn').onclick=()=>this.openLocalRankings();
+  $('#closeLocalRankings').onclick=()=>this.closeLocalRankings();
+  $('#localRankingsModal').onclick=e=>{if(e.target===$('#localRankingsModal'))this.closeLocalRankings();};
+  $('#saveNickname').onclick=()=>this.saveNicknameFromSettings();
+  $('#settingsNickname').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();this.saveNicknameFromSettings();}};
+  const shareOfflineRankings=$('#shareOfflineRankings');if(shareOfflineRankings){shareOfflineRankings.onchange=async e=>{const status=$('#settingsNicknameStatus'),requested=!!e.target.checked,previous=!!progression.settings?.shareOfflineRankings;e.target.disabled=true;try{if(requested){progression.settings.shareOfflineRankings=true;saveProgression();await publishOfflineRanking(true);if(status)status.textContent='Your community profile is now shared on every device.';}else{await removeOfflineRanking();progression.settings.shareOfflineRankings=false;saveProgression();if(status)status.textContent='Your profile was removed from Player Rankings. Local progress is unchanged.';}}catch(error){progression.settings.shareOfflineRankings=previous;saveProgression();if(status)status.textContent=`Ranking sync failed: ${error.message}`;}finally{e.target.disabled=false;this.updateRankingSharingSettings();}};this.updateRankingSharingSettings();}
   $('#closeSettings').onclick=()=>this.closeSettings();
   $('#pauseResume').onclick=()=>this.closePauseMenu();
   $('#pauseSettingsBtn').onclick=()=>{this.closePauseMenu(false);this.openSettings(true);};
@@ -4654,7 +5430,7 @@ class Game {
   $('#hideCombatText').onchange=e=>{progression.settings.hideCombatText=!!e.target.checked;saveProgression();};
   const hideLiveDetails=$('#hideLiveDetails');if(hideLiveDetails){hideLiveDetails.checked=!!progression.settings?.hideLiveDetails;hideLiveDetails.onchange=e=>{progression.settings.hideLiveDetails=!!e.target.checked;saveProgression();this.updateDetailsVisibility();};}
   $('#stackingNameplates').checked=progression.settings?.stackingNameplates!==false;   $('#stackingNameplates').onchange=e=>{progression.settings.stackingNameplates=!!e.target.checked;saveProgression();this.units?.forEach(u=>u.plate?.classList.remove('auto-stacked'));if(this.phase!=='menu')this.updateUI();};const targetOfTargetToggle=$('#showTargetOfTarget');if(targetOfTargetToggle){targetOfTargetToggle.checked=progression.settings?.showTargetOfTarget!==false;targetOfTargetToggle.onchange=e=>{progression.settings.showTargetOfTarget=!!e.target.checked;saveProgression();if(this.phase!=='menu')this.updateUI();};}
-  const hudScale=$('#hudScale'),raidFrameStyle=$('#raidFrameStyle'),instantCamera=$('#instantCamera'),showFPS=$('#showFPS'),performanceMode=$('#performanceMode');if(hudScale){hudScale.value=String(Math.round((progression.settings?.hudScale||1)*100));hudScale.oninput=e=>{progression.settings.hudScale=clamp(Number(e.target.value)/100,.7,1.4);this.applyHudScale();saveProgression();};}if(raidFrameStyle){raidFrameStyle.value=progression.settings?.raidFrameStyle==='class'?'class':'detailed';raidFrameStyle.onchange=e=>{progression.settings.raidFrameStyle=e.target.value==='class'?'class':'detailed';this.applyRaidFrameStyle();saveProgression();};}if(instantCamera){instantCamera.checked=progression.settings?.instantCamera!==false;instantCamera.onchange=e=>{progression.settings.instantCamera=!!e.target.checked;saveProgression();};}if(showFPS){showFPS.checked=!!progression.settings?.showFPS;showFPS.onchange=e=>{progression.settings.showFPS=!!e.target.checked;saveProgression();$('#fpsCounter')?.classList.toggle('hidden',!e.target.checked);};}if(performanceMode){performanceMode.checked=progression.settings?.performanceMode!==false;performanceMode.onchange=e=>{progression.settings.performanceMode=!!e.target.checked;saveProgression();this.resetPerformance();};}
+  const hudScale=$('#hudScale'),raidFrameStyle=$('#raidFrameStyle'),instantCamera=$('#instantCamera'),showFPS=$('#showFPS'),performanceMode=$('#performanceMode'),screenEdgeAlerts=$('#screenEdgeAlerts'),edgeAlertOpacity=$('#edgeAlertOpacity'),edgeAlertOpacityLabel=$('#edgeAlertOpacityLabel');if(hudScale){hudScale.value=String(Math.round((progression.settings?.hudScale||1)*100));hudScale.oninput=e=>{progression.settings.hudScale=clamp(Number(e.target.value)/100,.7,1.4);this.applyHudScale();saveProgression();};}if(raidFrameStyle){raidFrameStyle.value=progression.settings?.raidFrameStyle==='class'?'class':'detailed';raidFrameStyle.onchange=e=>{progression.settings.raidFrameStyle=e.target.value==='class'?'class':'detailed';this.applyRaidFrameStyle();saveProgression();};}if(instantCamera){instantCamera.checked=progression.settings?.instantCamera!==false;instantCamera.onchange=e=>{progression.settings.instantCamera=!!e.target.checked;saveProgression();};}if(showFPS){showFPS.checked=!!progression.settings?.showFPS;showFPS.onchange=e=>{progression.settings.showFPS=!!e.target.checked;saveProgression();$('#fpsCounter')?.classList.toggle('hidden',!e.target.checked);};}if(performanceMode){performanceMode.checked=progression.settings?.performanceMode!==false;performanceMode.onchange=e=>{progression.settings.performanceMode=!!e.target.checked;saveProgression();this.resetPerformance();};}if(screenEdgeAlerts){screenEdgeAlerts.checked=!!progression.settings?.screenEdgeAlerts;screenEdgeAlerts.onchange=e=>{progression.settings.screenEdgeAlerts=!!e.target.checked;saveProgression();if(!e.target.checked)$('#edgeAlert')?.classList.remove('low-health','crowd-controlled');};}if(edgeAlertOpacity){const syncOpacity=value=>{const opacity=clamp(Number(value)/100,.2,1);progression.settings.edgeAlertOpacity=opacity;if(edgeAlertOpacityLabel)edgeAlertOpacityLabel.textContent=`${Math.round(opacity*100)}%`;$('#edgeAlert')?.style.setProperty('--edge-opacity',String(opacity));};edgeAlertOpacity.value=String(Math.round((progression.settings?.edgeAlertOpacity||.72)*100));syncOpacity(edgeAlertOpacity.value);edgeAlertOpacity.oninput=e=>{syncOpacity(e.target.value);saveProgression();};}
   $('#soundVolume').oninput=e=>{$('#soundVolumeLabel').textContent=e.target.value+'%';this.audio.setVolume(Number(e.target.value)/100);};
   window.onresize=()=>{this.camera.aspect=innerWidth/innerHeight;this.camera.updateProjectionMatrix();this.applyRenderQuality();this.applyHudLayout();};
   document.addEventListener('visibilitychange',()=>{const now=performance.now();this.lastLoopAt=now;this.lastVisualAt=now;this.lastRenderedAt=now;this.simulationAccumulator=0;this.aiAccumulator=0;this.clock?.getDelta();});
@@ -4664,21 +5440,35 @@ class Game {
  refreshMenuProgress(){
   const el=$('#menuProgress');if(!el)return;
   const cls=$('#classSelect')?.value||'flame',mode=bracketKey($('#modeSelect')?.value||'2v2'),rating=classRating(cls,mode),unlock=unlockedItemLevel(),queue=$('#queueSelect')?.value||'ranked';
-  el.innerHTML=`<span>${classIcon(cls,CLASS_INFO[cls].badge)} <strong>${CLASS_INFO[cls].name}</strong> ${mode.toUpperCase()} ${queue==='ranked'?'Rating':'Queue'}: <strong>${queue==='ranked'?rating:(queue==='training'?'Training Grounds':'Skirmish')}</strong></span><span>💠 Valor Shards: <strong>${progression.shards}</strong></span><span>Gear Access: <strong>ilvl ${unlock}</strong></span><span>Title: <strong>${playerTitleLabel()}</strong></span><span>Achievements: <strong>${unlockedAchievementCount()} / ${ACHIEVEMENTS.length}</strong></span>`;
-  const rated=$('#rankedOverview');if(rated){const cards=['1v1','2v2','3v3'].map(br=>{const r=classRating(cls,br),tier=ratingTierMeta(r);return `<div class="rating-card"><div class="top"><b>${br} Rating</b><span class="icon" style="color:${tier.css};border-color:${tier.css}55">${tier.icon}</span></div><div class="value">${r}</div><div class="meta"><strong style="color:${tier.css}">${tier.name}</strong> · ${CLASS_INFO[cls].name}</div><div class="sub">Ranked bracket progress</div></div>`;}).join('');rated.innerHTML=cards;}
+   el.innerHTML=`<span>${classIcon(cls,CLASS_INFO[cls].badge)} <strong>${CLASS_INFO[cls].name}</strong> ${mode.toUpperCase()} ${queue==='ranked'?'Rating':'Queue'}: <strong>${queue==='ranked'?rating:(queue==='training'?'Training Grounds':'Skirmish')}</strong></span><span>💠 Valor Shards: <strong>${progression.shards}</strong></span><span>Account Gear Access: <strong>ilvl ${unlock}</strong></span>${queue==='ranked'?`<span>Rated Rival Gear: <strong>${this.ratedBotGearLabel()}</strong></span>`:''}<span>Title: <strong>${playerTitleLabel()}</strong></span><span>Achievements: <strong>${unlockedAchievementCount()} / ${ACHIEVEMENTS.length}</strong></span>`;
+  const rated=$('#rankedOverview');if(rated){const brackets=['sage','pala','disc'].includes(cls)?['2v2','3v3']:['1v1','2v2','3v3'];const cards=brackets.map(br=>{const r=classRating(cls,br),tier=ratingTierMeta(r);return `<div class="rating-card"><div class="top"><b>${br} Rating</b><span class="icon" style="color:${tier.css};border-color:${tier.css}55">${tier.icon}</span></div><div class="value">${r}</div><div class="meta"><strong style="color:${tier.css}">${tier.name}</strong> · ${CLASS_INFO[cls].name}</div><div class="sub">Ranked bracket progress</div></div>`;}).join('');rated.innerHTML=cards;}
  }
  getEquippedItems(cls){
   const loadout=progression.equipped[cls]||{};
   return GEAR_SLOTS.map(slot=>progression.inventory.find(item=>item.id===loadout[slot])).filter(Boolean);
  }
- getEquippedStats(cls){
+  getEquippedStats(cls){
   const totals=blankStats();
   this.getEquippedItems(cls).forEach(item=>{const values=itemStatValues(item);GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});
-  return totals;
- }
- getAllyScaledItems(cls){
-  const preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];
-  return (this.allyGearProfile||[]).map(item=>({
+   return totals;
+  }
+  ratedBotGearProfile(){
+   const playerClass=this.player?.cls||$('#classSelect')?.value||'flame',mode=bracketKey(this.mode||$('#modeSelect')?.value||'2v2');
+   const rating=classRating(playerClass,mode),expectedIlvl=ratedBotItemLevel(rating),equipped=this.getEquippedItems(playerClass),bySlot=new Map(equipped.map(item=>[item.slot,item]));
+   // Rated opponents never fall below the bracket standard. If the player brings a
+   // stronger item in a slot, the AI mirrors that slot's item level so entry-bracket
+   // matches cannot be trivialised by wearing an endgame loadout.
+   return GEAR_SLOTS.map(slot=>{const playerItem=bySlot.get(slot),playerIlvl=Math.max(0,Number(playerItem?.ilvl)||0);return {slot,ilvl:Math.max(expectedIlvl,playerIlvl),rating,expectedIlvl,mirrored:playerIlvl>expectedIlvl};});
+  }
+  ratedBotGearLabel(){
+   const profile=this.ratedBotGearProfile(),levels=profile.map(item=>item.ilvl),minimum=Math.min(...levels),maximum=Math.max(...levels),mirrored=profile.filter(item=>item.mirrored).length;
+   return mirrored?(minimum===maximum?`full ilvl ${maximum} · player gear matched`:`ilvl ${minimum}–${maximum} · ${mirrored} stronger slot${mirrored===1?'':'s'} matched`):`full ilvl ${minimum}`;
+  }
+  getAllyScaledItems(cls){
+   const preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];
+   const profile=this.queueType==='ranked'?this.ratedBotGearProfile():(this.allyGearProfile||[]);
+   if(this.queueType==='ranked')this.allyGearProfile=profile;
+   return profile.map(item=>({
    classKey:cls,slot:item.slot,ilvl:item.ilvl,statA:preferred[0],statB:preferred[1],
    name:gearName(cls,item.slot,item.ilvl),rarity:rarityForIlvl(item.ilvl),source:'Scaled Ally Loadout'
   }));
@@ -4688,9 +5478,11 @@ class Game {
   this.getAllyScaledItems(cls).forEach(item=>{const values=itemStatValues(item);GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});
   return totals;
  }
- getEnemyScaledItems(cls){
-  const preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];
-  return (this.enemyGearProfile||[]).map(item=>({
+  getEnemyScaledItems(cls){
+   const preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];
+   const profile=this.queueType==='ranked'?this.ratedBotGearProfile():(this.enemyGearProfile||[]);
+   if(this.queueType==='ranked')this.enemyGearProfile=profile;
+   return profile.map(item=>({
    classKey:cls,slot:item.slot,ilvl:item.ilvl,statA:preferred[0],statB:preferred[1],
    name:gearName(cls,item.slot,item.ilvl),rarity:rarityForIlvl(item.ilvl),source:'Scaled Rival Loadout'
   }));
@@ -4700,9 +5492,13 @@ class Game {
   this.getEnemyScaledItems(cls).forEach(item=>{const values=itemStatValues(item);GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});
   return totals;
  }
- enemyGearSummary(){
-  const profile=this.enemyGearProfile||[];
-  if(!profile.length)return 'Rival Scaling: your selected class has no equipped gear, so enemy combatants enter ungeared.';
+  enemyGearSummary(){
+   const profile=this.queueType==='ranked'?this.ratedBotGearProfile():(this.enemyGearProfile||[]);
+   if(this.queueType==='ranked'){
+    const levels=profile.map(item=>item.ilvl),average=Math.round(levels.reduce((sum,ilvl)=>sum+ilvl,0)/levels.length),minimum=Math.min(...levels),maximum=Math.max(...levels),mirrored=profile.filter(item=>item.mirrored).length,playerItems=this.getEquippedItems(this.player?.cls||$('#classSelect')?.value||'flame'),playerAverage=playerItems.length?Math.round(playerItems.reduce((sum,item)=>sum+item.ilvl,0)/playerItems.length):0;
+    return `Rated Gear Standard: every AI combatant has all ${GEAR_SLOTS.length} slots at bracket ilvl ${profile[0]?.expectedIlvl||910}${mirrored?`, with ${mirrored} stronger player slot${mirrored===1?'':'s'} mirrored (effective ${minimum===maximum?minimum:`${minimum}-${maximum}`}, average ${average})`:''}. You have ${playerItems.length}/${GEAR_SLOTS.length} slots equipped${playerAverage?` at average ilvl ${playerAverage}`:' and no equipped gear'}; gear-tier access remains account-wide through your highest rating.`;
+   }
+   if(!profile.length)return 'Rival Scaling: your selected class has no equipped gear, so enemy combatants enter ungeared.';
   const average=Math.round(profile.reduce((sum,item)=>sum+item.ilvl,0)/profile.length);
   return `Rival Scaling: enemies mirror your ${profile.length} equipped slot${profile.length===1?'':'s'} at average ilvl ${average}, using recommended stats for their own classes.`;
  }
@@ -4727,6 +5523,7 @@ class Game {
   this.selectArmouryClass(chosen);
   this.collectionView='inventory';
   this.inventoryFilter=this.inventoryFilter||'all';
+  this.inventorySlotFilter=null;
   this.renderArmoury();
  }
  closeArmoury(){this.closeRecraft();$('#armoury').classList.add('hidden');$('#gearTooltip').classList.add('hidden');this.armouryDragging=false;this.refreshMenuProgress();}
@@ -5283,7 +6080,7 @@ const addMythicLegend=(slot,style)=>{
   if(!CLASS_INFO[cls])return;
   if($('#loadoutClass').value!==cls)$('#loadoutClass').value=cls;
   if(!this.armouryRenderer)this.initArmouryPreview();
-  if(this.armouryModel)this.armouryScene.remove(this.armouryModel);
+  if(this.armouryModel){this.armouryScene.remove(this.armouryModel);this.disposeObject(this.armouryModel);}
   this.armouryModel=this.buildGuideModel(cls);const shownGear=this.gearAppearanceItems(cls);this.applyBaseGearVisibility(this.armouryModel,shownGear);this.armouryGearAppearance=this.attachGearAppearance(this.armouryModel,cls,shownGear,true);this.armouryPrestige=buildPrestigeVisual(cls,shownGear);if(this.armouryPrestige)this.armouryModel.add(this.armouryPrestige);applyPrestigeWeaponIllusion(this.armouryModel,cls,shownGear);applyShadowmoonWeapon(this.armouryModel,shownGear);this.armouryModel.rotation.y=this.armouryYaw;this.armouryScene.add(this.armouryModel);
   const bracket=bracketKey($('#modeSelect')?.value||'2v2'),label=$('#armouryModelLabel'),badge=$('#transmogPreviewBadge');
   if(label)label.innerHTML=`<strong>${CLASS_INFO[cls].badge} ${CLASS_INFO[cls].name}</strong>${CLASS_INFO[cls].role} · ${bracket.toUpperCase()} Rating ${classRating(cls,bracket)} · drag model to rotate`;
@@ -5324,9 +6121,10 @@ const addMythicLegend=(slot,style)=>{
   $('#equipmentRight').innerHTML=RIGHT_GEAR_SLOTS.map(slot=>this.equipmentSlotCard(loadCls,slot)).join('');
   const allClassInventory=progression.inventory.filter(item=>item.classKey===loadCls).sort((a,b)=>b.ilvl-a.ilvl||GEAR_SLOTS.indexOf(a.slot)-GEAR_SLOTS.indexOf(b.slot));
   const equippedIds=new Set(Object.values(progression.equipped[loadCls]||{})),equippedCount=allClassInventory.filter(item=>equippedIds.has(item.id)).length,bagCount=allClassInventory.length-equippedCount,inventoryFilter=this.inventoryFilter||'all';
-  const classInventory=allClassInventory.filter(item=>inventoryFilter==='equipped'?equippedIds.has(item.id):inventoryFilter==='bag'?!equippedIds.has(item.id):true);
+  const slotFilter=GEAR_SLOTS.includes(this.inventorySlotFilter)?this.inventorySlotFilter:null;
+  const classInventory=allClassInventory.filter(item=>(!slotFilter||item.slot===slotFilter)&&(inventoryFilter==='equipped'?equippedIds.has(item.id):inventoryFilter==='bag'?!equippedIds.has(item.id):true));
   document.querySelectorAll('[data-inventory-filter]').forEach(btn=>btn.classList.toggle('active',btn.dataset.inventoryFilter===inventoryFilter));
-  $('#inventoryHelp').innerHTML=`<div class="inventory-class-banner"><span>${CLASS_INFO[loadCls].badge} <strong>${CLASS_INFO[loadCls].name} Items</strong></span><span>${classInventory.length} shown</span></div><div class="inventory-count-line"><b>${allClassInventory.length} Total</b><b class="equipped">${equippedCount} Equipped</b><b class="bag">${bagCount} In Bag</b></div>${inventoryFilter==='equipped'?'Viewing currently equipped items.':inventoryFilter==='bag'?'Viewing unequipped items available in your bag.':'Drag an item to its matching slot, or right-click it to equip automatically.'}`;
+  $('#inventoryHelp').innerHTML=`<div class="inventory-class-banner"><span>${CLASS_INFO[loadCls].badge} <strong>${slotFilter?`${SLOT_ICONS[slotFilter]} ${slotFilter} Options`:`${CLASS_INFO[loadCls].name} Items`}</strong></span><span>${classInventory.length} shown</span></div><div class="inventory-count-line"><b>${allClassInventory.length} Total</b><b class="equipped">${equippedCount} Equipped</b><b class="bag">${bagCount} In Bag</b>${slotFilter?`<button class="inventory-clear-slot" onclick="game.clearInventorySlotFilter()">Show All Slots</button>`:''}</div>${slotFilter?`Sorted highest item level first for the ${slotFilter} slot. Click a different equipped slot to change this list.`:inventoryFilter==='equipped'?'Viewing currently equipped items.':inventoryFilter==='bag'?'Viewing unequipped items available in your bag.':'Click an equipment slot to show only matching pieces, or drag/right-click an item to equip it.'}`;
   $('#inventoryGear').innerHTML=classInventory.length?classInventory.map(item=>this.gearCard(item,equippedIds.has(item.id),true)).join(''):`<div class="gear-empty">${inventoryFilter==='equipped'?'No items currently equipped in this loadout.':inventoryFilter==='bag'?'No unequipped items in the bag for this class.':`No ${CLASS_INFO[loadCls].name} gear yet — forge an item or win arena drops for this class.`}</div>`;
   $('#inventoryTab').classList.toggle('active',this.collectionView==='inventory');$('#catalogueTab').classList.toggle('active',this.collectionView==='catalogue');
   $('#inventoryPane').classList.toggle('hidden',this.collectionView!=='inventory');$('#cataloguePane').classList.toggle('hidden',this.collectionView!=='catalogue');
@@ -5372,6 +6170,7 @@ const addMythicLegend=(slot,style)=>{
    card.oncontextmenu=e=>{e.preventDefault();this.autoEquipGear(card.dataset.gear);};
   });
   document.querySelectorAll('#armoury .equip-slot').forEach(slot=>{
+   slot.onclick=e=>{if(e.button!==0)return;this.inventorySlotFilter=slot.dataset.slot;this.inventoryFilter='all';this.collectionView='inventory';this.renderArmoury();};
    slot.ondragover=e=>{e.preventDefault();slot.classList.add('drop-ready');};
    slot.ondragleave=()=>slot.classList.remove('drop-ready','drop-invalid');
    slot.ondrop=e=>{e.preventDefault();slot.classList.remove('drop-ready','drop-invalid');const id=e.dataTransfer.getData('text/plain');this.dropGearOnSlot(id,slot.dataset.class,slot.dataset.slot);};
@@ -5383,6 +6182,7 @@ const addMythicLegend=(slot,style)=>{
   if(modal)modal.onclick=e=>{if(e.target===modal)this.closeStatGuide();};
   this.bindGearTooltipCards();
  }
+ clearInventorySlotFilter(){this.inventorySlotFilter=null;this.renderArmoury();}
  bindGearTooltipCards(){
   document.querySelectorAll('#armoury .gear-item[data-gear],#armoury .equip-slot[data-gear]').forEach(card=>{card.onmouseenter=e=>this.showGearTooltip(card.dataset.gear,e);card.onmousemove=e=>this.positionGearTooltip(e);card.onmouseleave=()=>$('#gearTooltip').classList.add('hidden');});
  }
@@ -5395,14 +6195,14 @@ const addMythicLegend=(slot,style)=>{
  }
  renderItemTooltip(item,e,equipped=false,locked=false){
   const stats=itemStatValues(item),tt=$('#gearTooltip'),rarity=rarityForIlvl(item.ilvl),quality=RARITY_INFO[rarity];
-  tt.className=`gear-tooltip rarity-${rarity}`;
+  document.body.appendChild(tt);tt.style.zIndex='10000';tt.style.pointerEvents='none';tt.className=`gear-tooltip rarity-${rarity}`;
   const main=CLASS_PRIMARY[item.classKey]||'Strength',coreLines=[`+${stats.Stamina||0} Stamina`,`+${stats[main]||0} ${main}`].join('<br>'),buildLines=['Power','Restoration','Vitality','Mana','Versatility','Critical Strike'].filter(s=>stats[s]>0).map(s=>`+${stats[s]} ${s}`).join('<br>');
   tt.innerHTML=`<h4>${item.name}</h4><div class="quality" style="color:${quality.colour}">${quality.name} · Item Level ${item.ilvl}</div><div class="quality">${SLOT_ICONS[item.slot]} ${item.slot} · ${CLASS_INFO[item.classKey].badge} ${CLASS_INFO[item.classKey].name}</div><div class="tipstat"><b>Core Attributes</b><br>${coreLines}<br><br><b>Build Bonuses</b><br>${buildLines}</div><p>${item.flavour}</p>${item.effect?`<p class="legendary-tooltip-effect">Equip: ${item.effect}</p>`:''}<p>${locked?'Locked: increase your highest arena rating to obtain this item level.':equipped?'Currently equipped. Right-click its slot to remove it.':'Drag to the matching equipment slot or right-click to auto-equip. Equipping this piece replaces the matching default visual on your model.'}</p><div class="selltip">${item.source==='Collection Catalogue'?'Collection Entry':`Recraft stats: ${gearRecraftCost(item)} Valor Shards · Sell value: ${Math.floor(item.price*.45)} Valor Shards`}</div>`;
   tt.classList.remove('hidden');this.positionGearTooltip(e);
  }
  positionGearTooltip(e){
   const tt=$('#gearTooltip');if(tt.classList.contains('hidden'))return;
-  tt.style.left=`${clamp(e.clientX+16,10,innerWidth-305)}px`;tt.style.top=`${clamp(e.clientY+12,10,innerHeight-240)}px`;
+  tt.style.left=`${clamp(e.clientX+16,10,Math.max(10,innerWidth-tt.offsetWidth-10))}px`;tt.style.top=`${clamp(e.clientY+12,10,Math.max(10,innerHeight-tt.offsetHeight-10))}px`;
  }
  buyGear(){
   const cls=$('#shopClass').value,slot=$('#shopSlot').value,ilvl=Number($('#shopIlvl').value),statA=$('#shopStatA').value,statB=$('#shopStatB').value,cost=gearPrice(ilvl);
@@ -5480,11 +6280,12 @@ const addMythicLegend=(slot,style)=>{
   if(queue==='training'){return {cls,mode,queueType:queue,gained:0,newRating:classRating(cls,mode),shards:0,drop:null,achievements:[],achievementShards:0};}
   let gained=0,shards=0,newRating=classRating(cls,mode),drop=null;
   progression.matches++;if(won)progression.wins++;
+  const classRecord=progression.records?.[mode]?.[cls];if(classRecord){classRecord.matches++;if(won)classRecord.wins++;}
   if(mode==='1v1'){progression.duelMatches=(progression.duelMatches||0)+1;if(won)progression.duelWins=(progression.duelWins||0)+1;}
   if(queue==='ranked'){gained=won?(18+Math.floor(Math.random()*5)):-(10+Math.floor(Math.random()*7));shards=Math.round((won?(115+Math.floor(Math.random()*36)):(35+Math.floor(Math.random()*16)))*2.5);newRating=addClassRating(cls,mode,gained);progression.shards+=shards;if(won&&Math.random()<.60){const dropCls=cls,slot=GEAR_SLOTS[Math.floor(Math.random()*GEAR_SLOTS.length)],limit=unlockedItemLevel(),dropIlvl=Math.max(910,limit-(Math.floor(Math.random()*3)*5)),build=GEAR_BUILD_INFO[dropCls].stats;drop=createGearItem(dropCls,slot,dropIlvl,build[0],build[1],'Arena Victory Drop');progression.inventory.push(drop);}}
   else if(queue==='skirmish'||queue==='tournament'){shards=Math.round((won?(queue==='tournament'?90:38)+Math.floor(Math.random()*18):(queue==='tournament'?35:18)+Math.floor(Math.random()*10))*2.5);progression.shards+=shards;}
   const achievements=evaluateAchievements();const achievementShards=achievements.reduce((sum,a)=>sum+(a.rewardShards||0),0);
-  saveProgression();return {cls,mode,queueType:queue,gained,newRating,shards,drop,achievements,achievementShards};
+  saveProgression();queueRankingPublish();return {cls,mode,queueType:queue,gained,newRating,shards,drop,achievements,achievementShards};
  }
  buildMenuClassCards(){
   const host=$('#classCards'); if(!host) return;
@@ -5501,12 +6302,15 @@ const addMythicLegend=(slot,style)=>{
    warrior:'Plate melee bruiser with Charge, Rend bleeds, Pummel interrupts, Spell Reflection and a fearsome Intimidating Shout.'
   };
   host.innerHTML=order.map(cls=>`<button type="button" class="class-card" data-cls="${cls}"><div class="class-badge">${classIcon(cls,CLASS_INFO[cls].badge)}</div><div class="class-name">${CLASS_INFO[cls].name}</div><div class="class-role">${CLASS_INFO[cls].role}</div><div class="class-blurb">${blurbs[cls]}</div></button>`).join('');
-  host.querySelectorAll('.class-card').forEach(card=>card.onpointerdown=()=>{$('#classSelect').value=card.dataset.cls;this.syncMenuCards();this.preview();});
+  host.querySelectorAll('.class-card').forEach(card=>card.onpointerdown=()=>{if(card.disabled)return;$('#classSelect').value=card.dataset.cls;$('#classSelect').dispatchEvent(new Event('change'));});
   this.syncMenuCards();
  }
  syncMenuCards(){
-  const selected=$('#classSelect')?.value;
-  document.querySelectorAll('.class-card').forEach(card=>card.classList.toggle('active',card.dataset.cls===selected));
+  const select=$('#classSelect'),duel=$('#modeSelect')?.value==='1v1',healers=new Set(['sage','pala','disc']);let selected=select?.value;
+  select?.querySelectorAll('option').forEach(option=>{option.disabled=duel&&healers.has(option.value);});
+  if(duel&&healers.has(selected)){selected=this.lastDuelDpsClass||'flame';if(select)select.value=selected;}
+  if(selected&&!healers.has(selected))this.lastDuelDpsClass=selected;
+  document.querySelectorAll('.class-card').forEach(card=>{const unavailable=duel&&healers.has(card.dataset.cls);card.disabled=unavailable;card.classList.toggle('duel-disabled',unavailable);card.classList.toggle('active',card.dataset.cls===selected);card.title=unavailable?'Healers are unavailable in offline 1v1 duels':'';});
   if(selected)this.selectMenuChampionPreview(selected);
  }
  initMenuChampionPreview(){
@@ -5525,7 +6329,7 @@ const addMythicLegend=(slot,style)=>{
  selectMenuChampionPreview(cls){
   if(!$('#menuChampionCanvas'))return;
   this.initMenuChampionPreview();if(!this.menuPreviewScene)return;
-  if(this.menuPreviewModel)this.menuPreviewScene.remove(this.menuPreviewModel);
+  if(this.menuPreviewModel){this.menuPreviewScene.remove(this.menuPreviewModel);this.disposeObject(this.menuPreviewModel);}
   this.menuPreviewModel=this.buildGuideModel(cls);
   const shownGear=this.getEquippedItems(cls);
   this.applyBaseGearVisibility(this.menuPreviewModel,shownGear);
@@ -5559,7 +6363,7 @@ const addMythicLegend=(slot,style)=>{
  }
  openClassGuide(cls='flame'){this.audio.ensure();$('#classGuide').classList.remove('hidden');if(!this.guideRenderer)this.initClassGuide();this.selectGuideClass(cls);}
  closeClassGuide(){$('#classGuide').classList.add('hidden');this.guideDragging=false;}
- openMountJournal(){this.selectedMountId=this.selectedMountId||progression.activeMount;this.renderMountJournal();$('#mountJournal').classList.remove('hidden');this.initMountPreview();this.setMountPreview(mountDefinition(this.selectedMountId));this.animateMountPreview();}  closeMountJournal(){$('#mountJournal').classList.add('hidden');this.mountPreviewAnimating=false;}  initMountPreview(){if(this.mountPreviewRenderer)return;const canvas=$('#mountPreviewCanvas');this.mountPreviewYaw=-.55;this.mountPreviewDragging=false;this.mountPreviewLastX=0;canvas.style.cursor='grab';canvas.title='Drag to rotate mount preview';this.mountPreviewRenderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});this.mountPreviewRenderer.setPixelRatio(Math.min(devicePixelRatio,2));this.mountPreviewScene=new THREE.Scene();this.mountPreviewCamera=new THREE.PerspectiveCamera(42,1,.1,50);this.mountPreviewCamera.position.set(3.8,2.45,4.7);this.mountPreviewCamera.lookAt(0,1,-.15);this.mountPreviewScene.add(new THREE.HemisphereLight(0xffe5c4,0x122132,1.25));const key=new THREE.DirectionalLight(0xffe6b3,1.7);key.position.set(3,4,3);this.mountPreviewScene.add(key);const rim=new THREE.PointLight(0x7ecfff,1.3,8);rim.position.set(-2,2,-1);this.mountPreviewScene.add(rim);const ground=new THREE.Mesh(new THREE.CircleGeometry(1.85,40),new THREE.MeshStandardMaterial({color:0x25150f,roughness:.9,metalness:0}));ground.rotation.x=-Math.PI/2;this.mountPreviewScene.add(ground);canvas.addEventListener('pointerdown',e=>{this.mountPreviewDragging=true;this.mountPreviewLastX=e.clientX;canvas.style.cursor='grabbing';canvas.setPointerCapture(e.pointerId);e.preventDefault();});canvas.addEventListener('pointermove',e=>{if(!this.mountPreviewDragging)return;this.mountPreviewYaw+=(e.clientX-this.mountPreviewLastX)*.012;this.mountPreviewLastX=e.clientX;e.preventDefault();});const release=()=>{this.mountPreviewDragging=false;canvas.style.cursor='grab';};canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);}  setMountPreview(def){if(!this.mountPreviewScene)return;if(this.mountPreviewModel)this.mountPreviewScene.remove(this.mountPreviewModel);this.mountPreviewModel=buildMountVisual(def,true);this.mountPreviewModel.rotation.y=this.mountPreviewYaw??-.55;this.mountPreviewModel.position.y=.03;this.mountPreviewScene.add(this.mountPreviewModel);}  animateMountPreview(){if(this.mountPreviewAnimating)return;this.mountPreviewAnimating=true;const draw=()=>{if(!this.mountPreviewAnimating||$('#mountJournal').classList.contains('hidden')){this.mountPreviewAnimating=false;return;}const canvas=$('#mountPreviewCanvas'),w=canvas.clientWidth||420,h=canvas.clientHeight||300;this.mountPreviewRenderer.setSize(w,h,false);this.mountPreviewCamera.aspect=w/h;this.mountPreviewCamera.updateProjectionMatrix();if(this.mountPreviewModel){if(!this.mountPreviewDragging)this.mountPreviewYaw+=.0024;this.mountPreviewModel.rotation.y=this.mountPreviewYaw;const legs=this.mountPreviewModel.userData.legs||[];legs.forEach((leg,i)=>leg.rotation.x=(i%2?1:-1)*Math.sin(performance.now()*.004)*.14);this.mountPreviewModel.userData.ring.rotation.z+=.008;if(this.mountPreviewModel.userData.tickFX)this.mountPreviewModel.userData.tickFX(performance.now()*.001,.016);}this.mountPreviewRenderer.render(this.mountPreviewScene,this.mountPreviewCamera);requestAnimationFrame(draw);};requestAnimationFrame(draw);}
+ openMountJournal(){this.selectedMountId=this.selectedMountId||progression.activeMount;this.renderMountJournal();$('#mountJournal').classList.remove('hidden');this.initMountPreview();this.setMountPreview(mountDefinition(this.selectedMountId));this.animateMountPreview();}  closeMountJournal(){$('#mountJournal').classList.add('hidden');this.mountPreviewAnimating=false;if(this.mountPreviewFrame!=null)cancelAnimationFrame(this.mountPreviewFrame);this.mountPreviewFrame=null;}  initMountPreview(){if(this.mountPreviewRenderer)return;const canvas=$('#mountPreviewCanvas');this.mountPreviewYaw=-.55;this.mountPreviewDragging=false;this.mountPreviewLastX=0;canvas.style.cursor='grab';canvas.title='Drag to rotate mount preview';this.mountPreviewRenderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});this.mountPreviewRenderer.setPixelRatio(Math.min(devicePixelRatio,2));this.mountPreviewScene=new THREE.Scene();this.mountPreviewCamera=new THREE.PerspectiveCamera(42,1,.1,50);this.mountPreviewCamera.position.set(3.8,2.45,4.7);this.mountPreviewCamera.lookAt(0,1,-.15);this.mountPreviewScene.add(new THREE.HemisphereLight(0xffe5c4,0x122132,1.25));const key=new THREE.DirectionalLight(0xffe6b3,1.7);key.position.set(3,4,3);this.mountPreviewScene.add(key);const rim=new THREE.PointLight(0x7ecfff,1.3,8);rim.position.set(-2,2,-1);this.mountPreviewScene.add(rim);const ground=new THREE.Mesh(new THREE.CircleGeometry(1.85,40),new THREE.MeshStandardMaterial({color:0x25150f,roughness:.9,metalness:0}));ground.rotation.x=-Math.PI/2;this.mountPreviewScene.add(ground);canvas.addEventListener('pointerdown',e=>{this.mountPreviewDragging=true;this.mountPreviewLastX=e.clientX;canvas.style.cursor='grabbing';canvas.setPointerCapture(e.pointerId);e.preventDefault();});canvas.addEventListener('pointermove',e=>{if(!this.mountPreviewDragging)return;this.mountPreviewYaw+=(e.clientX-this.mountPreviewLastX)*.012;this.mountPreviewLastX=e.clientX;e.preventDefault();});const release=()=>{this.mountPreviewDragging=false;canvas.style.cursor='grab';};canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);}  setMountPreview(def){if(!this.mountPreviewScene)return;if(this.mountPreviewModel){this.mountPreviewScene.remove(this.mountPreviewModel);this.disposeObject(this.mountPreviewModel);}this.mountPreviewModel=buildMountVisual(def,true);this.mountPreviewModel.rotation.y=this.mountPreviewYaw??-.55;this.mountPreviewModel.position.y=.03;this.mountPreviewScene.add(this.mountPreviewModel);}  animateMountPreview(){if(this.mountPreviewAnimating)return;this.mountPreviewAnimating=true;const draw=()=>{if(!this.mountPreviewAnimating||$('#mountJournal').classList.contains('hidden')){this.mountPreviewAnimating=false;return;}const canvas=$('#mountPreviewCanvas'),w=canvas.clientWidth||420,h=canvas.clientHeight||300;this.mountPreviewRenderer.setSize(w,h,false);this.mountPreviewCamera.aspect=w/h;this.mountPreviewCamera.updateProjectionMatrix();if(this.mountPreviewModel){if(!this.mountPreviewDragging)this.mountPreviewYaw+=.0024;this.mountPreviewModel.rotation.y=this.mountPreviewYaw;const legs=this.mountPreviewModel.userData.legs||[];legs.forEach((leg,i)=>leg.rotation.x=(i%2?1:-1)*Math.sin(performance.now()*.004)*.14);this.mountPreviewModel.userData.ring.rotation.z+=.008;if(this.mountPreviewModel.userData.tickFX)this.mountPreviewModel.userData.tickFX(performance.now()*.001,.016);}this.mountPreviewRenderer.render(this.mountPreviewScene,this.mountPreviewCamera);requestAnimationFrame(draw);};requestAnimationFrame(draw);}
   showMountSkinTip(ev,text){
  let tip=$('#floatingSkinTip');
  if(!tip){tip=document.createElement('div');tip.id='floatingSkinTip';tip.className='floating-skin-tip';document.body.appendChild(tip);}
@@ -5656,7 +6460,7 @@ renderMountJournal(){this.hideMountSkinTip?.();progression=unlockEligibleMounts(
   $('#guideMechanic').innerHTML=`<div class="guide-plan"><span><b>Core game plan</b>${plan.core}</span><span><b>Burst window</b>${plan.burst}</span><span><b>Survival</b>${plan.survival}</span></div>`;
   $('#guidePassives').innerHTML=`<strong>Resources & passive spell interactions</strong>${CLASS_PASSIVES[cls]}`;
   $('#guideAbilities').innerHTML=AB[cls].map((a,i)=>{const cleanTip=String(a.tip||'').replace(/^Talent ability\.\s*/,'').replace(/^(?:Caster|Storm|Melee|Healer|Holy healer|Atonement healer|Martial|Affliction|Warrior) mechanic:\s*/i,'');const costText=a.cost>0?`Costs ${a.cost} ${info.resource==='energy'?'energy':'mana'}.`:'No resource cost.';return `<div class="guide-ability"><div class="guide-ability-head"><span class="guide-ability-name">${i+1}. ${abilityIcon(a)} ${a.name}</span><span class="guide-ability-meta">${a.cast?a.cast+'s CAST':'INSTANT'} · ${a.range?a.range+'m':'SELF'} · ${a.cd?a.cd+'s CD':'NO CD'}</span></div><p>${cleanTip} <span style="color:#9ccaff">${costText}</span></p></div>`;}).join('');
-  if(this.guideModel)this.guideScene.remove(this.guideModel);this.guideModel=this.buildGuideModel(cls);this.guideModel.rotation.y=this.guideYaw;this.guideScene.add(this.guideModel);
+  if(this.guideModel){this.guideScene.remove(this.guideModel);this.disposeObject(this.guideModel);}this.guideModel=this.buildGuideModel(cls);this.guideModel.rotation.y=this.guideYaw;this.guideScene.add(this.guideModel);
  }
  buildGuideModel(cls){
   if(typeof AetherKit!=='undefined'&&AetherKit.ready){const gm=AetherKit.buildModelGroup(cls);gm.userData.preview=true;return gm;}
@@ -5942,20 +6746,34 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
   return ability.name;
  }
  abilityLayoutKey(cls){return cls;}
+ abilitySlotChoiceGroup(cls,name){const node=talentTree(cls).find(n=>n.capstoneGroup&&TALENT_UNLOCKED_ABILITIES[cls]?.[n.id]?.name===name);return node?.capstoneGroup||null;}
  canonicalAbilitySlots(cls){
   const base=(window.__AB_BASE?.[cls]||AB[cls]||[]).map(a=>this.abilitySlotIdentity(a));
   const unlocked=Object.values(TALENT_UNLOCKED_ABILITIES[cls]||{}).filter(a=>a.type!=='passiveOnly').map(a=>this.abilitySlotIdentity(a));
   return [...new Set(base.concat(unlocked))].slice(0,14);
  }
  classAbilityDisplayOrder(cls){
+  const previousLayout=JSON.stringify(abilityLayouts);
   const defaults=this.extraToolkitDisplayOrder(cls);
   const byIdentity=new Map(defaults.map(item=>[this.abilitySlotIdentity(item.a),item]));
   const canonical=this.canonicalAbilitySlots(cls),saved=Array.isArray(abilityLayouts[cls])?abilityLayouts[cls]:[];
+  // Retain each spell's preferred key while lending unlearned spells' slots to the current build.
+  const memory=abilityLayouts.__preferred||(abilityLayouts.__preferred={});
+  const preferred=memory[cls]||(memory[cls]={});
+  const activeMemory=abilityLayouts.__active||(abilityLayouts.__active={}),previousActive=activeMemory[cls]||[];
   const slots=Array(14).fill(null),used=new Set();
-  saved.slice(0,14).forEach((name,slot)=>{const identity=name==='Chaos Bolt'?'Unstable Affliction':name==='Immolate'?'Creeping Torment':name;if(identity&&!used.has(identity)){slots[slot]=identity;used.add(identity);}});
-  canonical.forEach(identity=>{if(used.has(identity))return;const empty=slots.indexOf(null);if(empty>=0){slots[empty]=identity;used.add(identity);}});
+  saved.slice(0,14).forEach((name,slot)=>{const identity=name==='Chaos Bolt'?'Unstable Affliction':name==='Immolate'?'Creeping Torment':name;if(!identity)return;if(!Number.isInteger(preferred[identity]))preferred[identity]=slot;if(byIdentity.has(identity)&&!used.has(identity)){slots[slot]=identity;used.add(identity);}});
+  byIdentity.forEach((item,identity)=>{const slot=preferred[identity];if(!used.has(identity)&&Number.isInteger(slot)&&slot>=0&&slot<14&&slots[slot]===null){slots[slot]=identity;used.add(identity);}});
+  byIdentity.forEach((item,identity)=>{if(used.has(identity))return;const group=this.abilitySlotChoiceGroup(cls,identity);if(!group)return;const candidates=saved.map((name,i)=>({name,i})).filter(({name,i})=>i<14&&slots[i]===null&&!byIdentity.has(name)&&this.abilitySlotChoiceGroup(cls,name)===group);const slot=(candidates.find(c=>previousActive.includes(c.name))||candidates[0])?.i??-1;if(slot>=0){slots[slot]=identity;used.add(identity);}});
+  canonical.forEach((identity,index)=>{if(used.has(identity)||!byIdentity.has(identity))return;const empty=slots[index]===null?index:slots.indexOf(null);if(empty>=0){slots[empty]=identity;used.add(identity);}});
   byIdentity.forEach((item,identity)=>{if(used.has(identity))return;const empty=slots.indexOf(null);if(empty>=0){slots[empty]=identity;used.add(identity);}});
+  slots.forEach((identity,slot)=>{if(identity&&!Number.isInteger(preferred[identity]))preferred[identity]=slot;});
+  // Inactive placeholders may occupy spare space, but never hide a learned ability.
+  saved.slice(0,14).forEach((identity,slot)=>{if(identity&&!used.has(identity)&&slots[slot]===null){slots[slot]=identity;used.add(identity);}});
+  canonical.forEach(identity=>{if(used.has(identity))return;const empty=slots.indexOf(null);if(empty>=0){slots[empty]=identity;used.add(identity);}});
+  activeMemory[cls]=[...byIdentity.keys()];
   abilityLayouts[cls]=slots.slice();
+  if(JSON.stringify(abilityLayouts)!==previousLayout)this.saveAbilityLayouts();
   return slots.map((identity,slot)=>identity&&byIdentity.has(identity)?{...byIdentity.get(identity),slot,slotIdentity:identity}:null);
  }
  swapAbilitySlots(fromSlot,toSlot){
@@ -5967,18 +6785,34 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
   const fromName=ordered[fromSlot]?.a?.name||'Empty slot',toName=ordered[toSlot]?.a?.name||'Empty slot';
   [names[fromSlot],names[toSlot]]=[names[toSlot],names[fromSlot]];
   abilityLayouts[cls]=names;
+  const memory=abilityLayouts.__preferred||(abilityLayouts.__preferred={}),preferred=memory[cls]||(memory[cls]={});
+  names.forEach((identity,slot)=>{if(identity)preferred[identity]=slot;});
   this.saveAbilityLayouts();
   this.renderActions();
   this.message(`${CLASS_INFO[cls].name}: ${fromName} is now ${bindLabel(binds['a'+(toSlot+1)])}; ${toName} is now ${bindLabel(binds['a'+(fromSlot+1)])}`);
  }
  start(){this.closeArmoury();this.closeAchievements();const requestedArena=$('#arenaSelect')?.value||'random';this.queueType=(this.forceTournamentStart&&this.tournament?.active)?'tournament':($('#queueSelect')?.value||'ranked');this.forceTournamentStart=false;if(this.queueType==='training'&&requestedArena!=='training')$('#arenaSelect').value='training';if(this.queueType==='ranked'&&requestedArena==='training'){$('#arenaSelect').value='random';this.message('Training Grounds is disabled for Ranked');}this.setArenaTheme($('#arenaSelect')?.value||'random');this.closeClassGuide();this.audio.ensure();this.audio.play('start');this.clear();this.cameraRig.yaw=-Math.PI/2;this.cameraRig.pitch=.34;this.cameraRig.distance=12.4;this.mode=$('#modeSelect').value;this.difficulty=$('#difficultySelect').value;if(this.renderer)this.renderer.setPixelRatio(Math.min(devicePixelRatio,this.mode==='3v3'?1.25:1.75));let cls=$('#classSelect').value;this.allyGearProfile=this.getEquippedItems(cls).map(item=>({slot:item.slot,ilvl:item.ilvl}));this.enemyGearProfile=this.getEquippedItems(cls).map(item=>({slot:item.slot,ilvl:item.ilvl}));const dps=['flame','shadow','storm','wind','soul','warrior'];const healers=['sage','pala','disc'];const shuffle=a=>a.slice().sort(()=>Math.random()-.5);const healerPick=()=>healers[Math.floor(Math.random()*healers.length)];if(this.queueType==='training'){this.spawn('You',cls,'ally',-10,0,true);const d1=this.spawn('Target Dummy','storm','enemy',7,-4);const d2=this.spawn('Training Dummy','flame','enemy',11,0);const d3=this.spawn('Cleave Dummy','shadow','enemy',7,4);[d1,d2,d3].forEach((u,i)=>{u.name=i===0?'Target Dummy':i===1?'Training Dummy':'Cleave Dummy';u.ai=null;u.trainingDummy=true;u.dummyRegen=false;u.maxHp=9000;u.hp=u.maxHp;u.resource=0;u.maxResource=0;u.combatUntil=1e9;u.moveSpeed=0;});this.target=d1;this.phase='fight';this.time=0;this.dampening=0;this.paused=false;$('#menu').classList.add('hidden');$('#hud').classList.remove('hidden');$('#overlay').classList.add('hidden');this.renderFrames();this.renderActions();this.message('Training Grounds');this.log('Training Grounds loaded: three target dummies are available for single-target and cleave practice. Dummies cannot fall below 80% health and regenerate after reaching the practice floor.');this.log('Queue Type: Training — no rating or shard rewards are awarded here.');this.refreshMenuProgress();return;}if(this.queueType==='tournament'){if(!this.tournament?.rounds?.length)this.tournament=this.createTournamentBracket(this.tournament?.playerClass||cls,this.tournament?.partnerClass||'sage');this.progressTournamentUntilPlayerReady();if(this.tournament?.finished){this.returnMenu();return;}cls=this.tournament.playerClass;const match=this.getTournamentPlayerMatch(),playerIsA=match&&this.tournament.teams[match.a]?.player,enemyTeam=match?this.tournament.teams[playerIsA?match.b:match.a]:null,enemyClasses=enemyTeam?.classes||['sage','warrior'];const enemyHeal=enemyClasses.find(c=>healers.includes(c))||'sage',enemyDps=enemyClasses.find(c=>!healers.includes(c))||'warrior';this.spawn('You',cls,'ally',-16,4,true);this.spawn('Cup Partner',this.tournament.partnerClass,'ally',-17,-4);this.spawn('Cup Healer',enemyHeal,'enemy',17,4);this.spawn('Cup Rival',enemyDps,'enemy',16,-4);this.target=this.units.find(u=>u.team==='enemy'&&!healers.includes(u.cls))||this.units.find(u=>u.team==='enemy');this.log(`Aether Cup: ${this.tournamentRoundName()} · ${this.tournamentTeamLabel(this.tournament.teams[playerIsA?match.a:match.b])} vs ${this.tournamentTeamLabel(enemyTeam)} · series ${this.tournament.seriesWins||0}-${this.tournament.seriesLosses||0}, first to ${this.tournamentSeriesTarget()} wins.`);}else if(this.mode==='1v1'){const pool=shuffle(dps.filter(d=>d!==cls)).concat(shuffle(healers.filter(h=>h!==cls)));const foe=pool[0]||'warrior';this.spawn('You',cls,'ally',-20,0,true);this.spawn('Vael',foe,'enemy',20,0);this.target=this.units.find(u=>u.team==='enemy');this.log(`Duel: ${CLASS_INFO[cls].name} versus ${CLASS_INFO[foe].name}. No partners and no healers — you win this one alone.`);}else if(healers.includes(cls)){const allyDps=this.pickRegularDpsSet(this.mode==='3v3'?2:1);let enemyDps=this.pickRegularDpsSet(this.mode==='3v3'?2:1);if(enemyDps[0]===allyDps[0]){const alt=shuffle(dps.filter(x=>x!==allyDps[0]));enemyDps[0]=alt[0]||enemyDps[0];}if(this.mode==='3v3'&&enemyDps[1]===allyDps[1]){const alt=shuffle(dps.filter(x=>!enemyDps.includes(x)&&x!==allyDps[1]));enemyDps[1]=alt[0]||enemyDps[1];}const enemyHeal=healerPick();this.spawn('You',cls,'ally',-17,-4,true);this.spawn('Aren',allyDps[0],'ally',-15,4);if(this.mode==='3v3')this.spawn('Thoren',allyDps[1],'ally',-12,0);this.spawn('Mira',enemyHeal,'enemy',17,4);this.spawn('Vael',enemyDps[0],'enemy',16,-4);if(this.mode==='3v3')this.spawn('Kaio',enemyDps[1],'enemy',12,0);this.target=this.units.find(u=>u.team==='ally'&&u!==this.player);this.log(`Healer matchup: ${CLASS_INFO[cls].name} with ${CLASS_INFO[allyDps[0]].name} versus ${CLASS_INFO[enemyHeal].name} with ${CLASS_INFO[enemyDps[0]].name}; DPS are no longer always mirrored.`);}else{const allyPool=shuffle(dps.filter(d=>d!==cls));const enemyPool=this.pickRegularDpsSet(this.mode==='3v3'?2:1);const allyHeal=healerPick(),enemyHeal=healerPick();this.spawn('You',cls,'ally',-16,4,true);this.spawn('Ayla',allyHeal,'ally',-17,-4);if(this.mode==='3v3')this.spawn('Thoren',allyPool[0],'ally',-12,0);this.spawn('Mira',enemyHeal,'enemy',17,4);this.spawn('Vael',enemyPool[0],'enemy',16,-4);if(this.mode==='3v3')this.spawn('Kaio',enemyPool[1],'enemy',12,0);this.target=this.units.find(u=>u.team==='enemy'&&!healers.includes(u.cls))||this.units.find(u=>u.team==='enemy');this.log(`Random enemy team: ${CLASS_INFO[enemyHeal].name} + ${CLASS_INFO[enemyPool[0]].name}${this.mode==='3v3'?` + ${CLASS_INFO[enemyPool[1]].name}`:''}. Warrior is included in the regular DPS pool and recent repeats are deprioritised.`);}this.phase='countdown';this.count=3;this.time=0;this.dampening=0;this.paused=false;$('#menu').classList.add('hidden');$('#hud').classList.remove('hidden');$('#overlay').classList.add('hidden');this.renderFrames();this.renderActions();this.message(this.queueType==='ranked'?'Prepare for battle':this.queueType==='tournament'?`${this.tournamentRoundName()} begins soon`:'Skirmish begins soon');this.log(`Match started: ${this.queueType.toUpperCase()} ${this.mode}${this.queueType==='tournament'?` · ${this.tournamentRoundName()}`:`, ${this.difficulty}`}.`);this.log(this.enemyGearSummary());if((this.allyGearProfile||[]).length)this.log(`Ally Scaling: your AI teammate also mirrors your ${this.allyGearProfile.length} equipped slot${this.allyGearProfile.length===1?'':'s'} using recommended stats for their own class.`);const gearStats=this.getEquippedStats(cls);if(this.getEquippedItems(cls).length)this.log(`Equipped ${CLASS_INFO[cls].name} loadout: ${this.formatStatLine(gearStats)}.`);if(this.queueType==='skirmish')this.log('Skirmish queue active: this match does not change your 1v1, 2v2 or 3v3 rating.');if(this.queueType==='tournament')this.log('Tournament bracket active: the full Aether Cup bracket is created up front, AI series update game by game on the bracket, and your current opponent team stays fixed until the series ends.');if(cls==='sage')this.log('You are the Lifesage: support your random DPS teammate and use Lullaby Bloom for setup or peel.');if(cls==='pala')this.log('You are the Paladin: Holy Shock crits empower fast Holy Lights; Sacrifice redirects ally damage to you.');this.log('Prism Hex lasts 7s but breaks on damage; set up your kill target before swapping.');this.log('Stormwarden builds Overload with Arc Spark; Flame sustains mana by landing spells and Counterflare.');this.log('v161 AI pass: combat bots have been restored to the proven v148 behaviour baseline, while tournament flow now builds the bracket first and lets you continue or restart cleanly.');}
  queueDispose(obj){if(!obj)return;this.disposeQueue.push(obj);this.scheduleDisposals();}
- disposeObject(obj){obj?.traverse?.(node=>{node.geometry?.dispose?.();if(node.material){const mats=Array.isArray(node.material)?node.material:[node.material];mats.forEach(material=>material?.dispose?.());}});}
+ disposeObject(obj){disposeAetherObject(obj);}
  flushDisposals(limit=5){let processed=0;while(this.disposeQueue.length&&processed<limit){this.disposeObject(this.disposeQueue.shift());processed++;}}
- scheduleDisposals(){if(this.disposalHandle||!this.disposeQueue.length)return;const drain=deadline=>{this.disposalHandle=null;let processed=0;while(this.disposeQueue.length&&processed<4&&(!deadline||deadline.didTimeout||deadline.timeRemaining()>1)){this.disposeObject(this.disposeQueue.shift());processed++;}if(this.disposeQueue.length)this.scheduleDisposals();};if(typeof requestIdleCallback==='function'){this.disposalKind='idle';this.disposalHandle=requestIdleCallback(drain,{timeout:250});}else{this.disposalKind='timeout';this.disposalHandle=setTimeout(()=>drain(null),16);}}
+ // A busy browser may have no idle time. Drain in short time-budgeted batches,
+ // rather than leaking a backlog behind a fixed four-objects/250ms limit.
+ scheduleDisposals(){
+  if(this.disposalHandle||!this.disposeQueue.length)return;
+  const drain=deadline=>{
+   this.disposalHandle=null;const start=performance.now();let processed=0;
+   while(this.disposeQueue.length&&processed<64){
+    if(processed&&(performance.now()-start>=2||(deadline&&!deadline.didTimeout&&deadline.timeRemaining()<=1)))break;
+    this.disposeObject(this.disposeQueue.shift());processed++;
+   }
+   if(this.disposeQueue.length)this.scheduleDisposals();
+  };
+  if(typeof requestIdleCallback==='function'){this.disposalKind='idle';this.disposalHandle=requestIdleCallback(drain,{timeout:50});}
+  else{this.disposalKind='timeout';this.disposalHandle=setTimeout(()=>drain(null),16);}
+ }
  clear(){this.cancelGroundTarget();if(this.finishTimer){clearTimeout(this.finishTimer);this.finishTimer=null;}if(this.disposalHandle){if(this.disposalKind==='idle'&&typeof cancelIdleCallback==='function')cancelIdleCallback(this.disposalHandle);else clearTimeout(this.disposalHandle);this.disposalHandle=null;}this.finishPending=false;this.units.forEach(u=>{this.clearTotemMasteryVisuals?.(u);this.clearCombustionVisuals?.(u);u.destroy();});this.units=[];this.effects.forEach(e=>{this.scene.remove(e.obj);this.disposeQueue.push(e.obj);});this.effects=[];this.flushDisposals(Infinity);$('#worldLabels').innerHTML='';$('#floaters').innerHTML='';this.logs=[];this.encounterView=null;this.detailsSelection=null;$('#encounterDetails').classList.add('hidden');$('#detailsReport').classList.add('hidden');}
- spawn(name,cls,team,x,z,isPlayer=false){const u=new Character(this,{name,cls,team,x,z,isPlayer});this.units.push(u);if(isPlayer)this.player=u;else u.ai=new AIController(this,u);return u;}
- keydown(e){this.audio.ensure();if(this.groundTargeting&&e.code==='Escape'){e.preventDefault();this.cancelGroundTarget('Ground targeting cancelled');return;}if(!$('#armoury').classList.contains('hidden')){if(e.code==='Escape')this.closeArmoury();return;}if(!$('#encounterDetails').classList.contains('hidden')){if(e.code==='Escape')this.closeEncounterDetails();return;}if(!$('#classGuide').classList.contains('hidden')){if(e.code==='Escape')this.closeClassGuide();return;}if(!$('#achievements').classList.contains('hidden')){if(e.code==='Escape')this.closeAchievements();return;}if(e.code==='Backquote'){e.preventDefault();$('#debug').classList.toggle('hidden');this.updateDebug();return;}
+ spawn(name,cls,team,x,z,isPlayer=false){const netTalents=!isPlayer?randomBotTalents(cls):undefined;const u=new Character(this,{name:isPlayer?playerNickname():name,cls,team,x,z,isPlayer,netTalents});if(netTalents){u.botAbilities=buildUnitAbilities(cls,netTalents);u.cds=Array(u.botAbilities.length).fill(0);}this.units.push(u);if(isPlayer)this.player=u;else u.ai=new AIController(this,u);return u;}
+ keydown(e){if(e.target?.closest?.('input,textarea,[contenteditable="true"]'))return;if(e.repeat&&this.netGuest)return;this.audio.ensure();if(this.groundTargeting&&e.code==='Escape'){e.preventDefault();this.cancelGroundTarget('Ground targeting cancelled');return;}if(!$('#armoury').classList.contains('hidden')){if(e.code==='Escape')this.closeArmoury();return;}if(!$('#encounterDetails').classList.contains('hidden')){if(e.code==='Escape')this.closeEncounterDetails();return;}if(!$('#classGuide').classList.contains('hidden')){if(e.code==='Escape')this.closeClassGuide();return;}if(!$('#achievements').classList.contains('hidden')){if(e.code==='Escape')this.closeAchievements();return;}if(e.code==='Backquote'){e.preventDefault();$('#debug').classList.toggle('hidden');this.updateDebug();return;}
   if($('#settings').classList.contains('hidden')===false){if(this.awaitFocusBind){if(['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'].includes(e.code))return;e.preventDefault();this.assignFocusBind(eventCombo(e));return;}if(this.awaitBind){if(['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'].includes(e.code))return;e.preventDefault();const heldMovement=['forward','backward','left','right'].includes(this.awaitBind);this.assignBind(heldMovement?e.code:eventCombo(e));return;}if(e.code==='Escape')this.closeSettings();return;}
   if(!$('#pauseMenu').classList.contains('hidden')){if(e.code==='Escape'){e.preventDefault();this.closePauseMenu();}return;}
   if(e.code==='Escape'&&(this.phase==='fight'||this.phase==='countdown')){e.preventDefault();if(this.target){this.target=null;this.message('Target cleared');}else this.openPauseMenu();return;}
@@ -6001,7 +6835,7 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
  }
  isInCombat(u){return !!u&&u.combatUntil>this.time;}
  breakableControl(u){if(!u)return null;return u.effects.find(e=>['furyStun','cheapStun','stun','fear','poly','sleep','gouge','blind','windIncap','root'].includes(e.type)&&e.time>.18)||null;}
- abilityReady(u,names){const arr=AB[u?.cls]||[];const i=arr.findIndex(a=>names.includes(a.name)||names.includes(a.type));return i>=0&&u.cds?.[i]<=0?i:-1;}
+ abilityReady(u,names){const arr=unitAbilities(u);const i=arr.findIndex(a=>names.includes(a.name)||names.includes(a.type));return i>=0&&u.cds?.[i]<=0?i:-1;}
  majorDefensiveActive(u){return !!(u&&['iceBlock','defensive','evasion','cloakShadows','touchKarma','warriorGuard','divineSteed','sacrifice','ironbark','painSuppression','discFade','shield'].some(x=>u.has?.(x)));}
  unitUnderMajorOffensive(u){
   if(!u||!u.alive)return false;
@@ -6113,7 +6947,7 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
   return false;
  }
 
- enterCombat(...units){units.filter(Boolean).forEach(u=>{u.combatUntil=Math.max(u.combatUntil||0,this.time+7);if(u.cast&&u.cast.special==='mount'){u.cast=null;if(u===this.player)this.message('Mount interrupted — you entered combat');}if(u.mounted)this.dismount(u,true);});}
+ enterCombat(...units){units.filter(Boolean).forEach(u=>{u.combatUntil=Math.max(u.combatUntil||0,this.time+4);if(u.cast&&u.cast.special==='mount'){u.cast=null;if(u===this.player)this.message('Mount interrupted — you entered combat');}if(u.mounted)this.dismount(u,true);});}
  dismount(u,quiet=false){if(!u||!u.mounted)return;u.mounted=false;if(u===this.player&&!quiet)this.message('Dismounted');this.vfxRing(u,0x74e9f7,1.35);}
  tryMount(u,announce=false){if(!u||!u.alive||this.phase!=='fight')return false;if(u.mounted)return true;if(this.isInCombat(u)){if(announce)this.message('Cannot mount while in combat');return false;}if(u.cast){if(announce)this.message('Already casting');return false;}if(u.has('furyStun')||u.has('cheapStun')||u.has('stun')||u.has('poly')||u.has('sleep')||u.has('blind')||u.has('windIncap')||u.has('root')){if(announce)this.message('Cannot mount while controlled');return false;}const mount=mountDefinition(u===this.player?progression.activeMount:'skyhoof');u.cast={a:{name:`Summon ${mount.name}`,icon:mount.icon,type:'mount',school:'nature',range:0},index:-1,target:u,total:1.5,left:1.5,school:'nature',special:'mount'};this.audio.play('mountSummon');if(announce)this.message(`Summoning ${mount.name}…`);return true;}
  toggleMount(){const u=this.player;if(!u||!u.alive||this.phase!=='fight')return;if(u.mounted){this.dismount(u);return;}this.tryMount(u,true);}
@@ -6145,13 +6979,13 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
  cancelGroundTarget(message=''){const g=this.groundTargeting;if(!g)return;this.groundTargeting=null;this.canvas?.classList.remove('ground-targeting');if(g.fx?.group){this.scene.remove(g.fx.group);this.queueDispose(g.fx.group);}if(message)this.message(message);}
   cancelsOnRepress(i){const a=AB[this.player?.cls]?.[i];if(!a)return false;/* A second press of these deliberately cancels, so key auto-repeat must not reach them. */return ['fistsChannel','bladestorm','iceBlock','soulDrain'].includes(a.type);}
   playerCast(i){const a=AB[this.player?.cls]?.[i];if(this.player?.cast?.soulDrain&&a?.type==='soulDrain'){if(this.netGuest&&this.netSession)this.netSession.sendCast(i,this.target);else{this.player.cast=null;this.float(this.player,'ESSENCE SIPHON CANCELLED','info');this.log(`${this.player.name} stops channeling Essence Siphon.`);}return;}if(a&&['meteor','groundStun','summonInfernal'].includes(a.type)){this.beginGroundTarget(i,a);return;}this.castFor(this.player,i,this.target);}
-  castFor(u,i,target){if(this.netGuest&&u===this.player){if(this.netSession)this.netSession.sendCast(i,target);return;}let a=AB[u.cls][i];if(!a)return;if(a.type==='discPenance'){if(!target||!target.alive)target=u;}else if(['buff','dash','defensive','shieldSelf','push','healerEscape','natureSwiftness','undyingResolve','monkDefensive','fistsChannel','ghanir','ultimateRadiance','discFade','discFear','archangel','darkArchangel','angelicBody','flameNova','paladinAoE','paladinGuard','paladinSteed','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar'].includes(a.type))target=u;else if(a.type==='holyShock'){if(!target||!target.alive)target=u;}else if(['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','freedom','guardianAngel','holyLight','sacrifice','intercept','bestowFaith','discShield','discMend','painSuppression'].includes(a.type)){if(!target||target.team!==u.team||!target.alive)target=a.type==='intercept'?this.units.filter(x=>x.team===u.team&&x!==u&&x.alive).sort((x,y)=>x.hp/x.maxHp-y.hp/y.maxHp)[0]||u:u;}else{if(!target||target.team===u.team||!target.alive)target=this.closestEnemy(u);}this.tryAbility(u,i,target,u===this.player);}
+  castFor(u,i,target){if(this.netGuest&&u===this.player){if(this.netSession)this.netSession.sendCast(i,target);return;}let a=unitAbilities(u)[i];if(!a)return;if(a.type==='discPenance'){if(!target||!target.alive)target=u;}else if(['buff','dash','defensive','shieldSelf','push','healerEscape','natureSwiftness','undyingResolve','monkDefensive','fistsChannel','ghanir','ultimateRadiance','discFade','discFear','archangel','darkArchangel','angelicBody','flameNova','paladinAoE','paladinGuard','paladinSteed','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar'].includes(a.type))target=u;else if(a.type==='holyShock'){if(!target||!target.alive)target=u;}else if(['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','freedom','guardianAngel','holyLight','sacrifice','intercept','bestowFaith','discShield','discMend','painSuppression'].includes(a.type)){if(!target||target.team!==u.team||!target.alive)target=a.type==='intercept'?this.units.filter(x=>x.team===u.team&&x!==u&&x.alive).sort((x,y)=>x.hp/x.maxHp-y.hp/y.maxHp)[0]||u:u;}else{if(!target||target.team===u.team||!target.alive)target=this.closestEnemy(u);}this.tryAbility(u,i,target,u===this.player);}
  closestEnemy(u){return this.units.filter(x=>x.team!==u.team&&x.alive).sort((a,b)=>dist(u,a)-dist(u,b))[0];}
  
  applyTalentAbilityMods(c,a,index){
   if(!c||!c.cls)return a;
   let out={...a};
-  const r=id=>talentRank(c.cls,id);
+  const r=id=>unitTalentRank(c,id);
   if(c.cls==='flame'){
    if(out.name==='Blazing Step')out.cd=Math.max(.5,out.cd-r('swiftstep'));
    if(out.name==='Prism Hex')out.cast=Math.max(.6,out.cast-r('hexmastery')*.10);
@@ -6189,15 +7023,15 @@ saveBinds(){localStorage.setItem('aetherBinds',JSON.stringify(binds));}
   return out;
  }
 
-validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.has('iceBlock')&&a.type!=='iceBlock')return this.fail(caster,'Immune inside Ice Block — cancel it first',show);if(!caster.has('bladestorm')&&a.type!=='iceBlock'&&(caster.has('furyStun')||caster.has('cheapStun')||caster.has('stun')||caster.has('fear')||caster.has('poly')||caster.has('sleep')||caster.has('gouge')||caster.has('blind')||caster.has('windIncap')))return this.fail(caster,'Crowd controlled',show);if((caster.has('silence')&&a.school!=='physical')||caster.has('lock_'+a.school))return this.fail(caster,'Spell locked',show);if(caster.cast&&!opts.ignoreCast)return this.fail(caster,'Already casting',show);if(caster.gcd>0&&!opts.ignoreGcd)return false;const cdIndex=Number.isInteger(opts.index)?opts.index:AB[caster.cls].indexOf(a);if(!opts.ignoreCd&&cdIndex>=0&&caster.cds[cdIndex]>0)return this.fail(caster,'Ability not ready',show);if(caster.resource<a.cost)return this.fail(caster,'Not enough resource',show);const self=['buff','dash','defensive','shieldSelf','push','healerEscape','natureSwiftness','undyingResolve','monkDefensive','fistsChannel','whirlingDragonPunch','ghanir','ultimateRadiance','discFade','discFear','archangel','darkArchangel','angelicBody','flameNova','paladinAoE','paladinGuard','paladinSteed','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar','combustion','flameShield','evasion','cloak','totemMastery','stormkeeper','tigereyeBrew','karma','bladestorm','tigersLust'].includes(a.type);const friendly=['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','freedom','guardianAngel','holyLight','sacrifice','intercept','bestowFaith','discShield','discMend','painSuppression'].includes(a.type);if(!self&&(!target||!target.alive))return this.fail(caster,'No valid target',show);if(!self&&target&&isUntargetableStealth(target,caster))return this.fail(caster,'Target is stealthed',show);if(friendly&&target&&target.team!==caster.team)return this.fail(caster,'Target an ally',show);if(a.type==='sacrifice'&&target===caster)return this.fail(caster,'Choose an ally for Sacrifice',show);if(a.type==='intercept'&&target===caster)return this.fail(caster,'Choose an ally for Intercept',show);if(!self&&dist(caster,target)>a.range)return this.fail(caster,'Out of range',show); if(!self&&!this.arena.los(caster,target))return this.fail(caster,'Line of sight blocked',show);return true;}
+validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.has('iceBlock')&&a.type!=='iceBlock')return this.fail(caster,'Immune inside Ice Block — cancel it first',show);if(!caster.has('bladestorm')&&a.type!=='iceBlock'&&(caster.has('furyStun')||caster.has('cheapStun')||caster.has('stun')||caster.has('fear')||caster.has('poly')||caster.has('sleep')||caster.has('gouge')||caster.has('blind')||caster.has('windIncap')))return this.fail(caster,'Crowd controlled',show);if((caster.has('silence')&&a.school!=='physical')||caster.has('lock_'+a.school))return this.fail(caster,'Spell locked',show);if(caster.cast&&!opts.ignoreCast)return this.fail(caster,'Already casting',show);if(caster.gcd>0&&!opts.ignoreGcd)return false;const cdIndex=Number.isInteger(opts.index)?opts.index:unitAbilities(caster).indexOf(a);if(!opts.ignoreCd&&cdIndex>=0&&caster.cds[cdIndex]>0)return this.fail(caster,'Ability not ready',show);if(caster.resource<a.cost)return this.fail(caster,'Not enough resource',show);const self=['reverseHarm','crimsonVial','buff','dash','defensive','shieldSelf','push','healerEscape','natureSwiftness','undyingResolve','monkDefensive','fistsChannel','whirlingDragonPunch','ghanir','ultimateRadiance','discFade','discFear','archangel','darkArchangel','angelicBody','flameNova','paladinAoE','paladinGuard','paladinSteed','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar','combustion','flameShield','evasion','cloak','totemMastery','stormkeeper','tigereyeBrew','karma','bladestorm','tigersLust'].includes(a.type);const friendly=['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','freedom','guardianAngel','holyLight','sacrifice','intercept','bestowFaith','discShield','discMend','painSuppression'].includes(a.type);if(!self&&(!target||!target.alive))return this.fail(caster,'No valid target',show);if(!self&&target&&isUntargetableStealth(target,caster))return this.fail(caster,'Target is stealthed',show);if(friendly&&target&&target.team!==caster.team)return this.fail(caster,'Target an ally',show);if(a.type==='sacrifice'&&target===caster)return this.fail(caster,'Choose an ally for Sacrifice',show);if(a.type==='intercept'&&target===caster)return this.fail(caster,'Choose an ally for Intercept',show);if(!self&&dist(caster,target)>a.range)return this.fail(caster,'Out of range',show); if(!self&&!this.arena.los(caster,target))return this.fail(caster,'Line of sight blocked',show);return true;}
  fail(c,msg,show){if(show&&c===this.player)this.message(msg);return false;}
- tryAbility(caster,index,target,show=false){let a=AB[caster.cls][index];if(a?.type==='whirlingDragonPunch'){const fistsIndex=(AB[caster.cls]||[]).findIndex(spell=>spell.type==='fistsChannel');if(fistsIndex<0||caster.cds[fistsIndex]<=0)return this.fail(caster,'Whirling Dragon Punch requires Fists of Fury to be on cooldown',show);}const natureSwiftChoice=caster.cls==='sage'&&!!caster.has('natureSwiftness')&&['Renewal Tide','Lullaby Bloom'].includes(a.name);if(natureSwiftChoice&&a.name==='Lullaby Bloom')a={...a,cast:0,natureSwiftChoice:true,tip:'Nature Swiftness: instant Lullaby Bloom.'};else if(natureSwiftChoice)a={...a,natureSwiftChoice:true};if(caster.cast?.a?.type==='fistsChannel'&&a.type==='fistsChannel'){caster.cast=null;if(caster.fistsFx)caster.fistsFx.dead=true;caster.fistsFx=null;this.float(caster,'FISTS OF FURY CANCELLED','info');return true;}if(caster.has&&caster.has('bladestorm')){if(a.type==='bladestorm'){caster.effects=caster.effects.filter(e=>e.type!=='bladestorm');caster.cast=null;if(caster.bladestormFx)caster.bladestormFx.dead=true;caster.bladestormFx=null;this.float(caster,'BLADESTORM CANCELLED','info');return true;}if(caster===this.player)this.message('Only Bladestorm can be pressed during Bladestorm');return false;}if(caster.has&&caster.has('iceBlock')&&a.type!=='iceBlock'){if(caster===this.player)this.message('Cannot cast while inside Ice Block');return false;}if(a.type==='iceBlock'&&caster.has('iceBlock')){caster.effects=caster.effects.filter(e=>e.type!=='iceBlock');this.float(caster,'ICE BLOCK CANCELLED','info');this.vfxBurst(caster,0xbfefff,.7);return true;}if(a.type==='iceBlock'&&caster.cast)caster.cast=null;const cloudstepDash=caster.cls==='wind'&&index===1&&caster.cds[index]<=0&&!caster.has('cloudstepDashCd');if(cloudstepDash)a={...a,range:17,value:Math.round(a.value*1.20),dashReady:true,tip:'Cloudstep Dash ready: leap up to 17m and deal 20% increased damage.'};const gushingProc=caster.cls==='warrior'&&index===2&&!!caster.has('gushingWoundReady');if(gushingProc)a={...a,name:'Gushing Wound',icon:'🩸',type:'gushingWound',cd:6,cost:15,value:141,tip:'Rip open the active Rend for 141 immediate damage and accelerate its bleeding ticks.'};const furyProc=false;/* v182: Fists of Fury is standalone, no Cyclone proc lock */if(furyProc)a={name:'Fists of Fury',icon:'🥊',type:'fistsChannel',school:'wind',range:5.0,cast:2.5,cd:0,cost:0,value:68,tip:'Channel for 2.5 sec, dealing 68 damage per wave. No longer stuns. Enemies caught in the barrage are slowed by 60% while taking repeated hits.'};const risingSunProc=a.name==='Zephyr Palm'&&!!caster.has('risingSunReady');if(risingSunProc)a={...a,name:'Rising Sun Kick',icon:'🌅',range:3.5,cost:12,value:271,risingSunProc:true,tip:'Strike of the Windlord proc: deliver a powerful golden Rising Sun Kick for 271 damage after the additional 20% buff.'};const volcanicReady=a.type==='volcanicEruption'&&!!caster.has('volcanicEruptionReady');if(a.type==='volcanicEruption'&&!volcanicReady)return this.fail(caster,'Skybreaker Pulse must ready Volcanic Eruption first',show);const meteorProc=a.name==='Ember Lance'&&!!caster.has('meteorLance');if(meteorProc)a={...a,cd:.40,tip:'Meteor Lance active: rapidly fire one off-global empowered +15% Ember Lance charge.'};if(target&&target.team!==caster.team&&target.has&&target.has('iceBlock')){if(caster===this.player)this.message('Target is immune');return false;}const instantProc=a.name==='Cinder Bolt'&&!!caster.has('instantBolt');const stormkeeperProc=caster.cls==='storm'&&index===0&&!!caster.has('stormkeeper');const tempestProc=caster.cls==='storm'&&index===0&&!!caster.has('tempestBolts')&&!stormkeeperProc;if(stormkeeperProc){a={...a,name:'Arc Spark',cast:0,cd:.25,cost:0,value:Math.round((a.value||124)*1.10),stormkeeperSpark:true,tip:'Stormkeeper: free instant Arc Spark with +10% damage. Consumes one Stormkeeper charge.'};}else if(tempestProc){a={...a,name:'Tempest Bolt',cast:0,cd:a.cd,value:173,tip:'Empowered rapid lightning proc dealing 173 damage. Storm Surge grants two bolts, fired every 0.25 sec.'};}const infusedHoly=a.name==='Holy Light'&&!!caster.has('infusion');if(infusedHoly)a={...a,cast:.75,infused:true,tip:'Infusion of Light active: cast Holy Light 50% faster.'};a=this.applyTalentAbilityMods(caster,a,index);if(a.type==='stormkeeper'||a.type==='avatar'||a.type==='fistsChannel'||a.type==='whirlingDragonPunch'||a.type==='ghanir'||a.type==='avengingWings'){target=caster;}/* SELF_TARGET_FORCE */if(caster.has&&caster.has('combustion')&&a.cast){a={...a,cast:a.cast*.85,combustionCastSpeedApplied:true};}const interruptAbility=['interrupt','interruptProc','windInterrupt','shadowInterrupt'].includes(a.type);const shadowOffGcd=caster.cls==='shadow'&&(a.type==='leap'||a.type==='singleStun'||a.name==='Garrote'||a.type==='vendetta'||a.type==='shiv');const novaOffGcd=caster.cls==='flame'&&a.type==='flameNova';const skybreakerOffGcd=caster.cls==='storm'&&a.name==='Skybreaker Pulse';const stormTalentOffGcd=caster.cls==='storm'&&a.type==='volcanicEruption';const cycloneOffGcd=caster.cls==='wind'&&['touchOfDeath','whirlingDragonPunch'].includes(a.type);const paladinOffGcd=caster.cls==='pala'&&['paladinSteed','avengingWings'].includes(a.type);const disciplineOffGcd=caster.cls==='disc'&&['painSuppression','archangel','darkArchangel','angelicBody'].includes(a.type);const sageOffGcd=caster.cls==='sage'&&a.type==='natureSwiftness';const soulOffGcd=caster.cls==='soul'&&a.name==='Grasping Gloom';const iceBlockOffGcd=a.type==='iceBlock';const flameTalentOffGcd=caster.cls==='flame'&&['Combustion','Living Bomb','Ice Nova','Frostfire Nova'].includes(a.name);const hexStep=caster.cls==='flame'&&a.name==='Blazing Step'&&['Prism Hex','Cinder Bolt'].includes(caster.cast?.a?.name);const castWhileCasting=(caster.cls==='flame'&&a.name==='Counterflare')||(caster.cls==='storm'&&a.name==='Wind Shear')||hexStep||flameTalentOffGcd;const offGcd=interruptAbility||shadowOffGcd||tempestProc||stormkeeperProc||meteorProc||novaOffGcd||flameTalentOffGcd||skybreakerOffGcd||stormTalentOffGcd||cycloneOffGcd||paladinOffGcd||disciplineOffGcd||sageOffGcd||soulOffGcd||iceBlockOffGcd||hexStep||(caster.cls==='wind'&&a.type==='tigereyeBrew')||(caster.cls==='warrior'&&(a.type==='pummel'||a.type==='reflect'||a.type==='warriorGuard'||a.type==='avatar'));if(tempestProc&&caster.tempestLock>0)return this.fail(caster,'Tempest Bolt recharging',show);if(!this.validate(caster,a,target,show,{ignoreGcd:instantProc||offGcd,ignoreCast:castWhileCasting,ignoreCd:natureSwiftChoice,index}))return false;const commitOnComplete=(a.cast>0)&&(a.type==='poly'||a.type==='sleep'||a.type==='fear'||a.type==='stormkeeper');const hostile=target&&target.team!==caster.team&&!['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','holyLight','sacrifice','bestowFaith','discShield','discMend','painSuppression','paladinAoE','paladinGuard','paladinSteed','avengingWings','ghanir','iceBlock'].includes(a.type);if(hostile)this.enterCombat(caster,target);else if(target&&target.team===caster.team&&this.isInCombat(target))this.enterCombat(caster,target);if(caster.mounted)this.dismount(caster,true);if(infusedHoly){caster.effects=caster.effects.filter(e=>e.type!=='infusion');this.float(caster,'INFUSION · FAST HOLY LIGHT','info');this.vfxGlyph(caster,COLORS.holy,.72);}caster.resource-=a.cost;if(infusedHoly)this.gainMana(caster,6);if(!instantProc&&!offGcd)caster.gcd=caster.cls==='soul'?.5:BALANCE.gcd;else if(stormkeeperProc)caster.gcd=.25;if(!commitOnComplete&&!furyProc)caster.cds[index]=a.cd;if(natureSwiftChoice){caster.effects=caster.effects.filter(e=>e.type!=='natureSwiftness');this.float(caster,a.name==='Lullaby Bloom'?'INSTANT LULLABY BLOOM':'SWIFT RENEWAL TIDE','heal');this.vfxGlyph(caster,COLORS.heal,.82);}if(risingSunProc)caster.effects=caster.effects.filter(e=>e.type!=='risingSunReady');if(furyProc){caster.effects=caster.effects.filter(e=>e.type!=='furyReady');caster.cds[index]=12;caster.cast={a,index,target:caster,total:2.5,left:2.5,school:'wind',channel:true,uninterruptible:true,tick:.02,interval:.4,radius:5.0,ticks:0,furyCaught:new Set()};this.animateAction(caster,a);this.audio.play('wind');this.float(caster,'FISTS OF FURY!','info');this.vfxFistsChannel(caster,2.5);this.log(`${caster.name} channels Fists of Fury — nearby enemies are caught in the barrage.`);return true;}if(a.type==='bladestorm'){caster.cds[index]=a.cd;caster.effects=caster.effects.filter(e=>!['slow','root','stun','cheapStun','furyStun'].includes(e.type));caster.effect('bladestorm',4,{immune:true});caster.cast={a,index,target:caster,total:4,left:4,school:'physical',channel:true,uninterruptible:true,moveCast:true,moveSpeedMult:.78,tick:.02,interval:.55,radius:5.2,ticks:0,bladestorm:true};this.animateAction(caster,a);this.audio.play('warriorBlade');this.vfxBladestormChannel(caster,4);this.float(caster,'BLADESTORM · PRESS AGAIN TO CANCEL','info');this.log(`${caster.name} channels Bladestorm and cannot use other abilities.`);return true;}if(a.type==='fistsChannel'){caster.cds[index]=a.cd;caster.cast={a,index,target:caster,total:a.cast||2.5,left:a.cast||2.5,school:'wind',channel:true,uninterruptible:true,moveCast:true,moveSpeedMult:.30,tick:.02,interval:.4,radius:a.range||5.0,ticks:0,furyCaught:new Set()};this.animateAction(caster,a);this.audio.play('wind');this.float(caster,'FISTS OF FURY · MOVING CHANNEL','info');this.vfxFistsChannel(caster,a.cast||2.5);this.log(`${caster.name} channels Fists of Fury while moving at reduced speed.`);return true;}if(a.type==='discPenance'){const radiant=!!caster.has('radiantPenanceProc');if(radiant)caster.effects=caster.effects.filter(e=>e.type!=='radiantPenanceProc');const total=radiant?1.05:1.5,interval=radiant?.35:.5;caster.cds[index]=a.cd;caster.cast={a,index,target,total,left:total,school:'holy',channel:true,discPenance:true,radiantPenance:radiant,moveCast:true,moveSpeedMult:1,tick:.02,interval,ticks:0};this.animateAction(caster,a);this.audio.play('holy');this.float(caster,radiant?'RADIANT PENANCE · 30% FASTER':'PENANCE · 3 BOLTS','info');this.vfxGlyph(caster,radiant?0xffffff:COLORS.discipline,radiant?1.18:.9);this.log(`${caster.name} channels ${radiant?'Radiant Penance':'Penance'}.`);return true;}if(a.type==='soulDrain'){caster.cds[index]=a.cd;caster.cast={a,index,target,total:2.5,left:2.5,school:'shadow',channel:true,soulDrain:true,tick:.04,interval:.5};this.animateAction(caster,a);this.audio.play('shadow');this.float(caster,'ESSENCE SIPHON','info');this.vfxSiphonChannel(caster,target,2.5);this.log(`${caster.name} channels Essence Siphon — affliction stacks amplify every drain tick.`);return true;}if(tempestProc){caster.tempestLock=.25;let bolts=caster.has('tempestBolts');bolts.stacks=(bolts.stacks||2)-1;if(bolts.stacks<=0)caster.effects=caster.effects.filter(e=>e!==bolts);else bolts.time=10;this.float(caster,`TEMPEST BOLT! · ${Math.max(0,bolts.stacks||0)} LEFT`,'info');this.resolve(caster,a,target,{tempestProc:true});return true;}if(instantProc){const hot=caster.has('instantBolt');this.float(caster,`INSTANT CINDER! · ${Math.max(1,hot.stacks||1)} READY`,'info');this.resolve(caster,a,target,{proc:true});return true;}if(a.cast>0){caster.cast={a,index,target,total:a.cast,left:a.cast,school:a.school,commitCooldown:commitOnComplete,moveCast:a.name==='Lullaby Bloom'};this.audio.play('cast');this.log(`${caster.name} begins ${a.name}.`);return true;}this.resolve(caster,a,target);return true;}
+ tryAbility(caster,index,target,show=false){let a=unitAbilities(caster)[index];if(a?.type==='whirlingDragonPunch'){const fistsIndex=(unitAbilities(caster)||[]).findIndex(spell=>spell.type==='fistsChannel');if(fistsIndex<0||caster.cds[fistsIndex]<=0)return this.fail(caster,'Whirling Dragon Punch requires Fists of Fury to be on cooldown',show);}const natureSwiftChoice=caster.cls==='sage'&&!!caster.has('natureSwiftness')&&['Renewal Tide','Lullaby Bloom'].includes(a.name);if(natureSwiftChoice&&a.name==='Lullaby Bloom')a={...a,cast:0,natureSwiftChoice:true,tip:'Nature Swiftness: instant Lullaby Bloom.'};else if(natureSwiftChoice)a={...a,natureSwiftChoice:true};if(caster.cast?.a?.type==='fistsChannel'&&a.type==='fistsChannel'){caster.cast=null;if(caster.fistsFx)caster.fistsFx.dead=true;caster.fistsFx=null;this.float(caster,'FISTS OF FURY CANCELLED','info');return true;}if(caster.has&&caster.has('bladestorm')){if(a.type==='bladestorm'){caster.effects=caster.effects.filter(e=>e.type!=='bladestorm');caster.cast=null;if(caster.bladestormFx)caster.bladestormFx.dead=true;caster.bladestormFx=null;this.float(caster,'BLADESTORM CANCELLED','info');return true;}if(caster===this.player)this.message('Only Bladestorm can be pressed during Bladestorm');return false;}if(caster.has&&caster.has('iceBlock')&&a.type!=='iceBlock'){if(caster===this.player)this.message('Cannot cast while inside Ice Block');return false;}if(a.type==='iceBlock'&&caster.has('iceBlock')){caster.effects=caster.effects.filter(e=>e.type!=='iceBlock');this.float(caster,'ICE BLOCK CANCELLED','info');this.vfxBurst(caster,0xbfefff,.7);return true;}if(a.type==='iceBlock'&&caster.cast)caster.cast=null;const cloudstepDash=caster.cls==='wind'&&index===1&&caster.cds[index]<=0&&!caster.has('cloudstepDashCd');if(cloudstepDash)a={...a,range:17,value:Math.round(a.value*1.20),dashReady:true,tip:'Cloudstep Dash ready: leap up to 17m and deal 20% increased damage.'};const gushingProc=caster.cls==='warrior'&&index===2&&!!caster.has('gushingWoundReady');if(gushingProc)a={...a,name:'Gushing Wound',icon:'🩸',type:'gushingWound',cd:6,cost:15,value:141,tip:'Rip open the active Rend for 141 immediate damage and accelerate its bleeding ticks.'};const furyProc=false;/* v182: Fists of Fury is standalone, no Cyclone proc lock */if(furyProc)a={name:'Fists of Fury',icon:'🥊',type:'fistsChannel',school:'wind',range:5.0,cast:2.5,cd:0,cost:0,value:68,tip:'Channel for 2.5 sec, dealing 68 damage per wave. No longer stuns. Enemies caught in the barrage are slowed by 60% while taking repeated hits.'};const risingSunProc=a.name==='Zephyr Palm'&&!!caster.has('risingSunReady');if(risingSunProc)a={...a,name:'Rising Sun Kick',icon:'🌅',range:3.5,cost:12,value:271,risingSunProc:true,tip:'Strike of the Windlord proc: deliver a powerful golden Rising Sun Kick for 271 damage after the additional 20% buff.'};const volcanicReady=a.type==='volcanicEruption'&&!!caster.has('volcanicEruptionReady');if(a.type==='volcanicEruption'&&!volcanicReady)return this.fail(caster,'Skybreaker Pulse must ready Volcanic Eruption first',show);const meteorProc=a.name==='Ember Lance'&&!!caster.has('meteorLance');if(meteorProc)a={...a,cd:.40,tip:'Meteor Lance active: rapidly fire one off-global empowered +15% Ember Lance charge.'};if(target&&target.team!==caster.team&&target.has&&target.has('iceBlock')){if(caster===this.player)this.message('Target is immune');return false;}const instantProc=a.name==='Cinder Bolt'&&!!caster.has('instantBolt');const stormkeeperProc=caster.cls==='storm'&&index===0&&!!caster.has('stormkeeper');const tempestProc=caster.cls==='storm'&&index===0&&!!caster.has('tempestBolts')&&!stormkeeperProc;if(stormkeeperProc){a={...a,name:'Arc Spark',cast:0,cd:.25,cost:0,value:Math.round((a.value||124)*1.10),stormkeeperSpark:true,tip:'Stormkeeper: free instant Arc Spark with +10% damage. Consumes one Stormkeeper charge.'};}else if(tempestProc){a={...a,name:'Tempest Bolt',cast:0,cd:a.cd,value:173,tip:'Empowered rapid lightning proc dealing 173 damage. Storm Surge grants two bolts, fired every 0.25 sec.'};}const infusedHoly=a.name==='Holy Light'&&!!caster.has('infusion');if(infusedHoly)a={...a,cast:.75,infused:true,tip:'Infusion of Light active: cast Holy Light 50% faster.'};a=this.applyTalentAbilityMods(caster,a,index);if(a.type==='stormkeeper'||a.type==='avatar'||a.type==='fistsChannel'||a.type==='whirlingDragonPunch'||a.type==='ghanir'||a.type==='avengingWings'){target=caster;}/* SELF_TARGET_FORCE */if(caster.has&&caster.has('combustion')&&a.cast){a={...a,cast:a.cast*.85,combustionCastSpeedApplied:true};}const interruptAbility=['interrupt','interruptProc','windInterrupt','shadowInterrupt'].includes(a.type);const shadowOffGcd=caster.cls==='shadow'&&(a.type==='leap'||a.type==='singleStun'||a.name==='Garrote'||a.type==='vendetta'||a.type==='shiv');const novaOffGcd=caster.cls==='flame'&&a.type==='flameNova';const skybreakerOffGcd=caster.cls==='storm'&&a.name==='Skybreaker Pulse';const stormTalentOffGcd=caster.cls==='storm'&&a.type==='volcanicEruption';const cycloneOffGcd=caster.cls==='wind'&&['touchOfDeath','whirlingDragonPunch'].includes(a.type);const paladinOffGcd=caster.cls==='pala'&&['paladinSteed','avengingWings'].includes(a.type);const disciplineOffGcd=caster.cls==='disc'&&['painSuppression','archangel','darkArchangel','angelicBody'].includes(a.type);const sageOffGcd=caster.cls==='sage'&&a.type==='natureSwiftness';const soulOffGcd=caster.cls==='soul'&&a.name==='Grasping Gloom';const iceBlockOffGcd=a.type==='iceBlock';const flameTalentOffGcd=caster.cls==='flame'&&['Combustion','Living Bomb','Ice Nova','Frostfire Nova'].includes(a.name);const hexStep=caster.cls==='flame'&&a.name==='Blazing Step'&&['Prism Hex','Cinder Bolt'].includes(caster.cast?.a?.name);const castWhileCasting=(caster.cls==='flame'&&a.name==='Counterflare')||(caster.cls==='storm'&&a.name==='Wind Shear')||hexStep||flameTalentOffGcd;const offGcd=interruptAbility||shadowOffGcd||tempestProc||stormkeeperProc||meteorProc||novaOffGcd||flameTalentOffGcd||skybreakerOffGcd||stormTalentOffGcd||cycloneOffGcd||paladinOffGcd||disciplineOffGcd||sageOffGcd||soulOffGcd||iceBlockOffGcd||hexStep||(caster.cls==='wind'&&a.type==='tigereyeBrew')||(caster.cls==='warrior'&&(a.type==='pummel'||a.type==='reflect'||a.type==='warriorGuard'||a.type==='avatar'));if(tempestProc&&caster.tempestLock>0)return this.fail(caster,'Tempest Bolt recharging',show);if(!this.validate(caster,a,target,show,{ignoreGcd:instantProc||offGcd,ignoreCast:castWhileCasting,ignoreCd:natureSwiftChoice,index}))return false;const commitOnComplete=(a.cast>0)&&(a.type==='poly'||a.type==='sleep'||a.type==='fear'||a.type==='stormkeeper');const hostile=target&&target.team!==caster.team&&!['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','holyLight','sacrifice','bestowFaith','discShield','discMend','painSuppression','paladinAoE','paladinGuard','paladinSteed','avengingWings','ghanir','iceBlock'].includes(a.type);if(hostile)this.enterCombat(caster,target);else if(target&&target.team===caster.team&&this.isInCombat(target))this.enterCombat(caster,target);if(caster.mounted)this.dismount(caster,true);if(infusedHoly){caster.effects=caster.effects.filter(e=>e.type!=='infusion');this.float(caster,'INFUSION · FAST HOLY LIGHT','info');this.vfxGlyph(caster,COLORS.holy,.72);}caster.resource-=a.cost;if(infusedHoly)this.gainMana(caster,6);if(!instantProc&&!offGcd)caster.gcd=caster.cls==='soul'?.5:BALANCE.gcd;else if(stormkeeperProc)caster.gcd=.25;if(!commitOnComplete&&!furyProc)caster.cds[index]=a.cd;if(natureSwiftChoice){caster.effects=caster.effects.filter(e=>e.type!=='natureSwiftness');this.float(caster,a.name==='Lullaby Bloom'?'INSTANT LULLABY BLOOM':'SWIFT RENEWAL TIDE','heal');this.vfxGlyph(caster,COLORS.heal,.82);}if(risingSunProc)caster.effects=caster.effects.filter(e=>e.type!=='risingSunReady');if(furyProc){caster.effects=caster.effects.filter(e=>e.type!=='furyReady');caster.cds[index]=12;caster.cast={a,index,target:caster,total:2.5,left:2.5,school:'wind',channel:true,uninterruptible:true,tick:.02,interval:.4,radius:5.0,ticks:0,furyCaught:new Set()};this.animateAction(caster,a);this.audio.play('wind');this.float(caster,'FISTS OF FURY!','info');this.vfxFistsChannel(caster,2.5);this.log(`${caster.name} channels Fists of Fury — nearby enemies are caught in the barrage.`);return true;}if(a.type==='bladestorm'){caster.cds[index]=a.cd;caster.effects=caster.effects.filter(e=>!['slow','root','stun','cheapStun','furyStun'].includes(e.type));caster.effect('bladestorm',4,{immune:true});caster.cast={a,index,target:caster,total:4,left:4,school:'physical',channel:true,uninterruptible:true,moveCast:true,moveSpeedMult:.78,tick:.02,interval:.55,radius:5.2,ticks:0,bladestorm:true};this.animateAction(caster,a);this.audio.play('warriorBlade');this.vfxBladestormChannel(caster,4);this.float(caster,'BLADESTORM · PRESS AGAIN TO CANCEL','info');this.log(`${caster.name} channels Bladestorm and cannot use other abilities.`);return true;}if(a.type==='fistsChannel'){caster.cds[index]=a.cd;caster.cast={a,index,target:caster,total:a.cast||2.5,left:a.cast||2.5,school:'wind',channel:true,uninterruptible:true,moveCast:true,moveSpeedMult:.30,tick:.02,interval:.4,radius:a.range||5.0,ticks:0,furyCaught:new Set()};this.animateAction(caster,a);this.audio.play('wind');this.float(caster,'FISTS OF FURY · MOVING CHANNEL','info');this.vfxFistsChannel(caster,a.cast||2.5);this.log(`${caster.name} channels Fists of Fury while moving at reduced speed.`);return true;}if(a.type==='discPenance'){const radiant=!!caster.has('radiantPenanceProc');if(radiant)caster.effects=caster.effects.filter(e=>e.type!=='radiantPenanceProc');const total=radiant?1.05:1.5,interval=radiant?.35:.5;caster.cds[index]=a.cd;caster.cast={a,index,target,total,left:total,school:'holy',channel:true,discPenance:true,radiantPenance:radiant,moveCast:true,moveSpeedMult:1,tick:.02,interval,ticks:0};this.animateAction(caster,a);this.audio.play('holy');this.float(caster,radiant?'RADIANT PENANCE · 30% FASTER':'PENANCE · 3 BOLTS','info');this.vfxGlyph(caster,radiant?0xffffff:COLORS.discipline,radiant?1.18:.9);this.log(`${caster.name} channels ${radiant?'Radiant Penance':'Penance'}.`);return true;}if(a.type==='soulDrain'){caster.cds[index]=a.cd;caster.cast={a,index,target,total:2.5,left:2.5,school:'shadow',channel:true,soulDrain:true,tick:.04,interval:.5};this.animateAction(caster,a);this.audio.play('shadow');this.float(caster,'ESSENCE SIPHON','info');this.vfxSiphonChannel(caster,target,2.5);this.log(`${caster.name} channels Essence Siphon — affliction stacks amplify every drain tick.`);return true;}if(tempestProc){caster.tempestLock=.25;let bolts=caster.has('tempestBolts');bolts.stacks=(bolts.stacks||2)-1;if(bolts.stacks<=0)caster.effects=caster.effects.filter(e=>e!==bolts);else bolts.time=10;this.float(caster,`TEMPEST BOLT! · ${Math.max(0,bolts.stacks||0)} LEFT`,'info');this.resolve(caster,a,target,{tempestProc:true});return true;}if(instantProc){const hot=caster.has('instantBolt');this.float(caster,`INSTANT CINDER! · ${Math.max(1,hot.stacks||1)} READY`,'info');this.resolve(caster,a,target,{proc:true});return true;}if(a.cast>0){caster.cast={a,index,target,total:a.cast,left:a.cast,school:a.school,commitCooldown:commitOnComplete,moveCast:a.name==='Lullaby Bloom'};this.audio.play('cast');this.log(`${caster.name} begins ${a.name}.`);return true;}this.resolve(caster,a,target);return true;}
  completeCast(c,cst){if(cst?.a?.type==='stormkeeper')cst.target=c;/* STORMKEEPER_COMPLETE_SELF_TARGET */if(!c.alive||!cst.target.alive)return;if(cst.special==='mount'){if(this.isInCombat(c)){if(c===this.player)this.message('Cannot mount while in combat');return;}c.mounted=true;c.mountVisual.visible=true;this.vfxRing(c,c.mountData?.aura||0x78efff,2.1);this.audio.play('mountReady');if(c===this.player)this.message(`Mounted: ${(c.mountData||mountDefinition(progression.activeMount)).name}`);else this.float(c,'MOUNTED','info');return;}if(cst.target!==c&&isUntargetableStealth(cst.target,c)){if(c===this.player)this.message('TARGET VANISHED — cast cancelled');this.float(cst.target,'VANISHED','info');return;}if(cst.target!==c&&!this.arena.los(c,cst.target)){if(c===this.player)this.message('LINE OF SIGHT — cast failed');this.float(cst.target,'LINE OF SIGHT','error');this.vfxRing(cst.target,0xde503b,1.15);return;}if(dist(c,cst.target)>cst.a.range&&cst.target!==c){if(c===this.player)this.message('Out of range');return;}if(cst.commitCooldown)c.cds[cst.index]=cst.a.cd;if(cst.channel){this.float(c,'CHANNEL COMPLETE','info');return;}this.resolve(c,cst.a,cst.target);}
  channelTick(c,cst){if(!c.alive)return;if(cst.soulDrain&&!cst.uaRefreshed){const ua=cst.target?.has?.('unstableAffliction');if(ua&&ua.source===c){ua.time=10;ua.tick=Math.min(ua.tick||1,1);cst.uaRefreshed=true;this.float(cst.target,'UNSTABLE AFFLICTION REFRESHED','info');}}if(cst.discPenance){
    const t=cst.target;if(!t||!t.alive)return;
    cst.ticks=(cst.ticks||0)+1;
    if(t.team===c.team){this.heal(c,t,cst.a.directHeal||132,'Penance Direct Heal');this.vfxDisciplineStarBolt(c,t,{healing:true,penance:true,bolt:cst.ticks});this.vfxGlyph(t,0xffffff,.62);}
-   else{const radiantMult=cst.radiantPenance?1.15:1;this.damage(c,t,Math.round(cst.a.value*radiantMult),cst.radiantPenance?'Radiant Penance':'Penance');const mult=(1+(talentRank(c.cls,'disc_penance')||0)*.06)*radiantMult;this.healAtonements(c,Math.round((cst.a.atonementHeal||78)*mult),cst.radiantPenance?'Radiant Penance Atonement':'Penance Atonement');this.vfxDisciplineStarBolt(c,t,{penance:true,bolt:cst.ticks});this.vfxGlyph(t,cst.radiantPenance?0xffffff:0xffe7ab,cst.radiantPenance?.72:.54);}
+   else{const radiantMult=cst.radiantPenance?1.15:1;this.damage(c,t,Math.round(cst.a.value*radiantMult),cst.radiantPenance?'Radiant Penance':'Penance');const mult=(1+(unitTalentRank(c,'disc_penance')||0)*.06)*radiantMult;this.healAtonements(c,Math.round((cst.a.atonementHeal||78)*mult),cst.radiantPenance?'Radiant Penance Atonement':'Penance Atonement');this.vfxDisciplineStarBolt(c,t,{penance:true,bolt:cst.ticks});this.vfxGlyph(t,cst.radiantPenance?0xffffff:0xffe7ab,cst.radiantPenance?.72:.54);}
    if(t.team===c.team)this.audio.play('discPenance',c);return;
 	  }if(cst.bladestorm){const radius=cst.radius||5.2;const victims=this.units.filter(u=>u.team!==c.team&&u.alive&&dist(c,u)<=radius&&this.arena.los(c,u));cst.ticks=(cst.ticks||0)+1;victims.forEach((t,i)=>{const hit=this.damage(c,t,cst.a.value,'Bladestorm Tick');if(hit){t.effect('slow',.75,{pct:.60,source:c,label:'Bladestorm'});this.float(t,cst.ticks===1?'BLADESTORM SLOW 60%':'','info');}this.vfxKickArc(t,i%2?0xffd36b:COLORS.warrior);});this.vfxCyclone(c,COLORS.warrior,.72);this.audio.playSample('fast_swing',{gain:.32,cooldown:180,source:c});return;}
    if(cst.soulDrain){
@@ -6207,16 +7041,76 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
     const afflictionPower=(t.has('soulScar')?1:0)+((t.has('agony')||hasImmolate)?1:0)+uaStacks;
     const amount=cst.a.value+afflictionPower*15;
     this.damage(c,t,amount,'Essence Siphon');this.heal(c,c,Math.round(amount*.575),'Essence Siphon');
-    const chaosIndex=(AB[c.cls]||[]).findIndex(spell=>spell.type==='chaosBolt');
+    const chaosIndex=(unitAbilities(c)||[]).findIndex(spell=>spell.type==='chaosBolt');
     if(chaosIndex>=0&&c.cds[chaosIndex]>0){c.cds[chaosIndex]=Math.max(0,c.cds[chaosIndex]-3);this.float(c,`CHAOS BOLT ${c.cds[chaosIndex]>0?c.cds[chaosIndex].toFixed(1)+'s':'READY'}`,'info');}
     this.vfxSiphonPulse(c,t,afflictionPower);this.audio.play('siphonTick',c);this.float(t,`DRAIN ${amount}`,'error');return;
    }
-   const radius=cst.radius||5.0;const victims=this.units.filter(u=>u.team!==c.team&&u.alive&&dist(c,u)<=radius&&this.arena.los(c,u));cst.ticks=(cst.ticks||0)+1;this.vfxFuryPulse(c,radius,cst.ticks);if(!victims.length){if(c===this.player&&cst.ticks===1)this.message('No enemy caught in Fists of Fury');return;}victims.forEach((t,i)=>{const hit=this.damage(c,t,cst.a.value,'Fists of Fury');if(hit&&talentRank(c.cls,'wind_chi_wave')>0){this.damage(c,t,11,'Rushing Jade Wind');this.vfxSpiral(t,COLORS.wind,.42);c.effect('rushingJade',.8);} if(!hit)return;t.effect('slow',.72,{pct:.60,source:c,label:'Fists of Fury'});this.float(t,'FURY SLOW 60%','info');this.vfxKickArc(t,i%2?0xffdf79:COLORS.wind);this.vfxNova(t,0xffdf79,.64,3);this.float(t,cst.ticks===1?'PUMMELED':'PUMMEL','info');});this.audio.play('furyTick',c);}
- animateAction(c,a){if(!c||!a)return;const melee=['damage','dot','leap','singleStun','shadowInterrupt','windInterrupt','windStun','monkFinisher','fistsChannel','whirlingDragonPunch','mortalSwing','charge','rend','gushingWound','pummel'].includes(a.type)&&(a.school==='physical'||a.school==='shadow'||a.school==='wind');const support=['heal','hot','bigHeal','shield','spiritBlossom','ironbark','shieldSelf','cleanse','freedom','guardianAngel','holyLight','holyShock','sacrifice','intercept','sharpenBlade','paladinAoE','paladinGuard','bestowFaith','ghanir','discShield','discMend','painSuppression','ultimateRadiance','discFade','archangel','darkArchangel','angelicBody','avengingWings'].includes(a.type);c.combatAnim={type:melee?'melee':'spell',until:this.time+(support ? .42 : .34),dur:support ? .42 : .34};}
+   const radius=cst.radius||5.0;const victims=this.units.filter(u=>u.team!==c.team&&u.alive&&dist(c,u)<=radius&&this.arena.los(c,u));cst.ticks=(cst.ticks||0)+1;this.vfxFuryPulse(c,radius,cst.ticks);if(!victims.length){if(c===this.player&&cst.ticks===1)this.message('No enemy caught in Fists of Fury');return;}victims.forEach((t,i)=>{const hit=this.damage(c,t,cst.a.value,'Fists of Fury');if(hit&&unitTalentRank(c,'wind_chi_wave')>0){this.damage(c,t,11,'Rushing Jade Wind');this.vfxSpiral(t,COLORS.wind,.42);c.effect('rushingJade',.8);} if(!hit)return;t.effect('slow',.72,{pct:.60,source:c,label:'Fists of Fury'});this.float(t,'FURY SLOW 60%','info');this.vfxKickArc(t,i%2?0xffdf79:COLORS.wind);this.vfxNova(t,0xffdf79,.64,3);this.float(t,cst.ticks===1?'PUMMELED':'PUMMEL','info');});this.audio.play('furyTick',c);}
+   meleeAnimationStyle(c,a){
+    if(!c||!a)return null;const name=String(a.name||'');
+    if(c.cls==='shadow'){
+     if(name==='Shadow Kick')return 'shadowKick';
+     if(name==='Umbral Pounce')return 'shadowPounce';
+     if(name==='Viper Cut')return 'shadowViper';
+     if(name==='Ribbreaker'||a.type==='singleStun')return 'shadowRib';
+     if(name==='Garrote')return 'shadowGarrote';
+     if(name==='Shiv'||a.type==='shiv')return 'shadowShiv';
+     if(name==='Gouge'||a.type==='gouge')return 'shadowGouge';
+     if(name==='Night Slash'||['damage','dot','shadowInterrupt','leap'].includes(a.type))return 'shadowNight';
+    }
+    if(c.cls==='warrior'){
+     if(a.type==='charge')return 'warriorCharge';
+     if(a.type==='pummel')return 'warriorPummel';
+     if(['rend','gushingWound'].includes(a.type))return 'warriorRend';
+     if(a.type==='warbreaker')return 'warriorWarbreaker';
+     if(a.type==='victoryRush')return 'warriorVictory';
+     if(a.type==='slicingWinds'||(a.type==='mortalSwing'&&!name))return 'warriorSlicing';
+     if(a.type==='mortalSwing')return 'warriorMortal';
+    }
+    if(c.cls==='wind'){
+     if(name==='Rising Sun Kick')return 'windRising';
+     if(name==='Cloudstep Kick'||a.type==='leap')return 'windCloudstep';
+     if(name==='Disrupting Palm'||a.type==='windInterrupt')return 'windDisrupt';
+     if(name==='Valley Sweep'||a.type==='windStun')return 'windValley';
+     if(name==='Cyclone Barrage'||a.type==='monkFinisher')return 'windCyclone';
+     if(name==='Whirling Dragon Punch'||a.type==='whirlingDragonPunch')return 'windWhirling';
+     if(name==='Strike of the Windlord'||a.type==='windlordStrike')return 'windWindlord';
+     if(name==='Disabling Reach'||a.type==='slow')return 'windDisabling';
+     if(name==='Zephyr Palm'||a.type==='damage')return 'windZephyr';
+    }
+    if(c.cls==='pala'){
+     if(name==='Hammer of Justice'||a.type==='paladinStun')return 'paladinHammer';
+     if(name==='Righteous Strike'||a.type==='paladinMelee')return 'paladinRighteous';
+   }
+   const generic=['damage','dot','leap','singleStun','shadowInterrupt','windInterrupt','windStun','monkFinisher','fistsChannel','whirlingDragonPunch','mortalSwing','charge','rend','gushingWound','pummel'].includes(a.type)&&(a.school==='physical'||a.school==='shadow'||a.school==='wind');
+   return generic?'generic':null;
+  }
+   animateAction(c,a){
+    if(!c||!a)return;const style=this.meleeAnimationStyle(c,a),support=['heal','hot','bigHeal','shield','spiritBlossom','ironbark','shieldSelf','cleanse','freedom','guardianAngel','holyLight','holyShock','sacrifice','intercept','sharpenBlade','paladinAoE','paladinGuard','bestowFaith','ghanir','discShield','discMend','painSuppression','ultimateRadiance','discFade','archangel','darkArchangel','angelicBody','avengingWings'].includes(a.type);
+    const durations={shadowNight:.40,shadowPounce:.49,shadowViper:.46,shadowRib:.34,shadowGarrote:.58,shadowShiv:.28,shadowGouge:.33,shadowKick:.43,warriorMortal:.72,warriorSlicing:.42,warriorWarbreaker:.84,warriorVictory:.66,warriorRend:.68,warriorPummel:.42,warriorCharge:.50,windZephyr:.38,windDisrupt:.34,windCloudstep:.48,windRising:.62,windValley:.56,windCyclone:.64,windWhirling:.68,windWindlord:.58,windDisabling:.44,paladinRighteous:.56,paladinHammer:.62};
+    const duration=style?(durations[style]||.42):(support?.42:.34);
+   c.meleeAnimationSide=-(Number(c.meleeAnimationSide)||-1);
+   c.combatAnim={type:style?'melee':'spell',style:style||'',abilityName:a.name||'',direction:style==='shadowShiv'?-1:style==='shadowRib'||style?.startsWith('warrior')?1:c.meleeAnimationSide,until:this.time+duration,dur:duration};
+  }
+   vfxMeleeSignature(c,a,t){
+    const style=c?.combatAnim?.style;if(!style||!t||!this.scene)return;
+    if(style==='shadowNight'){this.vfxSlash(t,0xc58cff);this.vfxKickArc(t,0x7b3fbc);this.vfxBurst(t,0x6d2ca6,.24);}
+    else if(style==='shadowViper'){this.vfxSlash(t,0x77e68e);this.vfxSpiral(t,0x4a9f69,.24);this.vfxBurst(t,0x397d4c,.24);}
+    else if(style==='shadowGarrote'){this.vfxSlash(t,0xc23658);this.vfxRing(t,0x7f1734,1.35);this.vfxBurst(t,0xa51f4c,.30);}
+    else if(style==='shadowPounce'){this.vfxTrail(c,0x8c54d6);this.vfxSlash(t,0xd2b0ff);this.vfxNova(t,0x6d2ca6,.82,5);}
+    else if(style==='shadowRib'){this.vfxSlash(t,0xe0c8ff);this.vfxBurst(t,0x7d38b4,.34);}
+    else if(style==='shadowShiv'){this.vfxSlash(t,0x77e68e);this.vfxBurst(t,0x4e9b63,.20);}
+    else if(style==='shadowGouge'){this.vfxKickArc(t,0xd9c4ff);this.vfxNova(t,0x9c6bd1,.72,4);}
+    else if(style==='shadowKick')this.vfxKickArc(t,0x9b68d8);
+    else if(style.startsWith('warrior')){this.vfxKickArc(t,style==='warriorRend'?0xff385f:0xffb347);if(['warriorMortal','warriorWarbreaker','warriorVictory'].includes(style))this.vfxBurst(t,0xd56c28,.32);}
+    else if(style==='windZephyr'||style==='windDisrupt'||style==='windWindlord'){this.vfxSlash(t,0x74f0b0);this.vfxSpiral(t,0xaaffd7,.30);}
+    else if(style.startsWith('wind'))this.vfxKickArc(t,['windCyclone','windWhirling'].includes(style)?0xffdf79:0x72e5a5);
+   else if(style.startsWith('paladin')){this.vfxKickArc(t,0xffd66c);this.vfxGlyph(t,0xfff1a6,.34);}
+  }
 
- applyAtonement(c,target,duration=14){
+  applyAtonement(c,target,duration=14){
   if(!c||!target||!target.alive||target.team!==c.team)return;
-  const bonus=talentRank(c.cls,'disc_evangelism')||0;
+  const bonus=unitTalentRank(c,'disc_evangelism')||0;
   target.effects=target.effects.filter(e=>!(e.type==='atonement'&&e.source===c));
   target.effect('atonement',duration+bonus,{source:c});
   this.vfxGlyph(target,COLORS.discipline,.62);
@@ -6233,7 +7127,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
   if(allies.length)this.float(c,`ATONEMENT ×${allies.length}`,'heal');
   return total;
  }
- resolve(c,a,t,opts={}){this.animateAction(c,a);this.audio.playAbility(a,c);if(a.type==='volcanicEruption'&&t){this.vfxVolcanicEruption(t);this.audio.playSample('fire_impact',{gain:.72,rate:.78,cooldown:0,source:t});}if(t&&t!==c&&t.team!==c.team&&t.has?.('iceBlock')){this.float(t,'IMMUNE','info');return;}if(t&&t!==c&&t.team!==c.team&&t.has?.('cloakShadows')&&a.school!=='physical'&&!this.isMeleeStrike(a.name)&&!['Fists of Fury','Bladestorm'].includes(a.name)){this.float(t,'CLOAK IMMUNE','info');return;}if(c.cls==='storm'&&a.name!=='Arc Spark'&&a.name!=='Tempest Bolt'&&['chain','stun','root','push'].includes(a.type))c.effects=c.effects.filter(e=>e.type!=='arcSequence');let mult=(c.has('burst')?1.22:1)*(opts.proc?1.15:1)*(c.has('smokePower')?1.10:1);switch(a.type){
+  resolve(c,a,t,opts={}){this.animateAction(c,a);this.vfxMeleeSignature(c,a,t);this.audio.playAbility(a,c);if(a.type==='volcanicEruption'&&t){this.vfxVolcanicEruption(t);this.audio.playSample('fire_impact',{gain:.72,rate:.78,cooldown:0,source:t});}if(t&&t!==c&&t.team!==c.team&&t.has?.('iceBlock')){this.float(t,'IMMUNE','info');return;}if(t&&t!==c&&t.team!==c.team&&t.has?.('cloakShadows')&&a.school!=='physical'&&!this.isMeleeStrike(a.name)&&!['Fists of Fury','Bladestorm'].includes(a.name)){this.float(t,'CLOAK IMMUNE','info');return;}if(c.cls==='storm'&&a.name!=='Arc Spark'&&a.name!=='Tempest Bolt'&&['chain','stun','root','push'].includes(a.type))c.effects=c.effects.filter(e=>e.type!=='arcSequence');let mult=(c.has('burst')?1.22:1)*(opts.proc?1.15:1)*(c.has('smokePower')?1.10:1);switch(a.type){
    case'damage':this.projectile(c,t,a.school,()=>{let v=a.value*mult,label=a.stormkeeperSpark?'Stormkeeper Arc Spark':a.name;if(a.name==='Pandemic Bloom'&&c.has('pandemicSurge')){v*=1.20;c.effects=c.effects.filter(e=>e.type!=='pandemicSurge');this.float(c,'PANDEMIC BLOOM +20%','info');this.vfxGlyph(c,COLORS.soul,.82);}if(a.name==='Cinder Bolt'&&c.has('instantBolt')){const ib=c.has('instantBolt');v*=1+Number(ib.pct||.20);ib.stacks=(ib.stacks||1)-1;this.float(c,'HOT STREAK +20%','info');if(ib.stacks<=0)c.effects=c.effects.filter(e=>e!==ib);}if(a.stormkeeperSpark&&c.has('stormkeeper')){const sk=c.has('stormkeeper');sk.stacks=(sk.stacks||3)-1;this.float(c,`FREE ARC SPARK · ${Math.max(0,sk.stacks)} LEFT`,'info');this.vfxGlyph(c,COLORS.storm,.82);this.vfxNova(t,COLORS.storm,1.35,12);if(sk.stacks<=0)c.effects=c.effects.filter(e=>e!==sk);}const evis=a.name==='Night Slash'&&!!c.has('eviscerateReady');
     if(a.name==='Ember Lance'&&t.has('burn')){v*=1.30;this.gainMana(c,6);}
     if(a.name==='Ember Lance'&&c.has('meteorLance')){const meteor=c.has('meteorLance');meteor.stacks=(meteor.stacks||2)-1;if(meteor.stacks<=0)c.effects=c.effects.filter(e=>e!==meteor);else meteor.time=9999;v*=Number(meteor.pct||.15)+1;this.float(c,`METEOR LANCE +${Math.round(Number(meteor.pct||.15)*100)}% · ${Math.max(0,meteor.stacks||0)} LEFT`,'info');this.vfxGlyph(c,COLORS.fire,.66);this.vfxNova(c,COLORS.fire,1.45,10);}
@@ -6242,7 +7136,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
     if(a.name==='Cinder Bolt'&&hit){this.gainMana(c,4);if(c.has('burst'))t.effect('burn',4,{value:30/4,source:c});}
     if((a.name==='Judgement'||a.name==='Judgment')&&hit){this.gainMana(c,8);this.float(c,'+8 MANA','heal');this.vfxGlyph(c,COLORS.holy,.52);const allies=this.units.filter(u=>u.team===c.team&&u.alive&&dist(c,u)<=10);allies.forEach((u,i)=>{this.heal(c,u,101,'Judgement');this.vfxGlyph(u,0xffefb4,.34);if(i<2)this.vfxRing(u,COLORS.holy,1.15);});this.float(c,'JUDGEMENT HEALS ALLIES','heal');}if(a.name==='Arc Spark'&&hit){this.gainMana(c,4);this.rollStormSurge(c);}if(a.name==='Tempest Bolt'&&hit){this.gainMana(c,5);this.float(c,'+5 MANA','heal');this.vfxNova(t,COLORS.storm,1.22,10);}if(a.name==='Night Slash'&&hit){this.addShadowMark(c);if(evis){this.vfxNova(t,0xb56bff,1.38,10);this.vfxSpiral(t,0xecdcff,.7);}if(c.has('cheapReady')){c.effects=c.effects.filter(e=>e.type!=='cheapReady');if(t.cast)t.cast=null;c.effects=c.effects.filter(e=>e.type!=='stealth');t.effect('cheapStun',3);this.float(t,'CHEAP SHOT 3.0s','info');this.vfxGlyph(t,0x726080,.62);this.audio.play('stun');}}if(a.name==='Zephyr Palm'&&hit){this.addFlow(c,t);if(windTigereyeTalentActive(c)){c.tigereyePalmCounter=(c.tigereyePalmCounter||0)+1;if(c.tigereyePalmCounter>=2){c.tigereyePalmCounter=0;grantTigereyeStacks(c,2);}}}
    });break;
-   case'livingBomb':t.effect('livingBomb',6,{value:a.value*mult,explodeValue:a.explodeValue||190,source:c,label:'Living Bomb'});this.vfxGlyph(t,COLORS.fire,.85);this.vfxOrbit(t,COLORS.fire,.9);this.float(t,'LIVING BOMB','error');break;    case'combustion':c.effect('combustion',8,{crit:.30,castSpeed:.15});this.spawnCombustionVisuals?.(c,8);this.vfxOrbit(c,COLORS.fire,1.9);this.vfxNova(c,COLORS.fire,3.0,28);this.vfxGlyph(c,COLORS.fire,1.05);this.float(c,'COMBUSTION — ENGULFED','info');this.audio.play('fire');break;    case'flameShield':this.applyShield(c,c,a.value||260,6);c.effect('moltenArmor',6,{value:14,source:c});this.shieldBubble(c,COLORS.fire,6);this.vfxGlyph(c,COLORS.fire,.9);this.float(c,'FIRE SHIELD','info');break;    case'chain':{const overloaded=!!c.has('overload');const surge=overloaded?1.35:1;if(overloaded){c.effects=c.effects.filter(e=>e.type!=='overload');this.float(c,'VOLCANIC OVERLOAD!','info');this.vfxGlyph(c,0xff9840,.92);this.vfxNova(c,0xffa242,2.15,16);}this.lightning(c,t);this.damage(c,t,a.value*mult*surge,a.name);this.units.filter(u=>u.team!==c.team&&u!==t&&u.alive&&dist(u,t)<8&&this.arena.los(t,u)).slice(0,2).forEach(u=>{this.lightning(t,u);this.damage(c,u,64*mult*surge,a.name);});if(overloaded)this.volcanicOverload(c,mult);this.gainMana(c,overloaded?10:6);if(overloaded)this.float(c,'+10 MANA','heal');break;}
+   case'livingBomb':t.effect('livingBomb',6,{value:a.value*mult,explodeValue:a.explodeValue||190,source:c,label:'Living Bomb'});this.vfxGlyph(t,COLORS.fire,.85);this.vfxOrbit(t,COLORS.fire,.9);this.float(t,'LIVING BOMB','error');break;    case'combustion':c.effect('combustion',8,{crit:.80,castSpeed:.15});this.spawnCombustionVisuals?.(c,8);this.vfxOrbit(c,COLORS.fire,1.9);this.vfxNova(c,COLORS.fire,3.0,28);this.vfxGlyph(c,COLORS.fire,1.05);this.float(c,'COMBUSTION — ENGULFED','info');this.audio.play('fire');break;    case'flameShield':this.applyShield(c,c,a.value||260,6);c.effect('moltenArmor',6,{value:14,source:c});this.shieldBubble(c,COLORS.fire,6);this.vfxGlyph(c,COLORS.fire,.9);this.float(c,'FIRE SHIELD','info');break;    case'chain':{const overloaded=!!c.has('overload');const surge=overloaded?1.35:1;if(overloaded){c.effects=c.effects.filter(e=>e.type!=='overload');this.float(c,'VOLCANIC OVERLOAD!','info');this.vfxGlyph(c,0xff9840,.92);this.vfxNova(c,0xffa242,2.15,16);}this.lightning(c,t);this.damage(c,t,a.value*mult*surge,a.name);this.units.filter(u=>u.team!==c.team&&u!==t&&u.alive&&dist(u,t)<8&&this.arena.los(t,u)).slice(0,2).forEach(u=>{this.lightning(t,u);this.damage(c,u,64*mult*surge,a.name);});if(overloaded)this.volcanicOverload(c,mult);this.gainMana(c,overloaded?10:6);if(overloaded)this.float(c,'+10 MANA','heal');break;}
    case'flameNova':this.units.filter(u=>u.team!==c.team&&u.alive&&dist(c,u)<=8&&this.arena.los(c,u)).forEach(u=>{const hit=this.damage(c,u,a.value,a.name);if(!hit)return;this.applyRoot(u,4);u.effect('slow',6,{pct:.60});this.vfxGlyph(u,0x92dfff,.65);this.vfxSpiral(u,0x8adfff,.7);this.float(u,'FROSTBITE 60%','info');});this.vfxRing(c,0x86d9ff,4);this.vfxNova(c,0x9ce9ff,2.6,18);this.float(c,'FROSTFIRE NOVA · OFF GCD','info');break;
    case'dash':this.dash(c,15,false,true);c.effect('trail',3,{value:12,source:c});if(c.cls==='flame')c.effect('defensive',2,{reduction:.20});this.vfxRing(c,COLORS.fire,1.8);break;
    case'interrupt':if(t.cast){if(t.cast.uninterruptible){this.float(t,'UNINTERRUPTIBLE','info');this.vfxGlyph(t,COLORS.wind,.58);this.log(`${t.name}'s Fists of Fury cannot be interrupted.`);}else if(t.has('interruptWard')){this.float(t,'INTERRUPT IMMUNE','info');this.vfxGlyph(t,COLORS.soul,.55);this.log(`${t.name}'s Soul Barrier prevented an interrupt.`);}else{const school=t.cast.school;t.cast=null;t.effect('lock_'+school,2.5);c.stats.interrupts++;const aftershock=unitTalentRank(c,'storm_aftershock');if(c.cls==='storm'&&aftershock>0){c.effects=c.effects.filter(e=>e.type!=='aftershockPower');c.effect('aftershockPower',10,{pct:aftershock*.02});this.float(c,`AFTERSHOCK · NEXT SPELL +${aftershock*2}%`,'info');}this.float(t,'INTERRUPTED','error');this.vfxRing(t,0xff9340,2.2);this.log(`${c.name} interrupted ${t.name}.`);}}break;
@@ -6253,8 +7147,8 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
    case'fear':this.projectile(c,t,'shadow',()=>{if(this.reflectControl(c,t,a.name,x=>{if(x.cast)x.cast=null;this.applyFear(x,a.value||5);{const fe=x.has('fear');if(fe){fe.source=x;fe.breakFromDots=false;}}this.vfxGlyph(x,0xcf84ff,.92);this.vfxSpiral(x,0x7a2ba8,1.05);this.float(x,'FEAR — REFLECTED','info');}))return;if(t.cast)t.cast=null;this.applyFear(t,a.value||5);{const fe=t.has('fear');if(fe){fe.source=c;fe.breakFromDots=c.cls==='soul'?false:true;}}if(a.name==='Mortal Horror'){this.heal(c,c,c.maxHp*.20,'Mortal Horror');this.float(c,'MORTAL HORROR · 20% HEAL','heal');}this.vfxGlyph(t,0xcf84ff,.92);this.vfxSpiral(t,0x7a2ba8,1.05);this.float(t,'FEARED','info');});break;
    case'windIncap':this.applyWindIncap(t,a.value||3);this.vfxGlyph(t,0x8ff4ce,.8);this.vfxSpiral(t,0xd7fff0,.8);this.vfxNova(t,COLORS.wind,1.15,8);this.float(t,'INCAPACITATED','info');break;
    case'sleep':this.projectile(c,t,'heal',()=>{if(this.reflectControl(c,t,a.name,x=>{if(x.cast)x.cast=null;this.applySleep(x,a.value||4.5);this.vfxGlyph(x,0xffd27d,1.2);this.vfxSpiral(x,0x83f2b4,1.2);this.float(x,'SLUMBER — REFLECTED','info');}))return;if(t.cast)t.cast=null;this.applySleep(t,a.value||4.5);this.vfxGlyph(t,0xffd27d,1.2);this.vfxSpiral(t,0x83f2b4,1.2);this.float(t,'SLUMBER','info');});break;
-   case'leap':{const pounce=c.cls==='shadow'&&a.name==='Umbral Pounce';const cloudstep=c.cls==='wind'&&a.name==='Cloudstep Kick';const dashReady=cloudstep&&!!a.dashReady;if(!cloudstep||dashReady)this.moveAdjacent(c,t,dashReady);this.vfxTrail(c,c.cls==='wind'?COLORS.wind:0x6e38bc);if(pounce){c.effect('evasion',1.5,{pct:.50});this.float(c,'EVASION · 50% MELEE DODGE · 1.5s','info');}if(cloudstep){this.vfxKickArc(t,COLORS.wind);if(dashReady){c.effect('cloudstepDashCd',20);this.float(c,'CLOUDSTEP DASH! +20%','info');this.vfxOrbit(c,0xffdf79,.9);this.vfxNova(t,COLORS.wind,1.38,10);}}this.damage(c,t,a.value*mult,a.name);break;}
-	   case'stormkeeper':c.effect('stormkeeper',10,{stacks:3});this.float(c,'STORMKEEPER · 3 FREE ARC SPARKS','info');this.vfxGlyph(c,COLORS.storm,1.1);this.vfxOrbit(c,COLORS.storm,1.35);this.audio.play('lightning');break;    case'frostShock':{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){t.effects=t.effects.filter(e=>!(e.source===c&&['frostShockAmp'].includes(e.type)));t.effect('slow',8,{pct:.25,source:c,label:'Frost Shock'});t.effect('frostShockAmp',8,{pct:.15,source:c});this.vfxGlyph(t,0xa6f1ff,.62);this.float(t,'FROST SHOCK · 25% · ARC/FORK +15%','info');}break;}    case'totemMastery':c.effect('totemMastery',20);this.spawnTotemMasteryVisuals?.(c,20);this.vfxRing(c,COLORS.storm,3.0);this.vfxGlyph(c,COLORS.storm,.95);this.float(c,'TOTEM MASTERY · 20s','info');break;    case'windlordStrike':{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){c.cds[1]=0;c.effect('windlordReady',8);c.effects=c.effects.filter(e=>e.type!=='risingSunReady');c.effect('risingSunReady',10);this.vfxWindlordStrike(c,t);this.vfxKickArc(t,0x9a65ff);this.vfxNova(t,0xffe277,1.9,18);this.float(c,'CLOUDSTEP RESET · RISING SUN READY','info');}break;}    case'chiBurst':this.projectile(c,t,'wind',()=>{const hit=this.damage(c,t,a.value*mult,a.name);if(hit)this.heal(c,c,Math.round(a.value*.75),'Chi Burst');});break;    case'karma':c.effect('touchKarma',4,{reflectPct:.50});c.effect('defensive',4,{reduction:.20});this.shieldBubble(c,COLORS.wind,4);this.vfxOrbit(c,COLORS.wind,1.25);this.float(c,'TOUCH OF KARMA · 50% REFLECT','info');break;    case'evasion':c.effect('evasion',8,{pct:.70});this.vfxOrbit(c,0xc499ff,1.05);this.float(c,'EVASION 70%','info');break;    case'vendetta':{t.effect('vendetta',10,{source:c});this.vfxGlyph(t,0xff315e,.95);this.vfxRing(t,0xff315e,2.15);this.vfxBurst(t,0x9b1024,.86);this.vfxSpiral(t,0xd61d3e,1.15);this.vfxNova(t,0x7a0015,1.45,10);this.float(t,'VENDETTA MARKED · 10 SEC','error');break;}    case'cloak':c.effects=c.effects.filter(e=>!['slow','root','burn','poison','bleed','livingBomb','karmaDot','soulScar','agony','unstableAffliction','flameShock','trail'].includes(e.type));c.effect('cloakShadows',5);this.applyShield(c,c,a.value||180,5);this.vfxGlyph(c,0xd7b3ff,1.0);this.vfxNova(c,0xa762ff,1.8,14);this.float(c,'CLOAK · MAGIC & DOT IMMUNITY','info');break;    case'internalBleeding':{if(!t.has('cheapStun')&&!t.has('stun')&&!t.has('furyStun')){if(c===this.player)this.message('Internal Bleeding requires Ribbreaker setup');break;}t.effect('bleed',6,{value:a.value*mult,source:c,label:'Internal Bleeding',interval:1});this.float(t,'INTERNAL BLEEDING','error');break;}    case'volcanicEruption':{c.effects=c.effects.filter(e=>e.type!=='volcanicEruptionReady');this.projectile(c,t,'fire',()=>{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){this.vfxNova(t,0xff6f2f,2.2,20);this.vfxGlyph(t,0xffaa45,.82);this.float(t,'VOLCANIC ERUPTION','error');}});break;}case'flameShock':t.effect('flameShock',12,{value:a.value*mult,source:c,interval:1,label:'Flame Shock'});this.vfxBurst(t,0xff7a32,.48);this.vfxGlyph(t,0xff9a3d,.52);this.float(t,'FLAME SHOCK','error');break;case'soulDot':this.projectile(c,t,'shadow',()=>{t.effect('soulScar',15,{value:a.value*mult,source:c});this.vfxAfflictionApply(t,COLORS.soul,'scar');this.float(t,'SOUL SCAR','info');});break;
+   case'leap':{const pounce=c.cls==='shadow'&&a.name==='Umbral Pounce';const cloudstep=c.cls==='wind'&&a.name==='Cloudstep Kick';const dashReady=cloudstep&&!!a.dashReady;if(!cloudstep||dashReady)this.moveAdjacent(c,t,dashReady);this.vfxTrail(c,c.cls==='wind'?COLORS.wind:0x6e38bc);if(pounce){c.effect('evasion',1.5,{pct:.50});c.effect('pounceSpeed',1.5,{speed:1.30});this.float(c,'UMBRAL MOMENTUM · +30% SPEED · 50% DODGE · 1.5s','info');}if(cloudstep){this.vfxKickArc(t,COLORS.wind);if(dashReady){c.effect('cloudstepDashCd',20);this.float(c,'CLOUDSTEP DASH! +20%','info');this.vfxOrbit(c,0xffdf79,.9);this.vfxNova(t,COLORS.wind,1.38,10);}}this.damage(c,t,a.value*mult,a.name);break;}
+   case'stormkeeper':c.effect('stormkeeper',10,{stacks:3});this.float(c,'STORMKEEPER · 3 FREE ARC SPARKS','info');this.vfxGlyph(c,COLORS.storm,1.1);this.vfxOrbit(c,COLORS.storm,1.35);this.audio.play('lightning');break;    case'frostShock':{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){t.effects=t.effects.filter(e=>!(e.source===c&&['frostShockAmp'].includes(e.type)));t.effect('slow',3,{pct:.25,source:c,label:'Frost Shock'});t.effect('frostShockAmp',8,{pct:.15,source:c});this.vfxGlyph(t,0xa6f1ff,.62);this.float(t,'FROST SHOCK · 25% FOR 3s · ARC/FORK +15% FOR 8s','info');}break;}    case'totemMastery':c.effect('totemMastery',20);this.spawnTotemMasteryVisuals?.(c,20);this.vfxRing(c,COLORS.storm,3.0);this.vfxGlyph(c,COLORS.storm,.95);this.float(c,'TOTEM MASTERY · 20s','info');break;    case'windlordStrike':{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){c.cds[1]=0;c.effect('windlordReady',8);c.effects=c.effects.filter(e=>e.type!=='risingSunReady');c.effect('risingSunReady',10);this.vfxWindlordStrike(c,t);this.vfxKickArc(t,0x9a65ff);this.vfxNova(t,0xffe277,1.9,18);this.float(c,'CLOUDSTEP RESET · RISING SUN READY','info');}break;}    case'chiBurst':this.projectile(c,t,'wind',()=>{const hit=this.damage(c,t,a.value*mult,a.name);if(hit)this.heal(c,c,Math.round(a.value*.75),'Chi Burst');});break;    case'karma':c.effect('touchKarma',4,{reflectPct:.50});c.effect('defensive',4,{reduction:.20});this.shieldBubble(c,COLORS.wind,4);this.vfxOrbit(c,COLORS.wind,1.25);this.float(c,'TOUCH OF KARMA · 50% REFLECT','info');break;    case'evasion':c.effect('evasion',8,{pct:.70});this.vfxOrbit(c,0xc499ff,1.05);this.float(c,'EVASION 70%','info');break;    case'vendetta':{t.effect('vendetta',10,{source:c});this.vfxGlyph(t,0xff315e,.95);this.vfxRing(t,0xff315e,2.15);this.vfxBurst(t,0x9b1024,.86);this.vfxSpiral(t,0xd61d3e,1.15);this.vfxNova(t,0x7a0015,1.45,10);this.float(t,'VENDETTA MARKED · 10 SEC','error');break;}    case'cloak':c.effects=c.effects.filter(e=>!['slow','root','burn','poison','bleed','livingBomb','karmaDot','soulScar','agony','unstableAffliction','flameShock','trail'].includes(e.type));c.effect('cloakShadows',5);this.applyShield(c,c,a.value||180,5);this.vfxGlyph(c,0xd7b3ff,1.0);this.vfxNova(c,0xa762ff,1.8,14);this.float(c,'CLOAK · MAGIC & DOT IMMUNITY','info');break;    case'internalBleeding':{if(!t.has('cheapStun')&&!t.has('stun')&&!t.has('furyStun')){if(c===this.player)this.message('Internal Bleeding requires Ribbreaker setup');break;}t.effect('bleed',6,{value:a.value*mult,source:c,label:'Internal Bleeding',interval:1});this.float(t,'INTERNAL BLEEDING','error');break;}    case'volcanicEruption':{c.effects=c.effects.filter(e=>e.type!=='volcanicEruptionReady');this.projectile(c,t,'fire',()=>{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){this.vfxNova(t,0xff6f2f,2.2,20);this.vfxGlyph(t,0xffaa45,.82);this.float(t,'VOLCANIC ERUPTION','error');}});break;}case'flameShock':t.effect('flameShock',12,{value:a.value*mult,source:c,interval:1,label:'Flame Shock'});this.vfxBurst(t,0xff7a32,.48);this.vfxGlyph(t,0xff9a3d,.52);this.float(t,'FLAME SHOCK','error');break;case'soulDot':this.projectile(c,t,'shadow',()=>{t.effect('soulScar',15,{value:a.value*mult,source:c});this.vfxAfflictionApply(t,COLORS.soul,'scar');this.float(t,'SOUL SCAR','info');});break;
    case'agony':t.effect('agony',15,{value:a.value*mult,source:c,stacks:1});this.vfxAfflictionApply(t,0xcb75ff,'torment');this.float(t,'TORMENT','info');break;
    case'immolate':{const existing=t.effects.find(e=>e.type==='burn'&&e.label==='Immolate'&&e.source===c);if(existing){const rank=unitTalentRank(c,'soul_curse_weaving');if(rank>0){c.effects=c.effects.filter(e=>e.type!=='curseWeavingPower');c.effect('curseWeavingPower',10,{pct:rank*.02});this.float(c,`CURSE WEAVING · NEXT HIT +${rank*2}%`,'info');}}const hit=this.damage(c,t,a.value*mult,'Immolate');if(hit){t.effect('burn',8,{effectKey:`${c.netId}:Immolate`,value:(a.dotValue||22)*mult,source:c,label:'Immolate',interval:1,tick:1});this.vfxAfflictionApply(t,0xff7a24,'torment');this.vfxBurst(t,0xff5a18,.5);this.float(t,'IMMOLATE · 8 SEC','error');}break;}
    case'unstableAffliction':{let ua=t.has('unstableAffliction');if(!ua){ua=t.effect('unstableAffliction',10,{value:50*mult,source:c,stacks:1});}else{const rank=unitTalentRank(c,'soul_curse_weaving');if(rank>0){c.effects=c.effects.filter(e=>e.type!=='curseWeavingPower');c.effect('curseWeavingPower',10,{pct:rank*.02});this.float(c,`CURSE WEAVING · NEXT HIT +${rank*2}%`,'info');}ua.time=10;ua.tick=1;ua.source=c;ua.stacks=Math.min(3,(ua.stacks||1)+1);ua.value=([0,50,40,110/3][ua.stacks]||50)*mult;}this.vfxAfflictionApply(t,0xf06cff,'unstable');this.vfxNova(t,0xb85cff,1.45,8);this.float(t,`UNSTABLE AFFLICTION ×${ua.stacks||1}`,'info');break;}
@@ -6283,7 +7177,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
 	   case'singleStun':{const hit=this.damage(c,t,a.value*mult,a.name);if(hit){this.applyStun(t,a.name==='Ribbreaker'?4:6);c.effect('eviscerateReady',10);this.float(c,'EVISCERATE READY','info');this.vfxGlyph(c,0xc398ff,.72);this.vfxRing(t,0xb35bff,2.1);if(c.cls==='shadow'){c.effects=c.effects.filter(e=>e.type!=='stealth');}if(c.cls==='shadow'&&a.name==='Ribbreaker'&&unitTalentRank(c,'shadow_shadowstep')>0){t.effect('bleed',6,{value:28.1*mult,source:c,label:'Internal Bleeding',interval:1});this.float(t,'INTERNAL BLEEDING · 6 SEC','error');this.vfxBurst(t,0x9b1c31,.45);}if(c.has('smokeBombReady')){c.effects=c.effects.filter(e=>e.type!=='smokeBombReady');t.effect('smokeBomb',5);this.smokeBombShroud(t,5);this.float(t,'SMOKE BOMB — NO HEALS','error');this.log(`${c.name} shrouded ${t.name} in Smoke Bomb.`);}}break;}
    case'root':{const landed=this.applyRoot(t,a.value||4);if(a.school==='nature'){if(landed)this.vfxEntanglingRoots(t,t.has('root')?.time||a.value||4);this.vfxRing(t,0x9be24f,2.2);this.vfxGlyph(t,0x7fd13c,.85);}else{this.vfxRing(t,COLORS.storm,2.2);this.vfxGlyph(t,0x62d8ff,.85);this.vfxSpiral(t,0xa6f1ff,.7);}break;}
 	   case'shieldSelf':{const shieldAmount=a.percentShield?c.maxHp*a.value:a.value;this.applyShield(c,c,shieldAmount,6);if(c.cls==='storm'){c.effect('staticAegisGuard',6,{reduction:.20});this.float(c,'STATIC AEGIS · 20% WALL','info');}if(c.cls==='soul'){c.effect('interruptWard',6);this.vfxGlyph(c,COLORS.soul,.8);this.float(c,a.percentShield?'DARK PACT · 20% HEALTH SHIELD':'INTERRUPT IMMUNE','info');}break;}
-   case'iceBlock':c.effects=c.effects.filter(e=>!['furyStun','cheapStun','stun','root','fear','poly','sleep','gouge','blind','windIncap','slow'].includes(e.type));c.effect('iceBlock',8,{value:c.maxHp*.025,source:c});c.cast=null;this.vfxIceBlock(c,8);this.vfxGlyph(c,0xdbf7ff,1.0);this.vfxRing(c,0xb9eaff,2.4);this.float(c,'ICE BLOCK — CC BROKEN','info');break;
+   case'iceBlock':c.effects=c.effects.filter(e=>!['furyStun','cheapStun','stun','root','fear','poly','sleep','gouge','blind','windIncap','slow'].includes(e.type));c.effect('iceBlock',8,{value:c.maxHp*.025*(unitTalentRank(c,'flame_glacial_recovery')?1.30:1),source:c});c.cast=null;this.vfxIceBlock(c,8);this.vfxGlyph(c,0xdbf7ff,1.0);this.vfxRing(c,0xb9eaff,2.4);this.float(c,'ICE BLOCK — CC BROKEN','info');break;
    case'push':{const near=this.closestEnemy(c);if(near&&dist(c,near)<=9){let dx=near.x-c.x,dz=near.z-c.z,l=Math.hypot(dx,dz)||1;near.x+=dx/l*6;near.z+=dz/l*6;this.arena.constrain(near);this.vfxRing(near,COLORS.storm,1.8);}else this.dash(c,5,true);break;}
    case'tigersLust':{
      c.effects=c.effects.filter(e=>!['slow','root'].includes(e.type));
@@ -6313,9 +7207,9 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
    case'discSmite':{const hit=this.damage(c,t,a.value,'Smite');if(hit){this.healAtonements(c,a.atonementHeal||112,'Smite Atonement');this.projectile(c,t,'holy',()=>{});this.vfxGlyph(t,0xfff2b8,.52);}break;}
    case'discShield':{this.applyShield(c,t,a.value,8);this.applyAtonement(c,t,a.atonementDuration||14);this.shieldBubble(t,0xe8ecff,8);this.vfxGlyph(t,COLORS.discipline,.78);this.float(t,'POWER SHIELD','heal');break;}
    case'discMend':this.heal(c,t,a.value,'Shadow Mend');this.applyAtonement(c,t,14);if(c===t){t.effects=t.effects.filter(e=>e.type!=='shadowMendGuard');t.effect('shadowMendGuard',4,{reduction:.10,source:c});this.vfxRing(t,0xd8cbef,1.75);this.float(t,'SHADOW MEND · 10% GUARD','info');}this.vfxGlyph(t,0xc8b4dc,.62);this.vfxSpiral(t,0x8c6ca3,.55);break;
-   case'discSolace':{const hit=this.damage(c,t,a.value,'Solace');if(hit){this.vfxDisciplineStarBolt(c,t,{penance:false,solace:true});this.healAtonements(c,a.atonementHeal||132,'Solace Atonement');this.gainMana(c,7+(talentRank(c.cls,'disc_solace')||0)*2);this.vfxNova(t,0xffeeb0,1.05,9);this.float(c,'SOLACE · MANA','heal');}break;}
+   case'discSolace':{const hit=this.damage(c,t,a.value,'Solace');if(hit){this.vfxDisciplineStarBolt(c,t,{penance:false,solace:true});this.healAtonements(c,a.atonementHeal||132,'Solace Atonement');this.gainMana(c,7+(unitTalentRank(c,'disc_solace')||0)*2);this.vfxNova(t,0xffeeb0,1.05,9);this.float(c,'SOLACE · MANA','heal');}break;}
    case'painSuppression':t.effects=t.effects.filter(e=>e.type!=='painSuppression'&&!(e.type==='defensive'&&e.label==='Pain Suppression'));t.effect('painSuppression',5,{source:c,label:'Pain Suppression'});t.effect('defensive',5,{reduction:.60,source:c,label:'Pain Suppression'});this.shieldBubble(t,0xe3dcff,5);this.vfxGlyph(t,COLORS.discipline,1.1);this.vfxRing(t,0xffe99a,2.7);this.vfxNova(t,0xd8c8ff,1.8,16);this.vfxPainSuppression(t,5);this.float(t,'PAIN SUPPRESSION · 60%','info');break;
-   case'ultimateRadiance':{const rank=talentRank(c.cls,'disc_radiance')||0;const amount=Math.round(a.value*(1+rank*.06));const allies=this.units.filter(u=>u.team===c.team&&u.alive);allies.forEach((u,i)=>{this.heal(c,u,amount,'Ultimate Radiance');this.applyAtonement(c,u,a.atonementDuration||10);this.vfxNova(u,i%2?0xffe89a:0xdad5ff,1.4,12);});c.effects=c.effects.filter(e=>e.type!=='radiantPenanceProc');c.effect('radiantPenanceProc',12,{stacks:1,damageBonus:.15,atonementBonus:.15,speedBonus:.30});this.vfxRing(c,COLORS.discipline,4.2);this.vfxGlyph(c,COLORS.discipline,1.35);this.vfxNova(c,0xffffff,2.4,20);this.float(c,'RADIANT PENANCE READY','heal');break;}
+   case'ultimateRadiance':{const rank=unitTalentRank(c,'disc_radiance')||0;const amount=Math.round(a.value*(1+rank*.06));const allies=this.units.filter(u=>u.team===c.team&&u.alive);allies.forEach((u,i)=>{this.heal(c,u,amount,'Ultimate Radiance');this.applyAtonement(c,u,a.atonementDuration||10);this.vfxNova(u,i%2?0xffe89a:0xdad5ff,1.4,12);});c.effects=c.effects.filter(e=>e.type!=='radiantPenanceProc');c.effect('radiantPenanceProc',12,{stacks:1,damageBonus:.15,atonementBonus:.15,speedBonus:.30});this.vfxRing(c,COLORS.discipline,4.2);this.vfxGlyph(c,COLORS.discipline,1.35);this.vfxNova(c,0xffffff,2.4,20);this.float(c,'RADIANT PENANCE READY','heal');break;}
    case'discFear':this.units.filter(u=>u.team!==c.team&&u.alive&&dist(c,u)<=8&&this.arena.los(c,u)).forEach(u=>{this.applyFear(u,a.value||4);const fe=u.has('fear');if(fe){fe.source=c;fe.breakFromDots=true;}this.vfxGlyph(u,0xdccfff,.65);this.vfxSpiral(u,0x9275b7,.75);});this.vfxRing(c,COLORS.discipline,3.8);this.float(c,'PSYCHIC SCREAM','info');break;
    case'discFade':c.effect('discFade',4,{reduction:.30,speed:1.25});c.effect('defensive',4,{reduction:.30,source:c,label:'Fade'});this.vfxGlyph(c,COLORS.discipline,.9);this.vfxRing(c,0xffffff,2.3);this.vfxNova(c,0xd8d7ff,1.45,12);this.float(c,'FADE','info');break;
    case'heal':{let amount=a.value;const renewal=c.has('renewalVerdant');if(a.name==='Verdant Mend'&&renewal){amount*=2.5;c.effects=c.effects.filter(e=>e!==renewal);this.float(c,'RENEWAL-EMPOWERED VERDANT MEND · +150%','heal');this.vfxGlyph(c,COLORS.heal,.9);this.vfxNova(t,COLORS.heal,1.7,14);}this.heal(c,t,amount,a.name);this.healBolt(c,t);break;}
@@ -6335,7 +7229,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
    case'paladinGuard':c.effect('defensive',6,{reduction:.30});this.shieldBubble(c,COLORS.holy,6);this.vfxOrbit(c,0xffde78,1.0);this.float(c,'DIVINE PROTECTION · 6s','info');break;
    case'paladinStun':if(this.reflectControl(c,t,a.name,x=>{this.applyStun(x,a.value||4.5);this.vfxGlyph(x,COLORS.holy,.78);this.vfxRing(x,COLORS.holy,1.85);this.float(x,'HAMMER — REFLECTED','info');}))break;this.applyStun(t,a.value||4.5);this.vfxGlyph(t,COLORS.holy,.78);this.vfxRing(t,COLORS.holy,1.85);this.float(t,'HAMMER OF JUSTICE','info');break;
    case'paladinSteed':c.effects=c.effects.filter(e=>e.type!=='divineSteed');c.effect('divineSteed',3,{speed:1.65});this.vfxDivineSteed(c,3);this.vfxRing(c,COLORS.holy,2.45);this.vfxGlyph(c,COLORS.holy,.78);this.float(c,'DIVINE STEED','info');break;
-   case'mortalSwing':{const emp=c.has('empoweredSwing'),wb=c.has('warbreakerReady'),sharpen=c.has('sharpenBladeReady');const wbMult=wb?1.30:1;let hit=false;if(wb){c.effects=c.effects.filter(e=>e!==wb);this.float(c,'WARBREAKER · NEXT SWING CONSUMED','info');this.vfxGlyph(c,COLORS.warrior,.72);}if(emp){const talentBonus=(talentRank(c.cls,'war_pummel_chain')||0)*.02;const v=a.value*(1.30+talentBonus)*wbMult*mult;hit=this.damage(c,t,v,'Mortal Swing');this.vfxKickArc(t,COLORS.warrior);this.vfxNova(t,COLORS.warrior,1.15,8);c.effects=c.effects.filter(e=>e!==emp);this.float(c,'PUMMEL EMPOWERED · +30%','info');}else{hit=this.damage(c,t,a.value*wbMult*mult,'Mortal Swing');this.vfxKickArc(t,COLORS.warrior);}if(hit&&sharpen){c.effects=c.effects.filter(e=>e!==sharpen);t.effects=t.effects.filter(e=>e.type!=='sharpenedWound');t.effect('sharpenedWound',3,{source:c,reduction:.40});c.effects=c.effects.filter(e=>e.type!=='sharpenRenewal');c.effect('sharpenRenewal',3.05,{tick:.05,interval:1,ticks:3});this.vfxGlyph(t,0xf04479,.78);this.vfxRing(t,0xd72861,1.7);this.float(t,'SHARPENED WOUND · HEALING -40%','error');this.float(c,'SHARPEN RENEWAL · 9%','heal');}if(hit&&wb){c.effects=c.effects.filter(e=>e.type!=='slicingWinds');c.effect('slicingWinds',1.02,{tick:.08,interval:.30,ticks:3,target:t,value:a.value*.60*mult,slashIndex:0});this.float(c,'SLICING WINDS ×3 · 60%','info');}break;}
+   case'mortalSwing':{const emp=c.has('empoweredSwing'),wb=c.has('warbreakerReady'),sharpen=c.has('sharpenBladeReady');const wbMult=wb?1.30:1;let hit=false;if(wb){c.effects=c.effects.filter(e=>e!==wb);this.float(c,'WARBREAKER · NEXT SWING CONSUMED','info');this.vfxGlyph(c,COLORS.warrior,.72);}if(emp){const talentBonus=(unitTalentRank(c,'war_pummel_chain')||0)*.02;const v=a.value*(1.30+talentBonus)*wbMult*mult;hit=this.damage(c,t,v,'Mortal Swing');this.vfxKickArc(t,COLORS.warrior);this.vfxNova(t,COLORS.warrior,1.15,8);c.effects=c.effects.filter(e=>e!==emp);this.float(c,'PUMMEL EMPOWERED · +30%','info');}else{hit=this.damage(c,t,a.value*wbMult*mult,'Mortal Swing');this.vfxKickArc(t,COLORS.warrior);}if(hit&&sharpen){c.effects=c.effects.filter(e=>e!==sharpen);t.effects=t.effects.filter(e=>e.type!=='sharpenedWound');t.effect('sharpenedWound',3,{source:c,reduction:.40});c.effects=c.effects.filter(e=>e.type!=='sharpenRenewal');c.effect('sharpenRenewal',3.05,{tick:.05,interval:1,ticks:3});this.vfxGlyph(t,0xf04479,.78);this.vfxRing(t,0xd72861,1.7);this.float(t,'SHARPENED WOUND · HEALING -40%','error');this.float(c,'SHARPEN RENEWAL · 9%','heal');}if(hit&&wb){c.effects=c.effects.filter(e=>e.type!=='slicingWinds');c.effect('slicingWinds',1.02,{tick:.08,interval:.30,ticks:3,target:t,value:a.value*.60*mult,slashIndex:0});this.float(c,'SLICING WINDS ×3 · 60%','info');}break;}
    case'charge':{this.moveAdjacent(c,t,true);this.vfxTrail(c,COLORS.warrior);const holdRank=unitTalentRank(c,'war_hold_the_line');if(holdRank>0){c.effects=c.effects.filter(e=>e.type!=='holdTheLine');c.effect('holdTheLine',3,{reduction:holdRank*.02});this.vfxGlyph(c,COLORS.warrior,.5);this.float(c,`HOLD THE LINE · ${holdRank*2}% WALL`,'info');}const hit=this.damage(c,t,a.value*mult,'Charge');if(hit){this.applyRoot(t,1.5);t.effect('slow',4,{pct:.45,source:c,label:'Charge Snare'});this.vfxRing(t,COLORS.warrior,1.7);this.float(t,'ROOTED → HAMSTRUNG','info');}this.float(c,'CHARGE!','info');break;}
    case'rend':{const hit=this.damage(c,t,a.value*mult,'Rend');if(hit){const bleed=t.effect('bleed',9,{value:Math.round(33*mult),source:c,interval:1,label:'Rend'});bleed.tick=1;this.vfxAfflictionApply(t,COLORS.warrior,'torment');this.float(t,'REND','info');if(Math.random()<.30){c.effect('gushingWoundReady',10);c.cds[2]=0;this.float(c,'GUSHING WOUND READY!','info');this.vfxGlyph(c,0xff284f,.82);this.vfxOrbit(c,0xff284f,.86);this.audio.play('proc');}}break;}    case'gushingWound':{c.effects=c.effects.filter(e=>e.type!=='gushingWoundReady');const hit=this.damage(c,t,a.value*mult,'Gushing Wound');if(hit){let bleed=t.has('bleed');if(!bleed)bleed=t.effect('bleed',6,{value:Math.round(26.4*mult),source:c,interval:.5,label:'Gushing Wound'});bleed.time=Math.max(bleed.time,6);bleed.value=Math.round(26.4*mult);bleed.source=c;bleed.interval=.5;bleed.tick=Math.min(bleed.tick||.5,.14);bleed.label='Gushing Wound';this.vfxAfflictionApply(t,0xff284f,'torment');this.vfxNova(t,0xff2548,1.7,14);this.vfxSpiral(t,0xb70d31,.9);this.float(t,'GUSHING WOUND!','error');this.audio.play('proc');}break;}
    case'pummel':{const hit=this.damage(c,t,a.value*mult,'Pummel');if(hit)this.vfxKickArc(t,COLORS.warrior);if(t.cast){if(t.cast.uninterruptible){this.float(t,'UNINTERRUPTIBLE','info');this.vfxGlyph(t,COLORS.wind,.58);}else if(t.has('interruptWard')){this.float(t,'INTERRUPT IMMUNE','info');this.vfxGlyph(t,COLORS.soul,.55);}else{const school=t.cast.school;t.cast=null;t.effect('lock_'+school,3);c.stats.interrupts++;c.effect('empoweredSwing',12,{stacks:1,pct:.30});this.float(t,'PUMMELED · SCHOOL LOCKED 3s','error');this.float(c,'MORTAL SWING +30% READY','info');this.vfxRing(t,COLORS.warrior,2.2);this.vfxGlyph(c,COLORS.warrior,.7);this.audio.play('interrupt');this.log(c.name+' pummeled '+t.name+' and readies one +30% Mortal Swing.');}}else if(c===this.player){this.message('Target is not casting');}break;}
@@ -6374,7 +7268,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
   if(c&&c.cls==='soul')out*=.67068;/* Soulweaver overall damage reduced by another 10%. */
   if(c&&c.cls==='disc')out*=1.30;/* v197 Discipline damage tuning */
   if(c&&c.cls==='storm')out*=.805;/* v195: 15% buff from the v194 tuned Stormwarden damage level */
-  if(c&&c.has&&c.has('darkArchangel'))out*=1.30;if(c&&c.has&&c.has('defensive')?.damagePenalty)out*=1-c.has('defensive').damagePenalty;if(c&&c.has&&c.has('avatar'))out*=1.18;
+  if(c&&c.has&&c.has('darkArchangel'))out*=1.30;if(c&&c.has&&c.has('defensive')?.damagePenalty)out*=1-c.has('defensive').damagePenalty;if(c&&c.has&&c.has('crimsonVial'))out*=.75;if(c&&c.has&&c.has('avatar'))out*=1.18;
   if(c&&c.has&&c.has('combustion')&&Math.random()<.80){out*=1.5;this.float(c,'COMBUSTION CRIT','info');}
   if(c&&c.cls==='storm'&&t&&['Arc Spark','Forked Current'].includes(label)){const rod=t.has?.('lightningRod');if(rod&&rod.source===c)out*=1.20;}
   if(c&&c.has&&c.has('totemMastery'))out*=1.03;if(c&&c.has&&c.has('avengingWings'))out*=1+Number(c.has('avengingWings').damageBonus||0);if(c&&c.cls==='shadow'&&label!=='Night Slash')out*=1.10;if(t&&t.has&&t.has('vendetta')&&t.has('vendetta').source===c){/* Vendetta accelerates Shadowblade bleeds/poisons only; no flat damage multiplier. */}
@@ -6434,10 +7328,10 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
  if(c?.cls==='sage'&&/Blooming Echo|Rejuvenate|Healing over Time/i.test(String(label||'')))v*=1+unitTalentRank(c,'sage_verdant_tempo')*.03;
  if(c?.cls==='soul'&&/Essence Siphon/i.test(String(label||'')))v*=1+unitTalentRank(c,'drainrite')*.04;
  if(c?.cls==='pala'&&/Holy Shock|Divine Toll|Light of Dawn/i.test(String(label||'')))v*=1+unitTalentRank(c,'radiance')*.04;
- if(c&&['sage','pala','disc'].includes(c.cls))v*=1.15;if(this.mode==='3v3'&&c&&['sage','pala','disc'].includes(c.cls))v*=1.20;if(c&&c.has&&c.has('ghanir')&&['Blooming Echo','Rejuvenate'].includes(label))v*=1.50;if(c&&c.cls==='pala')v*=1.16;if(c&&c.cls==='sage')v*=1.045;if(t&&t.has&&t.has('ironbark'))v*=1.20;if(c&&c.has&&c.has('totemMastery'))v*=1.03;if(c&&c.has('avengingWings'))v*=1.20;if(!/Holy Shock/i.test(String(label||''))&&Math.random()<this.criticalStrikeChance(c)){v*=1.5;this.float(t,'CRITICAL HEAL!','heal');}if(this.isInCombat(t))this.enterCombat(c,t);t.receiveHeal(c,v,label);
+ if(c&&['sage','pala','disc'].includes(c.cls))v*=1.15;if(this.mode==='3v3'&&c&&['sage','pala','disc'].includes(c.cls))v*=1.20;if(c&&c.has&&c.has('ghanir')&&['Blooming Echo','Rejuvenate'].includes(label))v*=1.50;if(c&&c.cls==='pala')v*=1.16;if(c&&c.cls==='sage')v*=1.045;if(t&&t.has&&t.has('ironbark'))v*=1.20;if(c&&c.has&&c.has('totemMastery'))v*=1.03;if(c&&c.has('avengingWings'))v*=1.20;if(!/Holy Shock/i.test(String(label||''))&&Math.random()<this.criticalStrikeChance(c)){v*=1.5;this.float(t,'CRITICAL HEAL!','heal');}if(this.isInCombat(t))this.enterCombat(c);t.receiveHeal(c,v,label);
 }
  supportAttackTarget(u){if(u===this.player)return null;const allies=this.units.filter(a=>a.team===u.team&&a.alive);if(allies.some(a=>a.hp/a.maxHp<.86))return null;return this.units.filter(e=>e.team!==u.team&&e.alive&&!isUntargetableStealth(e,u)&&!e.has('poly')&&!e.has('sleep')&&!e.has('blind')&&!e.has('windIncap')).sort((a,b)=>dist(u,a)-dist(u,b))[0]||null;}
- manualSupportAttack(u,t,show=false){if(!u||!t||!u.alive||!t.alive||t.team===u.team||!['pala','sage'].includes(u.cls))return false;if(u.basicAttackCd>0){if(show)this.message(`${u.cls==='pala'?'Righteous Strike':'Verdant Bolt'} is ready in ${u.basicAttackCd.toFixed(1)}s`);return false;}if(u.cast||u.gcd>0||u.has('iceBlock')||u.has('stun')||u.has('fear')||u.has('poly')||u.has('sleep')||u.has('blind')||u.has('windIncap')){if(show)this.message('You cannot attack right now');return false;}if(!this.arena.los(u,t)){if(show)this.message('Line of sight blocked');return false;}const range=u.cls==='pala'?3.35:24;if(dist(u,t)>range){if(show)this.message(`${u.cls==='pala'?'Righteous Strike':'Verdant Bolt'} requires ${u.cls==='pala'?'melee range':'24m range'}`);return false;}u.basicAttackCd=1;this.enterCombat(u,t);this.animateAction(u,{type:'damage',school:u.cls==='pala'?'holy':'heal'});if(u.cls==='pala'){this.vfxGlyph(t,COLORS.holy,.4);this.vfxBurst(t,COLORS.holy,.34);this.damage(u,t,66,'Righteous Strike');this.audio.play('holy');}else{this.projectile(u,t,'heal',()=>this.damage(u,t,59,'Verdant Bolt'));this.audio.play('heal');}return true;}
+ manualSupportAttack(u,t,show=false){if(!u||!t||!u.alive||!t.alive||t.team===u.team||!['pala','sage'].includes(u.cls))return false;if(u.basicAttackCd>0){if(show)this.message(`${u.cls==='pala'?'Righteous Strike':'Verdant Bolt'} is ready in ${u.basicAttackCd.toFixed(1)}s`);return false;}if(u.cast||u.gcd>0||u.has('iceBlock')||u.has('stun')||u.has('fear')||u.has('poly')||u.has('sleep')||u.has('blind')||u.has('windIncap')){if(show)this.message('You cannot attack right now');return false;}if(!this.arena.los(u,t)){if(show)this.message('Line of sight blocked');return false;}const range=u.cls==='pala'?3.85:24;if(dist(u,t)>range){if(show)this.message(`${u.cls==='pala'?'Righteous Strike':'Verdant Bolt'} requires ${u.cls==='pala'?'melee range':'24m range'}`);return false;}u.mounted=false;if(u.mountVisual)u.mountVisual.visible=false;u.basicAttackCd=1;this.enterCombat(u,t);const basic=u.cls==='pala'?{name:'Righteous Strike',type:'paladinMelee',school:'holy'}:{name:'Verdant Bolt',type:'damage',school:'heal'};this.animateAction(u,basic);if(u.cls==='pala'){this.vfxMeleeSignature(u,basic,t);this.vfxBurst(t,COLORS.holy,.34);this.damage(u,t,66,'Righteous Strike');this.audio.play('holy');}else{this.projectile(u,t,'heal',()=>this.damage(u,t,59,'Verdant Bolt'));this.audio.play('heal');}return true;}
  updateSupportAttacks(){for(const u of this.units){if(u===this.player||!u.alive||!['pala','sage'].includes(u.cls))continue;const t=this.supportAttackTarget(u);if(t)this.manualSupportAttack(u,t,false);}}
  vfxEvasion(u,duration=1.5){
   if(!u||!this.scene)return;if(u.evasionFx?.obj)u.evasionFx.obj.dead=true;
@@ -6456,6 +7350,7 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
  }
  vfxAvatarForm(u,duration=10){
   if(!u||!this.scene)return;
+  u.restoreAvatarMaterials?.();
   const holder=new THREE.Group();this.scene.add(holder);
   const originals=[];
   u.modelGroup?.traverse?.(node=>{
@@ -6471,13 +7366,15 @@ validate(caster,a,target,show,opts={}){if(!caster.alive)return false;if(caster.h
    });
   });
   let restored=false;
-  const restore=()=>{if(restored)return;restored=true;originals.forEach(({node,previous,temporary})=>{node.material=previous;temporary.forEach(material=>material!==previous&&material?.dispose?.());});};
+  const restore=()=>{if(restored)return;restored=true;originals.forEach(({node,previous,temporary})=>{node.material=previous;temporary.forEach(material=>material!==previous&&material?.dispose?.());});if(u.restoreAvatarMaterials===restore)u.restoreAvatarMaterials=null;};
+  u.restoreAvatarMaterials=restore;
+  holder.userData.aetherOnDispose=restore;
   this.effects.push({obj:holder,life:duration+.1,follow:u,update:()=>{if(!u.alive||!u.has('avatar')){restore();holder.dead=true;}}});
  }
  vfxVolcanicEruption(target){if(!target||!this.scene)return;const group=new THREE.Group();const lava=new THREE.MeshStandardMaterial({color:0x5b170d,emissive:0xff4d18,emissiveIntensity:1.5,roughness:.72});const glow=new THREE.MeshBasicMaterial({color:0xff9b35,transparent:true,opacity:.82,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide});const crater=new THREE.Mesh(new THREE.RingGeometry(.55,2.25,42),glow.clone());crater.rotation.x=-Math.PI/2;crater.position.y=.055;group.add(crater);for(let i=0;i<7;i++){const shard=new THREE.Mesh(new THREE.ConeGeometry(.13+(i%3)*.05,.9+(i%4)*.28,6),lava.clone());const a=i/7*Math.PI*2,r=.28+(i%3)*.26;shard.position.set(Math.cos(a)*r,.1,Math.sin(a)*r);shard.rotation.z=(Math.random()-.5)*.35;group.add(shard);}for(let i=0;i<22;i++){const mote=new THREE.Mesh(new THREE.OctahedronGeometry(.045+(i%4)*.018,0),glow.clone());mote.userData.seed=i;group.add(mote);}group.position.set(target.x,0,target.z);this.scene.add(group);let elapsed=0;this.effects.push({obj:group,life:1.15,update:dt=>{elapsed+=dt;group.position.x=target.x;group.position.z=target.z;crater.scale.setScalar(1+elapsed*.55);crater.material.opacity=Math.max(0,.82-elapsed*.58);group.children.slice(1,8).forEach((shard,i)=>{shard.position.y=Math.min(.78+i*.04,shard.position.y+dt*(2.9+i*.17));shard.scale.y=1+Math.sin(elapsed*9+i)*.22;});group.children.slice(8).forEach((mote,i)=>{const a=i*.91+elapsed*(3.5+(i%4)*.3),r=.35+(i%7)*.18;mote.position.set(Math.cos(a)*r,.15+elapsed*(2.1+(i%5)*.35),Math.sin(a)*r);mote.material.opacity=Math.max(0,.9-elapsed*.68);});}});}
  vfxTouchOfDeathMark(target,duration=5){if(!target||!this.scene)return;const holder=new THREE.Group(),face=new THREE.Group();const red=new THREE.MeshBasicMaterial({color:0xff204d,transparent:true,opacity:.92,depthWrite:false,blending:THREE.AdditiveBlending});const dark=new THREE.MeshBasicMaterial({color:0x5b0018,transparent:true,opacity:.38,side:THREE.DoubleSide,depthWrite:false});const ring=new THREE.Mesh(new THREE.TorusGeometry(.62,.065,8,30),red);face.add(ring);const halo=new THREE.Mesh(new THREE.RingGeometry(.72,.96,32),dark);face.add(halo);const blade=new THREE.Mesh(new THREE.ConeGeometry(.23,.90,3),red);blade.rotation.z=Math.PI;blade.position.y=-.05;face.add(blade);const wingL=new THREE.Mesh(new THREE.ConeGeometry(.15,.54,3),red),wingR=wingL.clone();wingL.rotation.z=-1.1;wingR.rotation.z=1.1;wingL.position.set(-.30,.12,0);wingR.position.set(.30,.12,0);face.add(wingL,wingR);holder.add(face);this.scene.add(holder);let elapsed=0;this.effects.push({obj:holder,life:duration,update:dt=>{elapsed+=dt;if(!target.alive){holder.visible=false;return;}holder.position.set(target.x,3.20+Math.sin(elapsed*5)*.10,target.z);face.quaternion.copy(this.camera.quaternion);const pulse=1+Math.sin(elapsed*8)*.08;face.scale.setScalar(pulse);ring.rotation.z+=dt*.75;halo.material.opacity=.20+Math.sin(elapsed*6)*.10;}});}
  vfxWhirlingDragonPunch(c,duration=.85){if(!c||!this.scene)return;const holder=new THREE.Group();holder.position.set(c.x,.08,c.z);const mat=new THREE.MeshBasicMaterial({color:0x67ffb0,transparent:true,opacity:.72,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});const rings=[];for(let i=0;i<5;i++){const ring=new THREE.Mesh(new THREE.TorusGeometry(1.0+i*.23,.055,8,38),mat.clone());ring.rotation.x=Math.PI/2;ring.position.y=i*.38;ring.scale.setScalar(.72+i*.08);holder.add(ring);rings.push(ring);}const motes=[];for(let i=0;i<18;i++){const mote=new THREE.Mesh(new THREE.OctahedronGeometry(.055+(i%3)*.016,0),mat.clone());holder.add(mote);motes.push({mote,seed:i});}this.scene.add(holder);let elapsed=0;this.effects.push({obj:holder,life:duration,update:dt=>{elapsed+=dt;holder.position.x=c.x;holder.position.z=c.z;holder.rotation.y+=dt*7;rings.forEach((ring,i)=>{ring.position.y=.10+i*.38+elapsed*1.05;ring.scale.setScalar(.72+i*.08+elapsed*.38);ring.material.opacity=Math.max(0,.78-elapsed*.70);});motes.forEach(({mote,seed})=>{const a=elapsed*10+seed*.88,r=.55+(seed%6)*.19;mote.position.set(Math.cos(a)*r,.15+elapsed*3.2+(seed%5)*.16,Math.sin(a)*r);mote.rotation.y+=dt*8;mote.material.opacity=Math.max(0,.86-elapsed*.72);});}});}
- dropMeteor(c,x,z){const holder=new THREE.Group();const warning=new THREE.Mesh(new THREE.RingGeometry(.5,5.0,40),new THREE.MeshBasicMaterial({color:0xff5127,transparent:true,opacity:.62,side:THREE.DoubleSide}));warning.rotation.x=-Math.PI/2;warning.position.set(x,.06,z);holder.add(warning);const rock=new THREE.Mesh(new THREE.SphereGeometry(.62,12,10),new THREE.MeshStandardMaterial({color:0x402018,emissive:0xff5522,emissiveIntensity:1.1,roughness:.7}));rock.position.set(x+1.2,16,z-.8);holder.add(rock);const light=new THREE.PointLight(0xff5522,26,17);light.position.copy(rock.position);holder.add(light);this.scene.add(holder);let elapsed=0;this.effects.push({obj:holder,life:1.04,update:dt=>{elapsed+=dt;warning.material.opacity=.32+Math.abs(Math.sin(elapsed*14))*.3;warning.scale.multiplyScalar(1+dt*.22);rock.position.y-=dt*16.2;rock.position.x-=dt*1.2;rock.position.z+=dt*.8;light.position.copy(rock.position);if(elapsed>=.98&&!holder.userData.landed){holder.userData.landed=true;this.vfxRing({x,z},COLORS.fire,7);this.vfxNova({x,z},COLORS.fire,3.5,25);this.vfxGlyph({x,z},0xffb24d,.8);this.audio.play('meteorImpact',{x,z,game:this});this.shake=.24;c.effects=c.effects.filter(e=>e.type!=='meteorLance');c.effect('meteorLance',9999,{stacks:1,pct:.15});c.cds[1]=0;this.float(c,'METEOR LANCE ×1 READY · +15%','info');this.vfxOrbit(c,0xffd067,1.2);this.units.filter(u=>u.team!==c.team&&u.alive&&Math.hypot(u.x-x,u.z-z)<=5.2).forEach(u=>{const hit=this.damage(c,u,205,'Meteorfall');if(hit){u.effect('burn',5,{value:17,source:c});this.float(u,'BURNING','error');}});}}});}
+ dropMeteor(c,x,z){this.scheduleGroundImpact('meteor',c,x,z,.98,{radius:5.2});}
  gainMana(c,amount){if(!c||c.info.resource!=='mana')return;const before=c.resource;c.resource=clamp(c.resource+amount,0,c.maxResource);const gained=Math.round(c.resource-before);if(gained>0&&c===this.player)this.float(c,`+${gained} MANA`,'heal');}
  recordFuryStep(c,step){let seq=c.has('furySequence');if(!seq)seq=c.effect('furySequence',9,{steps:{}});seq.time=9;seq.steps=seq.steps||{};seq.steps[step]=true;if(seq.steps.dawn&&seq.steps.cyclone){c.effects=c.effects.filter(e=>e.type!=='furySequence');c.effect('furyReady',10);c.cds[2]=0;this.float(c,'FISTS OF FURY READY!','info');this.vfxOrbit(c,0xffe39a,1.25);this.audio.play('proc');}}
  applyWindboundSnare(c,target,duration,pct,label){if(!target||!target.alive||target.has('windboundSnareIcd'))return false;target.effect('slow',duration,{pct,source:c,label:'Windbound'});target.effect('windboundSnareIcd',12,{source:c});if(label)this.float(target,label,'info');return true;}
@@ -6585,7 +7482,7 @@ vfxGhanir(u,dur=7){
 }
 vfxIronbark(u,dur=6){if($('#reducedFX').checked)return;const group=new THREE.Group();const barkMat=new THREE.MeshBasicMaterial({color:0x6f4a28,transparent:true,opacity:.62,side:THREE.DoubleSide,depthWrite:false});const leafMat=new THREE.MeshBasicMaterial({color:0x7cff9d,transparent:true,opacity:.78,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});for(let i=0;i<7;i++){const slab=new THREE.Mesh(new THREE.BoxGeometry(.16,.86,.055),barkMat);const a=i*Math.PI*2/7;slab.position.set(Math.cos(a)*.68,.62,Math.sin(a)*.68);slab.rotation.y=-a;group.add(slab);}const ring=new THREE.Mesh(new THREE.TorusGeometry(.82,.022,7,42),leafMat);ring.rotation.x=Math.PI/2;ring.position.y=.12;group.add(ring);for(let i=0;i<10;i++){const leaf=new THREE.Mesh(new THREE.ConeGeometry(.035,.18,5),leafMat);leaf.userData.phase=i*.6;group.add(leaf);}this.scene.add(group);let time=0;this.effects.push({obj:group,life:dur,follow:u,update:dt=>{time+=dt;group.position.set(u.x,0,u.z);ring.rotation.z+=dt*2.4;group.children.slice(8).forEach((leaf,i)=>{const a=time*(1.9+i*.03)+i*Math.PI/5;leaf.position.set(Math.cos(a)*(.86+.06*Math.sin(time+i)),.75+.32*Math.sin(time*2+i),Math.sin(a)*(.86+.06*Math.sin(time+i)));leaf.rotation.z=-a;leaf.material.opacity=.52+.26*Math.sin(time*4+i);});barkMat.opacity=.42+.14*Math.sin(time*5);}});}
   applyShield(c,t,v,dur){if(c?.has?.('totemMastery'))v*=1.05;if(c?.cls==='soul')v*=1+unitTalentRank(c,'soul_barrier_rites')*.03;if(c?.cls==='pala')v*=1+unitTalentRank(c,'guardianlight')*.04;v=Math.round(v*(1-this.dampening));t.shield=Math.max(t.shield,v);t.effect('shield',dur,{value:v});c.stats.absorb+=v;this.float(t,`+${v} WARD`,'heal');this.shieldBubble(t,COLORS.shield,dur);}
- applyCC(t,type,duration,label,category){if(t.has('iceBlock')||(t.has('freedom')&&['root','slow'].includes(type))){this.float(t,'IMMUNE','info');return false;}if(t.has('bladestorm')&&['stun','furyStun','root','slow'].includes(type)){this.float(t,'BLADESTORM IMMUNE','info');return false;}let now=this.time,dr=t.dr[category];if(now>dr.until){dr.level=0;}if(dr.level>=3){this.float(t,'IMMUNE','info');return false;}const scales=[1,.5,.25];duration*=scales[dr.level];dr.level++;dr.until=now+BALANCE.ccDRReset;if((type==='stun'||type==='furyStun'||type==='fear'||type==='poly'||type==='sleep'||type==='gouge'||type==='blind'||type==='windIncap')&&t.cast)t.cast=null;t.effect(type,duration);this.float(t,`${label} ${duration.toFixed(1)}s`,'info');return true;}
+ applyCC(t,type,duration,label,category){if(t.has('iceBlock')||(t.has('freedom')&&['root','slow'].includes(type))){this.float(t,'IMMUNE','info');return false;}if(t.has('bladestorm')&&['stun','furyStun','root','slow','fear','poly'].includes(type)){this.float(t,'BLADESTORM IMMUNE','info');return false;}let now=this.time,dr=t.dr[category];if(now>dr.until){dr.level=0;}if(dr.level>=3){this.float(t,'IMMUNE','info');return false;}const scales=[1,.5,.25];duration*=scales[dr.level];dr.level++;dr.until=now+BALANCE.ccDRReset;if((type==='stun'||type==='furyStun'||type==='fear'||type==='poly'||type==='sleep'||type==='gouge'||type==='blind'||type==='windIncap')&&t.cast)t.cast=null;t.effect(type,duration);this.float(t,`${label} ${duration.toFixed(1)}s`,'info');return true;}
  applyStun(t,duration){this.applyCC(t,'stun',duration,'STUN','stun');}
  applyFear(t,duration){this.applyCC(t,'fear',duration,'FEAR','fear');}
  applyPoly(t,duration){this.applyCC(t,'poly',duration,'POLY','incap');}
@@ -6595,7 +7492,7 @@ vfxIronbark(u,dur=6){if($('#reducedFX').checked)return;const group=new THREE.Gro
  applyWindIncap(t,duration){this.applyCC(t,'windIncap',duration,'INCAPACITATE','incap');}
  applyRoot(t,duration){return this.applyCC(t,'root',duration,'ROOT','root');}  applySnareDR(t,duration,pct,label='SNARE'){const ok=this.applyCC(t,'slow',duration,label,'root');if(ok){const e=t.has('slow');if(e)e.pct=pct;}return ok;}
  isPeriodicDamageLabel(label){const s=String(label||'').toLowerCase();return ['burn','poison','bleed','rend','garrote','internal bleeding','soul scar','creeping torment','unstable affliction','living bomb','flame shock','ember trail','karma','fire shield burn'].some(x=>s.includes(x));}
- breakControl(t,type,label){const e=t.has(type);if(!e)return;t.effects=t.effects.filter(x=>x!==e);this.float(t,label,'error');this.log(`${t.name}: ${label}.`);}
+ breakControl(t,type,label){const e=t.has(type);if(!e)return;e.time=0;t._effectCache?.clear();t.effects=t.effects.filter(x=>x!==e);this.float(t,label,'error');this.log(`${t.name}: ${label}.`);}
  dash(c,len,back=false,forwardWhenIdle=false){let v=c===this.player?this.movementVector():{x:0,z:0},dx=v.x,dz=v.z;if(!dx&&!dz){if(c===this.player&&forwardWhenIdle){dx=-Math.sin(this.cameraRig.yaw);dz=-Math.cos(this.cameraRig.yaw);}else{const e=this.closestEnemy(c);if(e){dx=c.x-e.x;dz=c.z-e.z;if(back){dx=-dx;dz=-dz;}}else{dx=-Math.sin(this.cameraRig.yaw);dz=-Math.cos(this.cameraRig.yaw);}}}let l=Math.hypot(dx,dz)||1;c.x+=dx/l*len;c.z+=dz/l*len;this.arena.constrain(c);this.vfxTrail(c,c.cls==='flame'?COLORS.fire:COLORS.storm);}
  moveAdjacent(c,t,smooth=false){let sx=c.x,sz=c.z,dx=c.x-t.x,dz=c.z-t.z,l=Math.hypot(dx,dz)||1;c.x=t.x+dx/l*2.5;c.z=t.z+dz/l*2.5;this.arena.constrain(c);if(smooth){const duration=.34;c.dashTween={from:{x:sx,z:sz},to:{x:c.x,z:c.z},left:duration,total:duration};}}
  projectile(c,t,school,onHit){let col=school==='fire'?COLORS.fire:school==='storm'?COLORS.storm:school==='stormbolt'?0x9c63ff:school==='heal'?COLORS.heal:school==='holy'?COLORS.holy:school==='arcane'?0xe0c2ff:COLORS.shadow;const m=new THREE.Mesh(new THREE.SphereGeometry(school==='stormbolt'?.23:.17,8,8),new THREE.MeshBasicMaterial({color:col}));m.position.set(c.x,1.3,c.z);this.scene.add(m);this.effects.push({obj:m,life:1.1,update:dt=>{if(!t.alive){m.dead=true;return;}if(!this.arena.los({x:m.position.x,z:m.position.z},t)){m.dead=true;this.vfxBurst({x:m.position.x,z:m.position.z},0xe15a3c,.48);if(c===this.player)this.message('LINE OF SIGHT — projectile blocked');this.float(t,'BLOCKED','error');return;}let dx=t.x-m.position.x,dz=t.z-m.position.z,l=Math.hypot(dx,dz);if(l<.45){m.dead=true;if(t.has('iceBlock')&&t.team!==c.team){this.float(t,'IMMUNE','info');return;}onHit();this.vfxBurst(t,col,.55);return;}m.position.x+=dx/l*(school==='stormbolt'?28:34)*dt;m.position.z+=dz/l*(school==='stormbolt'?28:34)*dt;}});}
@@ -6629,7 +7526,12 @@ vfxIronbark(u,dur=6){if($('#reducedFX').checked)return;const group=new THREE.Gro
  float(u,text,kind,override){if(text==='VEIL'&&u?.cls==='flame')text=u.has('alterTime')?'ALTER TIME · SAVED':'ALTER TIME · RETURNED';if((kind==='heal'||kind==='info')&&progression.settings?.hideCombatText)return;const v=typeof text==='number'?String(Math.round(text)):text;const d=document.createElement('div');d.className=`floater ${kind}`;d.textContent=override||((kind==='heal'?'+':'-')+v);let p=this.toScreen(u);d.style.left=p.x+'px';d.style.top=p.y+'px';$('#floaters').appendChild(d);setTimeout(()=>d.remove(),1000);}
  toScreen(u){const v=this.screenProjectVector||(this.screenProjectVector=new THREE.Vector3());v.set(u.visualX??u.x,2.8,u.visualZ??u.z).project(this.camera);const point=u._screenPoint||(u._screenPoint={x:0,y:0});point.x=(v.x*.5+.5)*innerWidth;point.y=(-.5*v.y+.5)*innerHeight;return point;}
  message(msg){const el=$('#message');el.textContent=msg;el.style.opacity=1;clearTimeout(this.msgTimer);this.msgTimer=setTimeout(()=>el.style.opacity=0,1000);}
- log(s){this.logs.unshift(`[${fmt(this.time)}] ${s}`);this.logs=this.logs.slice(0,20);}
+ log(s){
+  if(this.queueType==='ranked'&&String(s).startsWith('Ally Scaling: your AI teammate also mirrors')){
+   s=`Ally Scaling: rated AI teammates use the same ${GEAR_SLOTS.length}-slot standard as the enemy team (${this.ratedBotGearLabel()}).`;
+  }
+  this.logs.unshift(`[${fmt(this.time)}] ${s}`);this.logs=this.logs.slice(0,20);
+ }
  abilityStackBadge(unit,ability){if(!unit||!ability)return '';if(ability.name==='Tigereye Brew'){const stacks=windTigereyeStacks(unit);return `<span class="stack-badge brew-stack-badge ${stacks<=0?'empty':''} ${stacks>=6?'full':''}" title="Tigereye Brew stacks: ${stacks} of 6"><strong>${stacks}</strong><small>/6</small></span>`;}if(ability.name==='Penance'&&unit.has('radiantPenanceProc'))return `<span class="stack-badge">✦</span>`;if(unit.has('natureSwiftness')&&['Renewal Tide','Lullaby Bloom'].includes(ability.name))return `<span class="stack-badge">🌿</span>`;return '';}  extraToolkitDisplayOrder(cls){
  const list=AB[cls]||[];
  const force=new Set(cls==='shadow'?['Shiv']:[]);
@@ -6673,7 +7575,7 @@ spawnTotemMasteryVisuals(u,duration=20){
 clearTotemMasteryVisuals(u){
  if(u&&u.totemVisuals){
   this.scene.remove(u.totemVisuals);
-  u.totemVisuals.traverse?.(o=>{if(o.geometry)o.geometry.dispose?.();});
+  this.queueDispose(u.totemVisuals);
   u.totemVisuals=null;
  }
 }
@@ -6703,7 +7605,7 @@ spawnCombustionVisuals(u,duration=8){
  for(let i=0;i<14;i++){const flame=new THREE.Mesh(new THREE.ConeGeometry(.10+Math.random()*.08,.55+Math.random()*.45,7),i%3?mat:gold);const a=(i/14)*Math.PI*2,r=.28+Math.random()*.42;flame.position.set(Math.cos(a)*r,.35+Math.random()*1.35,Math.sin(a)*r);flame.rotation.z=(Math.random()-.5)*.45;flame.userData={a,r,baseY:flame.position.y,phase:Math.random()*6.28};root.add(flame);}
  const aura=new THREE.Mesh(new THREE.RingGeometry(.82,1.08,48),new THREE.MeshBasicMaterial({color:0xff7a25,transparent:true,opacity:.36,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending}));aura.rotation.x=-Math.PI/2;aura.position.y=.04;root.add(aura);root.userData={owner:u,expires:this.time+duration,aura};u.combustionVisuals=root;this.scene.add(root);this.updateCombustionVisuals();
 }
-clearCombustionVisuals(u){if(u&&u.combustionVisuals){this.scene.remove(u.combustionVisuals);u.combustionVisuals.traverse?.(o=>{o.geometry?.dispose?.();});u.combustionVisuals=null;}}
+clearCombustionVisuals(u){if(u&&u.combustionVisuals){this.scene.remove(u.combustionVisuals);this.queueDispose(u.combustionVisuals);u.combustionVisuals=null;}}
 updateCombustionVisuals(){this.units?.forEach(u=>{const root=u.combustionVisuals;if(!root)return;if(!u.alive||!u.has?.('combustion')){this.clearCombustionVisuals(u);return;}root.position.copy(u.mesh.position);root.children.forEach((f,i)=>{if(f.userData?.phase!==undefined){const p=f.userData.phase+this.time*4.2;f.position.y=f.userData.baseY+Math.sin(p)*.09;f.scale.setScalar(.86+.26*Math.sin(p+i));f.rotation.y+=.035;}});if(root.userData.aura)root.userData.aura.rotation.z+=.025;});}
 
 renderActions(){
@@ -6772,7 +7674,7 @@ renderActions(){
  }
  hideAbilityTooltip(){$('#abilityTooltip').classList.add('hidden');}
  renderFrames(){this.resetPerformance();this.applyHudScale();this.applyHudLayout();this.unitFrameElements=[];this.frameInto($('#allyFrames'),this.units.filter(u=>u.team==='ally'&&!u.healingStreamTotem));this.frameInto($('#enemyFrames'),this.units.filter(u=>u.team==='enemy'&&!u.healingStreamTotem));this.enhanceUnitFrames();this.warmMatchRenderer();}
- enhanceUnitFrames(){this.unitFrameElements.forEach(frame=>{const unit=this.units[Number(frame.dataset.unit)];if(!unit)return;const colour=Number(CLASS_INFO[unit.cls]?.colour||0x596579),hex=`#${colour.toString(16).padStart(6,'0')}`,r=(colour>>16)&255,g=(colour>>8)&255,b=colour&255;frame.dataset.class=unit.cls;frame.style.setProperty('--class-frame',hex);frame.style.setProperty('--class-frame-rgb',`${r},${g},${b}`);frame.onpointerdown=event=>{if(this.hudEditMode)return;event.preventDefault();event.stopPropagation();this.target=unit;frame.focus?.({preventScroll:true});};frame.onselectstart=()=>false;});}
+ enhanceUnitFrames(){this.unitFrameElements.forEach(frame=>{const unit=this.units[Number(frame.dataset.unit)];if(!unit)return;const colour=unit.cls==='shadow'?0xf0cf45:Number(CLASS_INFO[unit.cls]?.colour||0x596579),hex=`#${colour.toString(16).padStart(6,'0')}`,r=(colour>>16)&255,g=(colour>>8)&255,b=colour&255;frame.dataset.class=unit.cls;frame.style.setProperty('--class-frame',hex);frame.style.setProperty('--class-frame-rgb',`${r},${g},${b}`);frame.style.setProperty('--frame-hp','100%');frame.onpointerdown=event=>{if(this.hudEditMode)return;event.preventDefault();event.stopPropagation();this.target=unit;frame.focus?.({preventScroll:true});};frame.onselectstart=()=>false;});}
  frameInto(el,units){el.innerHTML=units.map((u,i)=>`<div class="unit-frame glass ${u.team}" data-unit="${this.units.indexOf(u)}">${u.team==='enemy'?`<div class="enemy-utility"><div class="enemy-dr-mini"></div><div class="enemy-medallion" title="Gladiator's Medallion"><span>🏅</span><span class="ready-dot">RDY</span></div></div>`:''}<div class="cc-frame"></div><div class="uf-head"><span class="uf-name">${u.isPlayer&&equippedAchievementTitle()?`<span class="uf-title">${equippedAchievementTitle()}</span>`:''}${u.team==='enemy'?`<span class="arena-slot">E${i+1}</span>`:''}${u.name}</span><span class="uf-class">${classIcon(u.cls,u.info.badge)} ${u.info.short} <span class="role-tag">${u.info.role}</span></span></div><div class="bar"><div class="fill hp"></div><div class="shield-fill"></div><span class="bartext"></span></div><div class="bar"><div class="fill resource"></div></div><div class="effects"></div><div class="mini-cast hidden"><div class="mini-fill"></div><span class="mini-label"></span></div></div>`).join('');el.querySelectorAll('.unit-frame').forEach(f=>{const u=this.units[+f.dataset.unit];u.frameHud={frame:f,hp:f.querySelector('.hp'),shield:f.querySelector('.shield-fill'),bartext:f.querySelector('.bartext'),resource:f.querySelector('.resource'),effects:f.querySelector('.effects'),medallion:f.querySelector('.enemy-medallion'),dr:f.querySelector('.enemy-dr-mini'),cc:f.querySelector('.cc-frame'),cast:f.querySelector('.mini-cast'),castFill:f.querySelector('.mini-fill'),castLabel:f.querySelector('.mini-label')};this.unitFrameElements.push(f);f.onclick=()=>this.target=u;});}
  effectChip(e){const meta=e.label==='Immolate'?EFFECT_META.immolate:effectMeta(e.type), buff=meta.buff||['hot','shield','burst','defensive'].includes(e.type), cc=meta.cc||['poly','stun','silence'].includes(e.type),timer=e.time>600?'':` ${Math.ceil(e.time)}`; return `<span class="eff ${buff?'buff':''} ${cc?'cc':''}">${meta.icon} ${meta.label}${e.stacks?` ×${e.stacks}`:''}${timer}</span>`;}
  visibleFrameCast(u){if(!this.player||!u||!u.cast||u.cast.special==='mount')return null;const a=u.cast.a;if(!a)return null;return u.cast;}
@@ -6781,7 +7683,21 @@ renderActions(){
  ccMarkup(u){const cc=crowdControlState(u); if(!cc) return ''; return `<span class="cc-icon">${cc.icon}</span><span>${cc.label}</span><span class="timer">${cc.time.toFixed(1)}s</span>`;}
  drMarkup(u){if(!u||!u.dr)return '';const rows=[{key:'stun',icon:'⛔',css:'stun',title:'Stun DR reset'},{key:'fear',icon:'😱',css:'incap',title:'Fear DR reset'},{key:'incap',icon:(u.has('gouge')?'👁️':u.has('windIncap')?'💫':u.has('poly')?'🐑':u.has('sleep')?'🌸':'🐑/👁️/💫'),css:'incap',title:'Incapacitate DR reset'},{key:'disorient',icon:'👁️',css:'incap',title:'Disorient DR reset'},{key:'root',icon:'🕸️',css:'root',title:'Root DR reset'}];const visible=rows.map(row=>{const state=u.dr[row.key],remaining=Math.max(0,(state?.until||0)-this.time);if(!state||state.level<=0||remaining<=0)return '';const next=state.level>=3?'IMMUNE':state.level===2?'NEXT 25%':'NEXT 50%';return `<span class="dr-tracker ${row.css}" title="${row.title}">${row.icon} ${next} <span class="dr-time">${remaining.toFixed(1)}s</span></span>`;}).filter(Boolean).join('');return visible?`<span class="dr-stack">${visible}</span>`:'';}
  frameDRMarkup(u){if(!u||!u.dr)return '';const rows=[{key:'stun',icon:'⛔',css:'stun',title:'Stun diminishing returns'},{key:'fear',icon:'😱',css:'incap',title:'Fear diminishing returns'},{key:'incap',icon:'💫',css:'incap',title:'Incapacitate diminishing returns'},{key:'disorient',icon:'👁️',css:'incap',title:'Disorient diminishing returns'},{key:'root',icon:'🕸️',css:'root',title:'Root diminishing returns'}];return rows.map(row=>{const state=u.dr[row.key],remaining=Math.max(0,(state?.until||0)-this.time);if(!state||state.level<=0||remaining<=0)return '';const tier=state.level>=3?'IMM':state.level===2?'¼':'½';return `<span class="mini-dr ${row.css}" title="${row.title}: ${remaining.toFixed(1)} sec until reset">${row.icon}<b>${tier}</b><em>${remaining.toFixed(0)}s</em></span>`;}).filter(Boolean).join('');}
- renderMeter(box,stat,mode){if(!box||!this.units.length)return;const units=this.units.filter(u=>!u.healingStreamTotem).sort((a,b)=>b.stats[stat]-a.stats[stat]);const max=Math.max(1,...units.map(u=>u.stats[stat]));const total=Math.max(1,units.reduce((sum,u)=>sum+u.stats[stat],0));const html=units.map((u,i)=>{const value=Math.round(u.stats[stat]);const width=value/max*100;const pct=value/total*100;const unitIndex=this.units.indexOf(u);return `<div class="details-row clickable" data-report-mode="${mode}" data-report-unit="${unitIndex}" title="Open Encounter Details"><div class="details-fill ${mode==='healing'?'heal ':''}${u.team}" style="width:${width}%"></div><span class="details-rank">${i+1}.</span><span class="details-name"><span class="details-class">${classIcon(u.cls,u.info.badge)}</span>${u.name}</span><span class="details-value ${mode==='healing'?'heal-value':''}">${value.toLocaleString()} · ${pct.toFixed(0)}%</span></div>`;}).join('');this.setHudHtml(box,html);if(!box.dataset.meterBound){box.dataset.meterBound='1';box.onpointerdown=e=>{const row=e.target.closest('.details-row');if(!row||!box.contains(row))return;e.preventDefault();e.stopPropagation();this.openEncounterDetails(row.dataset.reportMode,+row.dataset.reportUnit);};}}
+ renderMeter(box,stat,mode){
+  if(!box)return;
+  const units=this.units.filter(u=>!u.healingStreamTotem).sort((a,b)=>b.stats[stat]-a.stats[stat]);
+  const max=Math.max(1,...units.map(u=>u.stats[stat])),total=Math.max(1,units.reduce((sum,u)=>sum+u.stats[stat],0));
+  // Keep the row DOM alive across combat ticks. Only roster/order/identity changes rebuild it.
+  const identity=units.map(u=>[this.units.indexOf(u),u.name,u.cls,u.team,u.info.badge]);
+  const signature=JSON.stringify([mode,identity]);
+  if(box._meterSignature!==signature||box.children.length!==units.length){
+   const html=units.map((u,i)=>`<div class="details-row clickable" data-report-mode="${mode}" data-report-unit="${identity[i][0]}" title="Open Encounter Details"><div class="details-fill ${mode==='healing'?'heal ':''}${u.team}"></div><span class="details-rank">${i+1}.</span><span class="details-name"><span class="details-class">${classIcon(u.cls,u.info.badge)}</span>${u.name}</span><span class="details-value ${mode==='healing'?'heal-value':''}"></span></div>`).join('');
+   box.innerHTML=html;this.htmlCache.delete(box);box._meterSignature=signature;
+   box._meterRows=Array.from(box.children,row=>({fill:row.querySelector('.details-fill'),value:row.querySelector('.details-value')}));
+  }
+  units.forEach((u,i)=>{const value=Math.round(u.stats[stat]),row=box._meterRows[i];this.setHudStyle(row.fill,'width',`${value/max*100}%`);this.setHudText(row.value,`${value.toLocaleString()} · ${(value/total*100).toFixed(0)}%`);});
+  if(!box.dataset.meterBound){box.dataset.meterBound='1';box.onpointerdown=e=>{const row=e.target.closest('.details-row');if(!row||!box.contains(row))return;e.preventDefault();e.stopPropagation();this.openEncounterDetails(row.dataset.reportMode,+row.dataset.reportUnit);};}
+ }
  encounterAbilityIcon(label){const exact=Object.values(AB).flat().find(a=>label===a.name||label.startsWith(a.name));if(exact)return exact.icon;const extras={'Burn':'🔥','Ignite':'🔥','Bleed':'🩸','Rend Bleed':'🩸','Gushing Wound':'🩸','Meteor Lance':'☄️','Auto Attack':'⚔️','Basic Attack':'⚔️','Melee':'⚔️','Absorb':'🛡️','HoT':'🌿','Regrowth':'🌿'};for(const [key,icon] of Object.entries(extras)){if(label.includes(key))return icon;}return '✦';}
   encounterBreakdownRows(values,total,mode,showIcons=false){const entries=Object.entries(values||{}).sort((a,b)=>b[1]-a[1]);if(!entries.length)return '<div class="details-empty">No events recorded for this player.</div>';const max=Math.max(1,...entries.map(entry=>entry[1]));return entries.map(([label,value])=>`<div class="enc-spell"><span class="enc-spell-bar ${mode==='healing'?'heal':''}" style="width:${value/max*100}%"></span>${showIcons?`<span class="enc-spell-icon">${this.encounterAbilityIcon(label)}</span>`:''}<span class="enc-spell-name">${label}</span><span class="enc-spell-num">${Math.round(value).toLocaleString()} <small>${(value/Math.max(1,total)*100).toFixed(1)}%</small></span></div>`).join('');}
  openEncounterDetails(mode='damage',unitIndex=null){if(!this.units.length)return;const stat=mode==='healing'?'healing':'damage';if(unitIndex===null||!this.units[unitIndex])unitIndex=this.units.indexOf(this.units.slice().sort((a,b)=>b.stats[stat]-a.stats[stat])[0]);this.encounterView={mode:mode==='healing'?'healing':'damage',unit:unitIndex};$('#encounterDetails').classList.remove('hidden');this.updateEncounterDetails();}
@@ -6804,7 +7720,7 @@ renderActions(){
  panel.onpointerdown=e=>{const close=e.target.closest('[data-enc-close]');if(close){e.preventDefault();e.stopPropagation();this.closeEncounterDetails();return;}const tab=e.target.closest('[data-enc-mode]');if(tab){e.preventDefault();this.encounterScrollTops={};this.encounterScrollActive=-1;this.encounterView.mode=tab.dataset.encMode;const newStat=this.encounterView.mode==='healing'?'healing':'damage';this.encounterView.unit=this.units.indexOf(this.units.slice().sort((a,b)=>b.stats[newStat]-a.stats[newStat])[0]);this.updateEncounterDetails();return;}const row=e.target.closest('[data-enc-unit]');if(row){e.preventDefault();this.encounterScrollTops={0:this.encounterScrollTops?.[0]||0};this.encounterScrollActive=-1;this.encounterView.unit=+row.dataset.encUnit;this.updateEncounterDetails();}};panel.querySelectorAll('[data-enc-unit]').forEach(row=>{row.onclick=e=>{e.preventDefault();e.stopPropagation();this.encounterScrollTops={0:this.encounterScrollTops?.[0]||0};this.encounterScrollActive=-1;this.encounterView.unit=+row.dataset.encUnit;this.updateEncounterDetails();};});}
  updateDetailsReport(){if(this.encounterView)this.updateEncounterDetails();}
  updateDetailsVisibility(){const hide=!!progression.settings?.hideLiveDetails&&(this.phase==='fight'||this.phase==='countdown');['#detailsMeter','#healingMeter'].forEach(selector=>$(selector)?.classList.toggle('hidden',hide));}
- updateDetailsMeter(){this.updateDetailsVisibility();const now=performance.now();const interval=this.mode==='3v3'&&this.phase==='fight'?100:50;if(now<(this.detailsFrameAt||0))return;this.detailsFrameAt=now+interval;this.renderMeter($('#detailsList'),'damage','damage');this.renderMeter($('#healingList'),'healing','healing');if(this.encounterView)this.updateEncounterDetails();}
+ updateDetailsMeter(){this.updateDetailsVisibility();const now=performance.now();const interval=this.mode==='3v3'&&this.phase==='fight'?100:50;if(now<(this.detailsFrameAt||0))return;this.detailsFrameAt=now+interval;if(!(progression.settings?.hideLiveDetails&&(this.phase==='fight'||this.phase==='countdown'))){this.renderMeter($('#detailsList'),'damage','damage');this.renderMeter($('#healingList'),'healing','healing');}if(this.encounterView)this.updateEncounterDetails();}
   updateUtilityUI(){if(!this.player)return;const tr=$('#trinketBtn'),mt=$('#mountBtn'),u=this.player;if(!tr||!mt)return;$('#trinketKey').textContent=keyLabel(binds.trinket);$('#mountKey').textContent=keyLabel(binds.mount);const trCd=Math.max(0,u.trinketCd||0);tr.classList.toggle('oncd',trCd>0);tr.classList.toggle('disabled',trCd>0||!u.alive);tr.querySelector('.u-cd').textContent=trCd>0?Math.ceil(trCd):'';tr.title=trCd>0?`Gladiator's Medallion — Ready in ${Math.ceil(trCd)}s`:`Gladiator's Medallion — Ready (${bindLabel(binds.trinket)})`;const activeMount=mountDefinition(progression.activeMount);mt.querySelector('.u-icon').textContent=activeMount.icon;mt.querySelector('.u-title').textContent=activeMount.name.split(' ')[0];const combat=this.isInCombat(u),mounting=!!(u.cast&&u.cast.special==='mount');$('#mountState').textContent=u.mounted?'Dismount':mounting?'Casting…':combat?'In Combat':'1.5s Cast';mt.classList.toggle('disabled',!u.mounted&&(combat||mounting||!u.alive));mt.classList.toggle('active',u.mounted);mt.classList.toggle('casting',mounting);mt.title=u.mounted?`${activeMount.name} — Dismount (${bindLabel(binds.mount)})`:mounting?`Summoning ${activeMount.name}…`:combat?`${activeMount.name} — Cannot mount in combat`:`${activeMount.name} — 1.5s cast (${bindLabel(binds.mount)})`;}
  previewAbilityRange(i,a){
   if(this.player?.cls==='wind'&&i===1&&!this.player.has('cloudstepDashCd'))return 17;
@@ -6814,7 +7730,7 @@ renderActions(){
  previewAbilityTarget(a){
   if(!this.player)return null;
   let target=this.target;
-  const self=['buff','dash','defensive','shieldSelf','push','healerEscape','monkDefensive','ghanir','flameNova','paladinAoE','paladinGuard','paladinSteed','avengingWings','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar','combustion','flameShield','evasion','cloak','totemMastery','healingStreamTotem','stormkeeper','tigereyeBrew','karma','bladestorm','tigersLust'].includes(a.type);
+  const self=['reverseHarm','crimsonVial','buff','dash','defensive','shieldSelf','push','healerEscape','monkDefensive','ghanir','flameNova','paladinAoE','paladinGuard','paladinSteed','avengingWings','iceBlock','reflect','shout','warriorGuard','sharpenBlade','avatar','combustion','flameShield','evasion','cloak','totemMastery','healingStreamTotem','stormkeeper','tigereyeBrew','karma','bladestorm','tigersLust'].includes(a.type);
   const friendly=['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse','freedom','guardianAngel','holyLight','sacrifice','intercept','bestowFaith','discShield','discMend','painSuppression'].includes(a.type);
   if(self)return null;
   if(a.type==='holyShock'){if(!target||!target.alive)target=this.player;}
@@ -6836,9 +7752,11 @@ renderActions(){
     if(u.plate)u.plate.classList.toggle('stealthed',stealthed);
    });
   }
-  updateNameplatePositions(){if(!this.player||this.phase==='menu'||!this.units.length)return;const now=performance.now(),cameraTurning=!!this.cameraRig?.dragging,refreshStack=cameraTurning||now>=(this.nextNameplateStackAt||0);this.units.forEach(u=>{this.toScreen(u);if(refreshStack){u._plateStackY=0;u.plate?.classList.remove('auto-stacked');}});if(refreshStack){this.nextNameplateStackAt=now+50;if(!cameraTurning&&progression.settings?.stackingNameplates!==false){const hostile=this.units.filter(u=>u.team!==this.player.team&&u.alive).map(u=>({u,p:u._screenPoint})).sort((a,b)=>a.p.y-b.p.y),groups=[];hostile.forEach(item=>{const group=groups.find(g=>g.some(other=>Math.abs(other.p.x-item.p.x)<118&&Math.abs(other.p.y-item.p.y)<64));if(group)group.push(item);else groups.push([item]);});groups.filter(group=>group.length>1).forEach(group=>{group.sort((a,b)=>a.p.y-b.p.y);const bottomY=Math.max(...group.map(item=>item.p.y));group.forEach((item,i)=>{item.u._plateStackY=bottomY-i*58-item.p.y;item.u.plate?.classList.add('auto-stacked');});});}}const pixelRatio=Math.max(1,this.lastRenderRatio||devicePixelRatio||1);this.units.forEach(u=>{const p=u._screenPoint;if(!p||!u.plate)return;const x=Math.round(p.x*pixelRatio)/pixelRatio,y=Math.round((p.y+(u._plateStackY||0))*pixelRatio)/pixelRatio;u.plate.style.transform=`translate3d(${x}px,${y}px,0) translate(-50%,-100%)`;});}
-  updateUI(){if(this.phase==='menu')return;const hudNow=performance.now(),hudInterval=this.mode==='3v3'?25:16;if(hudNow<(this.nextHudFrameAt||0))return;this.nextHudFrameAt=hudNow+hudInterval;this.applyStealthVisibility?.();this.updateTotemMasteryVisuals?.();this.updateCombustionVisuals?.();const richHud=hudNow>=this.nextHudRichUpdate;if(richHud){this.nextHudRichUpdate=hudNow+50;this.updateUtilityUI();this.updateDetailsMeter();}this.setHudText($('#timer'),fmt(this.time));let ally=this.units.filter(u=>u.team==='ally'&&u.alive&&!u.healingStreamTotem).length,enemy=this.units.filter(u=>u.team==='enemy'&&u.alive&&!u.healingStreamTotem).length;this.setHudText($('#allyAlive'),ally);this.setHudText($('#enemyAlive'),enemy);
+  updateNameplatePositions(){if(!this.player||this.phase==='menu'||!this.units.length)return;const now=performance.now(),cameraTurning=!!this.cameraRig?.dragging,refreshStack=cameraTurning||now>=(this.nextNameplateStackAt||0);this.units.forEach(u=>{this.toScreen(u);if(refreshStack){u._plateStackY=0;u.plate?.classList.remove('auto-stacked');}});if(refreshStack){this.nextNameplateStackAt=now+50;if(!cameraTurning&&progression.settings?.stackingNameplates!==false){const hostile=this.units.filter(u=>u.team!==this.player.team&&u.alive).map(u=>({u,p:u._screenPoint})).sort((a,b)=>a.p.y-b.p.y),groups=[];hostile.forEach(item=>{const group=groups.find(g=>g.some(other=>Math.abs(other.p.x-item.p.x)<118&&Math.abs(other.p.y-item.p.y)<64));if(group)group.push(item);else groups.push([item]);});groups.filter(group=>group.length>1).forEach(group=>{group.sort((a,b)=>a.p.y-b.p.y);const bottomY=Math.max(...group.map(item=>item.p.y));group.forEach((item,i)=>{item.u._plateStackY=bottomY-i*58-item.p.y;item.u.plate?.classList.add('auto-stacked');});});}}const pixelRatio=Math.max(1,this.lastRenderRatio||devicePixelRatio||1);this.units.forEach(u=>{const p=u._screenPoint;if(!p||!u.plate)return;const x=Math.round(p.x*pixelRatio)/pixelRatio,y=Math.round((p.y+(u._plateStackY||0))*pixelRatio)/pixelRatio,transform=`translate3d(${x}px,${y}px,0) translate(-50%,-100%)`;if(u._plateTransform===transform)return;u._plateTransform=transform;u.plate.style.transform=transform;});}
+  updateUI(){if(this.phase==='menu')return;const hudNow=performance.now(),hudInterval=this.mode==='3v3'?25:16;if(hudNow<(this.nextHudFrameAt||0))return;this.nextHudFrameAt=hudNow+hudInterval;this.applyStealthVisibility?.();this.updateTotemMasteryVisuals?.();this.updateCombustionVisuals?.();const richHud=hudNow>=this.nextHudRichUpdate;if(richHud){this.nextHudRichUpdate=hudNow+50;this.updateUtilityUI();this.updateDetailsMeter();}this.setHudText($('#timer'),fmt(this.time));let ally=0,enemy=0;for(const u of this.units){if(!u.alive||u.healingStreamTotem)continue;if(u.team==='ally')ally++;else if(u.team==='enemy')enemy++;}this.setHudText($('#allyAlive'),ally);this.setHudText($('#enemyAlive'),enemy);
   if(this.dampening>0){$('#damp').classList.remove('hidden');$('#dampValue').textContent=Math.round(this.dampening*100)+'%';}else $('#damp').classList.add('hidden');
+  (this.unitFrameElements||[]).forEach(frame=>{const unit=this.units[+frame.dataset.unit];if(unit)this.setHudStyle(frame,'--frame-hp',`${clamp(unit.hp/Math.max(1,unit.maxHp)*100,0,100)}%`);});
+  const edgeAlert=$('#edgeAlert'),edgeAlertsEnabled=!!progression.settings?.screenEdgeAlerts,edgeControl=this.player?centerControlState(this.player):null;if(edgeAlert){edgeAlert.style.setProperty('--edge-opacity',String(clamp(Number(progression.settings?.edgeAlertOpacity)||.72,.2,1)));edgeAlert.classList.toggle('low-health',edgeAlertsEnabled&&!!this.player&&this.player.hp/Math.max(1,this.player.maxHp)<=.30);edgeAlert.classList.toggle('crowd-controlled',edgeAlertsEnabled&&!!edgeControl);}
   (this.unitFrameElements||[]).forEach(f=>{const u=this.units[+f.dataset.unit],h=u?.frameHud;if(!u||!h)return;f.classList.toggle('selected',this.target===u);f.classList.toggle('dead',!u.alive);const hpPct=(u.hp/u.maxHp*100)+'%',shieldPct=(u.shield/u.maxHp*100)+'%';this.setHudStyle(h.hp,'width',hpPct);this.setHudStyle(h.shield,'left',hpPct);this.setHudStyle(h.shield,'width',shieldPct);this.setHudText(h.bartext,`${Math.ceil(u.hp)} / ${u.maxHp}${u.shield?`  +${Math.ceil(u.shield)}`:''}`);h.resource.className='fill resource '+(u.info.resource==='energy'?'energy':'mana');this.setHudStyle(h.resource,'width',(u.resource/u.maxResource*100)+'%');this.setHudHtml(h.effects,u.effects.slice(0,5).map(e=>this.effectChip(e)).join(''));const med=h.medallion;if(med){const cd=Math.max(0,u.trinketCd||0);med.classList.toggle('used',cd>0);this.setHudHtml(med,cd>0?`<span>🏅</span><span class="trinket-time">${Math.ceil(cd)}</span>`:`<span>🏅</span><span class="ready-dot">RDY</span>`);med.title=cd>0?`Gladiator's Medallion ready in ${Math.ceil(cd)}s`:`Gladiator's Medallion ready`;}if(h.dr)this.setHudHtml(h.dr,this.frameDRMarkup(u));const ccHtml=this.ccMarkup(u);this.setHudHtml(h.cc,ccHtml);h.cc.classList.toggle('show',!!ccHtml);const visibleCast=this.visibleFrameCast(u);h.cast.classList.toggle('hidden',!visibleCast);h.cast.classList.toggle('interrupt-shielded',!!u.has('interruptWard'));if(visibleCast){this.setHudStyle(h.castFill,'width',((1-visibleCast.left/visibleCast.total)*100)+'%');this.setHudHtml(h.castLabel,this.castNameMarkup(visibleCast));}});
   this.units.forEach(u=>{const h=u.plateHud,stealth=u.has('stealth');this.setHudStyle(u.plate,'opacity',String(u.alive?((stealth&&this.player&&u.team!==this.player.team)?0:(stealth?.65:1)):0));u.plate.classList.toggle('selected',u===this.target);this.setHudHtml(h.name,`${u.isPlayer?`<span class="plate-identity">${equippedAchievementTitle()?`<span class="plate-title">${equippedAchievementTitle()}</span>`:''}<span>${u.name}</span></span>`:`<span>${u.name}</span>`}<span class="plate-class">${classIcon(u.cls,u.info.badge)} ${u.info.short}</span>`);const hpPct=(u.hp/u.maxHp*100)+'%';this.setHudStyle(h.hp,'width',hpPct);this.setHudStyle(h.shield,'left',hpPct);this.setHudStyle(h.shield,'width',(u.shield/u.maxHp*100)+'%');const visibleCast=this.visibleFrameCast(u);h.cast.classList.toggle('hidden',!visibleCast);h.cast.classList.toggle('interrupt-shielded',!!u.has('interruptWard'));if(visibleCast){this.setHudHtml(h.castHead,this.castNameMarkup(visibleCast));this.setHudStyle(h.castFill,'width',((1-visibleCast.left/visibleCast.total)*100)+'%');}const ccHtml=this.ccMarkup(u);this.setHudHtml(h.cc,ccHtml);h.cc.classList.toggle('show',u!==this.player&&!!ccHtml);});
   const tf=$('#targetFrame');if(richHud){if(this.target&&this.target.alive){const targetLos=this.target===this.player||this.arena.los(this.player,this.target);const targetCC=this.ccMarkup(this.target);tf.classList.remove('hidden');tf.classList.toggle('enemy-target',this.target.team!==this.player.team);tf.classList.toggle('blocked',!targetLos);this.target.plate.classList.toggle('los-blocked',!targetLos);const targetDR=this.drMarkup(this.target);tf.innerHTML=`<div class="uf-head"><b>${this.target.isPlayer&&equippedAchievementTitle()?`<span class=\"uf-title\">${equippedAchievementTitle()}</span>`:''}${this.target.name}</b><span class="uf-class">${classIcon(this.target.cls,this.target.info.badge)} ${this.target.info.name} <span class="role-tag">${this.target.info.role}</span></span></div><div class="target-health-row"><div class="bar"><div class="fill hp" style="width:${this.target.hp/this.target.maxHp*100}%"></div><div class="shield-fill" style="left:${this.target.hp/this.target.maxHp*100}%;width:${this.target.shield/this.target.maxHp*100}%"></div><span class="bartext">${Math.ceil(this.target.hp)} / ${this.target.maxHp}</span></div>${targetDR}</div><div class="effects">${this.target.effects.map(e=>this.effectChip(e)).join('')}</div>${this.targetCastMarkup(this.target)}${targetCC?`<div class="cc-frame show" style="position:relative;top:auto;right:auto;margin-top:7px;display:inline-flex">${targetCC}</div>`:''}<span class="los-pill ${targetLos?'':'blocked'}">${targetLos?'● IN SIGHT':'✕ LINE OF SIGHT'}</span>`;}else{tf.classList.add('hidden');tf.classList.remove('enemy-target');this.units.forEach(u=>u.plate.classList.remove('los-blocked'));}}
@@ -6846,16 +7764,47 @@ renderActions(){
   document.querySelectorAll('.ability').forEach(button=>{const index=Number(button.dataset.i),ability=AB[this.player?.cls]?.[index];if(ability?.type==='volcanicEruption'&&!this.player.has('volcanicEruptionReady')){button.classList.add('disabled','volcanic-locked');button.classList.remove('proc');}else button.classList.remove('volcanic-locked');});
   if(richHud&&!tf.classList.contains('hidden')&&progression.settings?.showTargetOfTarget!==false&&this.target){const selected=this.target;const selectedTarget=selected.ai?.focus||(selected.netFocusId?this.units.find(unit=>String(unit.netId)===String(selected.netFocusId)):null)||selected.cast?.target||null;if(selectedTarget&&selectedTarget.alive&&selectedTarget!==selected){tf.insertAdjacentHTML('beforeend',`<div class="target-of-target"><span class="tot-portrait">${classIcon(selectedTarget.cls,selectedTarget.info?.badge||'✦')}</span><span>Targeting<strong>${selectedTarget.name}</strong></span></div>`);}}
   const protectedCenterCast=$('#castWrap');if(protectedCenterCast){const warded=!!(this.player?.cast&&this.player?.has('interruptWard'));protectedCenterCast.classList.toggle('interrupt-shielded',warded);if(warded&&$('#castLabel'))$('#castLabel').textContent=`🛡 ${this.player.cast.a.name}`;}
+  // School interrupts use the same compact status alert as stuns, not a fake cast bar.
   if(!$('#debug').classList.contains('hidden'))this.updateDebug();
  }
- jumpPlayer(){const p=this.player;if(!p||!p.alive||p.jumpY>0||p.jumpVel!==0||p.has('furyStun')||p.has('cheapStun')||p.has('stun')||p.has('poly')||p.has('sleep')||p.has('gouge')||p.has('blind')||p.has('windIncap')||p.has('fear')||p.has('iceBlock')||p.has('root'))return false;if(p.cast&&!p.cast.moveCast){p.cast=null;this.message('Cast cancelled by movement');}p.jumpY=.01;p.jumpVel=p.mounted?5.25:5.75;this.vfxRing(p,p.mounted?0x87efff:COLORS.ally,.58);return true;}
+ jumpPlayer(){const p=this.player;if(!p||!p.alive||p.jumpY>0||p.jumpVel!==0||p.has('furyStun')||p.has('cheapStun')||p.has('stun')||p.has('poly')||p.has('sleep')||p.has('gouge')||p.has('blind')||p.has('windIncap')||p.has('fear')||p.has('iceBlock')||p.has('root'))return false;if(p.cast&&!p.cast.moveCast){p.cast=null;this.message('Cast cancelled by movement');}p.jumpY=.01;p.jumpVel=p.mounted?5.25:5.75;p.netJumpSequence=(p.netJumpSequence||0)+1;this.vfxRing(p,p.mounted?0x87efff:COLORS.ally,.58);return true;}
  movementVector(){const fw=(this.keys[binds.forward]?1:0)-(this.keys[binds.backward]?1:0),rt=(this.keys[binds.right]?1:0)-(this.keys[binds.left]?1:0);const y=this.cameraRig.yaw;return{x:(-Math.sin(y))*fw+Math.cos(y)*rt,z:(-Math.cos(y))*fw-Math.sin(y)*rt};}
  playerMove(dt){if(this.player)this.player.intent=this.localMoveIntent();this.units.forEach(u=>{if((u===this.player||u.netControlled)&&u.intent)this.unitMoveByIntent(u,dt);});}
  localMoveIntent(){const v=this.movementVector(),l=Math.hypot(v.x,v.z);if(!l)return null;return {x:v.x/l,z:v.z/l};}
  unitMoveByIntent(u,dt){if(!u||!u.alive||u.has('furyStun')||u.has('cheapStun')||u.has('stun')||u.has('poly')||u.has('sleep')||u.has('gouge')||u.has('blind')||u.has('windIncap')||u.has('fear')||u.has('iceBlock')||u.has('root'))return;if(u.cast&&u.cast.channel&&!u.cast.moveCast)return;const v=u.intent;if(!v)return;if(u.cast&&!u.cast.moveCast){u.cast=null;if(u===this.player)this.message('Cast cancelled by movement');}let slow=u.has('slow')?.pct||0;/* Tiger's Lust is already included in Character.moveSpeed; do not multiply it twice. */const castMove=u.cast?.moveSpeedMult||1;u.x+=v.x*u.moveSpeed*(1-slow)*castMove*dt;u.z+=v.z*u.moveSpeed*(1-slow)*castMove*dt;if(!u.has('bladestorm'))u.mesh.rotation.y=Math.atan2(v.x,v.z);if(u===this.player)this.cameraRig.facingYaw=Math.atan2(-v.x,-v.z);this.arena.constrain(u);}
  openPauseMenu(){if(this.phase==='menu')return;this.keys={};this.paused=this.netSession?this.paused:true;$('#pauseMenu').classList.remove('hidden');}
  closePauseMenu(resume=true){$('#pauseMenu').classList.add('hidden');if(resume)this.paused=false;}
- openSettings(pause){this.paused=!!pause;this.renderBindSettings();this.saveFocusCasts();$('#settings').classList.remove('hidden');$('#closeSettings').textContent=pause?'Resume':'Close';$('#settings .settings-card h2').textContent='Keybinds & Controls';}
+ saveNicknameFromSettings(){const input=$('#settingsNickname'),status=$('#settingsNicknameStatus'),nickname=setPlayerNickname(input?.value);if(!nickname){if(status)status.textContent='Use between 2 and 24 visible characters.';return false;}if(input)input.value=nickname;if(status)status.textContent='Nickname saved for offline matches and your next online lobby.';if(this.player?.isPlayer)this.player.name=nickname;this.refreshMenuProgress();queueRankingPublish(50);return true;}
+ rankingEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+ rankingBracketRecord(profile,mode,cls=null){
+  if(mode==='overall'){const matches=Math.max(0,Number(profile?.matches)||0),wins=Math.min(matches,Math.max(0,Number(profile?.wins)||0));return {wins,matches,losses:matches-wins,winRate:matches?Math.round(wins/matches*100):0};}
+  const classes=cls?[cls]:GEAR_CLASSES;let wins=0,matches=0;classes.forEach(classKey=>{const record=profile?.records?.[mode]?.[classKey]||{};const classMatches=Math.max(0,Number(record.matches)||0),classWins=Math.min(classMatches,Math.max(0,Number(record.wins)||0));matches+=classMatches;wins+=classWins;});
+  return {wins,matches,losses:Math.max(0,matches-wins),winRate:matches?Math.round(wins/matches*100):0};
+ }
+ rankingStanding(profile,bracket='overall'){const modes=bracket==='overall'?['1v1','2v2','3v3']:[bracket];let rating=-Infinity,classKey='flame',mode=modes[0]||'2v2';modes.forEach(candidate=>GEAR_CLASSES.forEach(cls=>{const value=Math.max(0,Number(profile.ratings?.[candidate]?.[cls])||1600);if(value>rating){rating=value;classKey=cls;mode=candidate;}}));const record=this.rankingBracketRecord(profile,bracket);return {rating:Number.isFinite(rating)?rating:1600,classKey,mode,...record};}
+ rankingGearItems(profile,cls){const seen=new Set();return (Array.isArray(profile?.gear?.[cls])?profile.gear[cls]:[]).filter(item=>item&&GEAR_SLOTS.includes(item.slot)&&!seen.has(item.slot)&&seen.add(item.slot)).slice(0,GEAR_SLOTS.length).map(item=>({classKey:cls,slot:item.slot,ilvl:clamp(Math.round(Number(item.ilvl)||910),910,1000),statA:CUSTOM_GEAR_STATS.includes(item.statA)?item.statA:'Vitality',statB:CUSTOM_GEAR_STATS.includes(item.statB)?item.statB:'Versatility',...(item.legendaryId==='shadowmoon'&&cls==='warrior'&&item.slot==='Weapon'?{legendaryId:'shadowmoon'}:{})}));}
+ rankingGearTotals(items){const totals=blankStats();items.forEach(item=>{const values=itemStatValues(item);GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});return totals;}
+ destroyRankingCharacterPreview(){if(this.rankingPreviewScene)this.disposeObject(this.rankingPreviewScene);if(this.rankingPreviewRenderer){this.rankingPreviewRenderer.dispose();this.rankingPreviewRenderer=null;}this.rankingPreviewScene=null;this.rankingPreviewCamera=null;this.rankingPreviewModel=null;this.rankingPreviewGearAppearance=null;this.rankingPreviewPrestige=null;}
+ initRankingCharacterPreview(profile,cls){const canvas=$('#rankingCharacterCanvas');if(!canvas)return;this.destroyRankingCharacterPreview();const renderer=this.rankingPreviewRenderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true,powerPreference:'high-performance'});renderer.setPixelRatio(this.previewRenderRatio());this.rankingPreviewScene=new THREE.Scene();this.rankingPreviewCamera=new THREE.PerspectiveCamera(34,1,.1,50);this.rankingPreviewCamera.position.set(0,2.05,5.75);this.rankingPreviewCamera.lookAt(0,1.12,0);this.rankingPreviewScene.add(new THREE.HemisphereLight(0xc9efff,0x100b13,1.55));const key=new THREE.DirectionalLight(0xffd77f,2.15);key.position.set(3.2,4.7,3.8);this.rankingPreviewScene.add(key);const rim=new THREE.PointLight(CLASS_INFO[cls].colour,11,11);rim.position.set(-2.6,2.6,-1.2);this.rankingPreviewScene.add(rim);const base=new THREE.Mesh(new THREE.CylinderGeometry(1.05,1.26,.13,28),new THREE.MeshStandardMaterial({color:0x1b222a,metalness:.35,roughness:.58}));base.position.y=-.1;this.rankingPreviewScene.add(base);const ring=new THREE.Mesh(new THREE.RingGeometry(.73,.91,28),new THREE.MeshBasicMaterial({color:CLASS_INFO[cls].colour,transparent:true,opacity:.72,side:THREE.DoubleSide}));ring.rotation.x=-Math.PI/2;ring.position.y=-.025;this.rankingPreviewScene.add(ring);const items=this.rankingGearItems(profile,cls),model=this.rankingPreviewModel=this.buildGuideModel(cls);this.applyBaseGearVisibility(model,items);this.rankingPreviewGearAppearance=this.attachGearAppearance(model,cls,items,true);this.rankingPreviewPrestige=buildPrestigeVisual(cls,items);if(this.rankingPreviewPrestige)model.add(this.rankingPreviewPrestige);applyPrestigeWeaponIllusion(model,cls,items);applyShadowmoonWeapon(model,items);this.rankingPreviewYaw=.34;model.rotation.y=this.rankingPreviewYaw;this.rankingPreviewScene.add(model);canvas.addEventListener('pointerdown',event=>{this.rankingPreviewDragging=true;this.rankingPreviewLastX=event.clientX;canvas.setPointerCapture(event.pointerId);});canvas.addEventListener('pointermove',event=>{if(!this.rankingPreviewDragging)return;this.rankingPreviewYaw+=(event.clientX-this.rankingPreviewLastX)*.012;this.rankingPreviewLastX=event.clientX;});const stop=()=>this.rankingPreviewDragging=false;canvas.addEventListener('pointerup',stop);canvas.addEventListener('pointercancel',stop);}
+ updateRankingCharacterPreview(dt){if(!this.rankingPreviewRenderer||!this.rankingPreviewScene||!this.rankingPreviewCamera||$('#localRankingsModal')?.classList.contains('hidden')||!$('#rankingCharacterCanvas'))return;const canvas=$('#rankingCharacterCanvas');this.resizePreviewRenderer(this.rankingPreviewRenderer,this.rankingPreviewCamera,canvas,'ranking');if(this.rankingPreviewModel){if(!this.rankingPreviewDragging)this.rankingPreviewYaw+=dt*.25;this.rankingPreviewModel.rotation.y=this.rankingPreviewYaw;if(this.rankingPreviewModel.userData?.rig&&typeof AetherKit!=='undefined')AetherKit.pose(this.rankingPreviewModel.userData.rig,{motion:0,phase:0,time:performance.now()*.001},dt);}if(this.rankingPreviewGearAppearance?.userData?.tick)this.rankingPreviewGearAppearance.userData.tick(dt);if(this.rankingPreviewPrestige?.userData?.tick)this.rankingPreviewPrestige.userData.tick(dt);this.rankingPreviewRenderer.render(this.rankingPreviewScene,this.rankingPreviewCamera);}
+ renderRankingBuild(profile,cls){const host=$('#localRankingsContent');if(!host||!profile||!GEAR_CLASSES.includes(cls))return;const safe=this.rankingEscape.bind(this),state=profile.talents?.[cls]||{},tree=talentTree(cls),learned=tree.filter(node=>Number(state[node.id])>0).sort((a,b)=>(a.y||0)-(b.y||0)||(a.x||0)-(b.x||0)),points=learned.reduce((sum,node)=>sum+Math.min(Number(node.max)||1,Number(state[node.id])||0),0),ratingCards=['1v1','2v2','3v3'].map(mode=>{const rating=Math.max(0,Number(profile.ratings?.[mode]?.[cls])||1600),record=profile.records?.[mode]?.[cls]||{},wins=Math.max(0,Number(record.wins)||0),matches=Math.max(0,Number(record.matches)||0);return `<div class="ranking-bracket"><span>${mode} Arena</span><strong>${rating}</strong><small>${wins}W – ${Math.max(0,matches-wins)}L</small></div>`;}).join(''),nodes=learned.map(node=>`<div class="ranking-build-node"><span class="ranking-build-icon">${talentIcon(node)}</span><span><strong>${safe(node.name)}</strong><small>${safe(node.desc)}</small></span><b>${Math.min(Number(node.max)||1,Number(state[node.id])||0)}/${Number(node.max)||1}</b></div>`).join(''),items=this.rankingGearItems(profile,cls),totals=this.rankingGearTotals(items),core=this.classCoreStats(cls),average=items.length?Math.round(items.reduce((sum,item)=>sum+item.ilvl,0)/items.length):0,hpBonus=Math.round((totals.Stamina||0)*.78)+Math.min(300,Math.round((totals.Vitality||0)*.5)),manaBonus=Math.min(60,Math.round((totals.Mana||0)*.18)),primaryBonus=((totals.Intellect||0)+(totals.Agility||0)+(totals.Strength||0))*.00014,versBonus=(totals.Versatility||0)*.00018,damageBonus=((Math.min(.30,(totals.Power||0)*.00038)+primaryBonus+versBonus)*100).toFixed(1),healingBonus=((Math.min(.30,(totals.Restoration||0)*.00038)+primaryBonus+versBonus)*100).toFixed(1),crit=(5+Math.min(30,Math.max(0,totals['Critical Strike']||0)*.03)).toFixed(1),statPills=GEAR_STATS.filter(stat=>totals[stat]>0).map(stat=>`<span><b>+${totals[stat]}</b>${safe(stat)}</span>`).join(''),gearSlots=GEAR_SLOTS.map((slot,itemIndex)=>{const item=items.find(entry=>entry.slot===slot);if(!item)return `<div class="ranking-gear-slot empty"><i>${SLOT_ICONS[slot]}</i><span>${slot}<small>Empty</small></span></div>`;const rarity=rarityForIlvl(item.ilvl),name=item.legendaryId==='shadowmoon'?'Shadowmoon':gearName(cls,slot,item.ilvl),index=items.indexOf(item);return `<div class="ranking-gear-slot rarity-${rarity}" data-published-gear="${index}"><i>${SLOT_ICONS[slot]}</i><span>${safe(name)}<small>ilvl ${item.ilvl} · ${safe(item.statA)} / ${safe(item.statB)}</small></span></div>`;}).join('');host.innerHTML=`<div class="ranking-profile ranking-build-view"><div class="ranking-profile-actions"><button class="minor-btn" data-build-back>← ${safe(profile.nickname)}</button><span>Published character loadout · hover gear for details</span></div><div class="ranking-build-hero"><div class="ranking-crest">${classIcon(cls,CLASS_INFO[cls].badge)}</div><div><span class="menu-topline">${safe(profile.nickname)} · ${CLASS_INFO[cls].role}</span><h3>${CLASS_INFO[cls].name} Loadout</h3><p>Inspect this player’s equipped gear, calculated stats and ${points}-point talent build.</p></div><strong>${average||'—'}<small>${average?'average ilvl':'no gear'}</small></strong></div><div class="ranking-brackets">${ratingCards}</div><div class="ranking-character-loadout"><section class="ranking-character-window"><canvas id="rankingCharacterCanvas"></canvas><div><strong>${CLASS_INFO[cls].name}</strong><span>Drag to rotate · ${items.length}/${GEAR_SLOTS.length} slots equipped</span></div></section><section class="ranking-stat-panel"><div class="ranking-stat-heading"><div><span>Published Gear Stats</span><strong>${core.stamina+(totals.Stamina||0)} Stamina · ${core.primaryValue+(totals[core.primary]||0)} ${core.primary}</strong></div><b>${average?`ilvl ${average}`:'Ungeared'}</b></div><div class="ranking-stat-pills">${statPills||'<span class="empty"><b>—</b>No gear bonuses</span>'}</div><div class="ranking-bonus-line"><span>+${hpBonus} HP</span><span>+${manaBonus} Mana</span><span>+${damageBonus}% Damage</span><span>+${healingBonus}% Healing</span><span>${crit}% Critical Strike</span></div></section></div><div class="ranking-gear-grid">${gearSlots}</div><div class="ranking-section-title"><div><span>Talent Build</span><strong>${points} points learned</strong></div></div><div class="ranking-build-list">${nodes||'<div class="ranking-empty">This player has not published any learned talents for this class yet.</div>'}</div></div>`;const windowEl=host.closest('.local-rankings-window');if(windowEl)windowEl.scrollTop=0;host.querySelector('[data-build-back]').onclick=()=>this.renderRankingProfile(profile);host.querySelectorAll('[data-published-gear]').forEach(card=>{card.onmouseenter=e=>this.showPublishedGearTooltip(items[Number(card.dataset.publishedGear)],cls,e);card.onmousemove=e=>this.positionGearTooltip(e);card.onmouseleave=()=>$('#gearTooltip').classList.add('hidden');});this.initRankingCharacterPreview(profile,cls);}
+ showPublishedGearTooltip(item,cls,e){if(!item)return;const preview=item.legendaryId==='shadowmoon'?createShadowmoonItem(item.statA,item.statB):createGearItem(cls,item.slot,item.ilvl,item.statA,item.statB,'Published Loadout');preview.name=item.legendaryId==='shadowmoon'?'Shadowmoon':gearName(cls,item.slot,item.ilvl);this.renderItemTooltip(preview,e,false,false);const tip=$('#gearTooltip');tip.querySelector('p:last-of-type')?.remove();const footer=tip.querySelector('.selltip');if(footer)footer.textContent='Published equipped item';this.positionGearTooltip(e);}
+ renderRankingProfile(profile){
+  const host=$('#localRankingsContent');if(!host||!profile)return;this.destroyRankingCharacterPreview();const rankingWindow=host.closest('.local-rankings-window');if(rankingWindow)rankingWindow.scrollTop=0;
+  const safe=this.rankingEscape.bind(this),bestClass=GEAR_CLASSES.includes(profile.highestClass)?profile.highestClass:'flame',best=Number(profile.highestRating)||1600;
+  const rating=(mode,cls)=>Math.max(0,Number(profile.ratings?.[mode]?.[cls])||1600);
+  const selectedCards=['1v1','2v2','3v3'].map(mode=>{const standing=this.rankingStanding(profile,mode),record=this.rankingBracketRecord(profile,mode),rate=record.matches?`${record.winRate}% win rate`:'No tracked matches yet';return `<div class="ranking-bracket"><span>${mode} Arena · ${CLASS_INFO[standing.classKey].name}</span><strong>${standing.rating}</strong><small>${record.wins}W – ${record.losses}L · ${rate}</small></div>`;}).join('');
+  const rows=GEAR_CLASSES.slice().sort((a,b)=>Math.max(...['1v1','2v2','3v3'].map(mode=>rating(mode,b)))-Math.max(...['1v1','2v2','3v3'].map(mode=>rating(mode,a)))).map(cls=>{const max=Math.max(...['1v1','2v2','3v3'].map(mode=>rating(mode,cls))),points=Object.values(profile.talents?.[cls]||{}).reduce((sum,rank)=>sum+(Number(rank)||0),0),gearCount=Array.isArray(profile.gear?.[cls])?profile.gear[cls].length:0;return `<button class="ranking-row ranking-class-row" data-ranking-class="${cls}"><div class="ranking-class-name"><i>${classIcon(cls,CLASS_INFO[cls].badge)}</i><span>${CLASS_INFO[cls].name}<small>${CLASS_INFO[cls].role} · ${gearCount}/${GEAR_SLOTS.length} gear · ${points} talents · inspect</small></span></div>${['1v1','2v2','3v3'].map(mode=>`<div class="ranking-rating ${rating(mode,cls)===max?'best':''}">${rating(mode,cls)}</div>`).join('')}<span class="ranking-row-chevron">›</span></button>`;}).join('');
+  host.innerHTML=`<div class="ranking-profile"><div class="ranking-profile-actions"><button class="minor-btn" data-ranking-back>← All Players</button><span>Offline progress profile</span></div><div class="ranking-hero"><div class="ranking-crest">${classIcon(bestClass,CLASS_INFO[bestClass].badge)}</div><div class="ranking-identity"><strong>${safe(profile.nickname)}</strong><span>${safe(profile.title||'Unproven')} · best champion: ${CLASS_INFO[bestClass].name}</span><span>${Math.max(0,Number(profile.wins)||0)} wins across ${Math.max(0,Number(profile.matches)||0)} offline matches</span></div><div class="ranking-summary"><span>Highest rating</span><strong>${best}</strong><span>${ratingTierMeta(best).name} · ${String(profile.highestMode||'2v2').toUpperCase()}</span></div></div><div class="ranking-brackets">${selectedCards}</div><div class="ranking-table"><div class="ranking-row ranking-table-head"><div>Choose a class to inspect gear &amp; build</div><div>1v1</div><div>2v2</div><div>3v3</div></div>${rows}</div></div>`;
+  host.querySelector('[data-ranking-back]').onclick=()=>this.renderLocalRankings();host.querySelectorAll('[data-ranking-class]').forEach(row=>row.onclick=()=>this.renderRankingBuild(profile,row.dataset.rankingClass));
+ }
+ renderLocalRankings(){const host=$('#localRankingsContent');if(!host)return;this.destroyRankingCharacterPreview();const rankingWindow=host.closest('.local-rankings-window');if(rankingWindow)rankingWindow.scrollTop=0;const identity=rankingIdentity(),local=localRankingProfile(),sharing=!!progression.settings?.shareOfflineRankings,remote=rankingPlayersCache.slice(),hasRemoteSelf=remote.some(player=>player.playerId===identity.playerId),bracket=['overall','1v1','2v2','3v3'].includes(this.rankingBracket)?this.rankingBracket:'overall';this.rankingBracket=bracket;const players=(hasRemoteSelf?remote:[...remote,local]).map(player=>({player,standing:this.rankingStanding(player,bracket)})).sort((a,b)=>b.standing.rating-a.standing.rating||b.standing.wins-a.standing.wins||(Number(b.player.updatedAt)||0)-(Number(a.player.updatedAt)||0)),safe=this.rankingEscape.bind(this),label=bracket==='overall'?'Overall':bracket.toUpperCase(),tabs=['overall','1v1','2v2','3v3'].map(mode=>`<button class="ranking-bracket-tab ${mode===bracket?'active':''}" data-ranking-bracket="${mode}">${mode==='overall'?'Overall':mode.toUpperCase()}</button>`).join('');const rows=players.map(({player,standing},index)=>{const cls=standing.classKey,mine=player.playerId===identity.playerId,localOnly=mine&&!sharing,wins=bracket==='overall'?Math.max(0,Number(player.wins)||0):standing.wins,matches=bracket==='overall'?Math.max(0,Number(player.matches)||0):standing.matches;return `<button class="ranking-player-row ${mine?'mine':''}" data-ranking-player="${safe(player.playerId)}"><span class="ranking-position">#${index+1}</span><span class="ranking-player-class">${classIcon(cls,CLASS_INFO[cls].badge)}</span><span class="ranking-player-name"><strong>${safe(player.nickname)}</strong><small>${safe(player.title||ratingTierMeta(standing.rating).name)}${mine?' · You':''}${localOnly?' · only on this browser':''}</small></span><span class="ranking-player-record"><strong>${wins}W</strong><small>${matches} matches</small></span><span class="ranking-player-best"><small>${label} rating</small><strong>${standing.rating}</strong><span>${CLASS_INFO[cls].name}${bracket==='overall'?` · ${standing.mode.toUpperCase()}`:''}</span></span></button>`;}).join('');host.innerHTML=`<div class="ranking-browser"><div class="ranking-browser-head"><div><strong>Community Offline Standings</strong><p>Compare each bracket separately, then select a player and class to inspect their published character, gear, stats and talents.</p></div><button class="minor-btn" data-ranking-refresh>Refresh</button></div><div class="ranking-bracket-tabs" role="tablist" aria-label="Ranking bracket">${tabs}</div>${sharing?`<div class="ranking-sync-status shared">✓ Your ratings, equipped gear and talent builds are shared and update after rated matches.</div>`:`<div class="ranking-share-card"><div><strong>Put ${safe(playerNickname())} on the leaderboard</strong><p>Publishing shares your nickname, ratings, match records, equipped loadouts and selected talent builds. Inventory, currency, settings and the private browser key remain private.</p></div><button class="main-btn" data-ranking-publish>Publish My Profile</button></div>`}<div class="ranking-disclaimer">Community offline standings are player-submitted progress, separate from future authoritative online rankings.</div><div class="ranking-player-list">${rows||'<div class="ranking-empty">No published players yet. Be the first to join the standings.</div>'}</div></div>`;host.querySelectorAll('[data-ranking-player]').forEach(row=>row.onclick=()=>{const result=players.find(item=>item.player.playerId===row.dataset.rankingPlayer);if(result)this.renderRankingProfile(result.player);});host.querySelectorAll('[data-ranking-bracket]').forEach(tab=>tab.onclick=()=>{this.rankingBracket=tab.dataset.rankingBracket;this.renderLocalRankings();});host.querySelector('[data-ranking-refresh]').onclick=()=>this.refreshLocalRankings();const publish=host.querySelector('[data-ranking-publish]');if(publish)publish.onclick=()=>this.enableRankingSharing(publish);}
+ updateRankingSharingSettings(){const shared=!!progression.settings?.shareOfflineRankings,toggle=$('#shareOfflineRankings'),state=$('#rankingSharingState'),description=$('#rankingSharingDescription'),action=$('#rankingSharingAction'),setting=toggle?.closest('.ranking-sharing-setting');if(toggle)toggle.checked=shared;if(setting)setting.classList.toggle('shared',shared);if(state){state.textContent=shared?'Community profile: Shared':'Community profile: Private';state.classList.toggle('shared',shared);}if(description)description.textContent=shared?'Ratings, equipped gear and talent builds sync to every device.':'Your progress remains private on this browser.';if(action)action.textContent=shared?'Remove profile':'Publish profile';}
+ async enableRankingSharing(button){if(button){button.disabled=true;button.textContent='Publishing…';}progression.settings.shareOfflineRankings=true;saveProgression();this.updateRankingSharingSettings();try{await publishOfflineRanking(true);await fetchOfflineRankings();this.renderLocalRankings();}catch(error){progression.settings.shareOfflineRankings=false;saveProgression();this.updateRankingSharingSettings();this.renderLocalRankings();const host=$('#localRankingsContent');host?.insertAdjacentHTML('afterbegin',`<div class="ranking-sync-status error">Could not publish yet: ${this.rankingEscape(error.message)}</div>`);}}
+ async refreshLocalRankings(){const host=$('#localRankingsContent');if(host)host.innerHTML='<div class="ranking-loading"><span></span>Refreshing player standings…</div>';try{if(progression.settings?.shareOfflineRankings)await publishOfflineRanking();await fetchOfflineRankings();this.renderLocalRankings();}catch(error){this.renderLocalRankings();host?.insertAdjacentHTML('afterbegin',`<div class="ranking-sync-status error">The shared rankings are temporarily unavailable. Your local profile is still safe.</div>`);}}
+ async openLocalRankings(){$('#localRankingsModal').classList.remove('hidden');const host=$('#localRankingsContent');if(host)host.innerHTML='<div class="ranking-loading"><span></span>Loading player standings…</div>';await this.refreshLocalRankings();}
+ closeLocalRankings(){this.destroyRankingCharacterPreview();$('#localRankingsModal').classList.add('hidden');}
+ openSettings(pause){this.paused=!!pause;this.renderBindSettings();this.saveFocusCasts();const nickname=$('#settingsNickname'),status=$('#settingsNicknameStatus');if(nickname)nickname.value=playerNickname();this.updateRankingSharingSettings();if(status)status.textContent='';$('#settings').classList.remove('hidden');$('#closeSettings').textContent=pause?'Resume':'Close';$('#settings .settings-card h2').textContent='Keybinds & Controls';}
  closeSettings(){this.awaitBind=null;this.awaitFocusBind=null;$('#settings').classList.add('hidden');this.paused=false;}
  renderBindSettings(){const abilityActions=Array.from({length:16},(_,i)=>['a'+(i+1),'Ability '+(i+1)+(i>=7?' / Extra Toolkit':'')]);const actions=[['forward','Move Forward'],['backward','Move Backward'],['left','Strafe Left'],['right','Strafe Right'],['jump','Jump'],...abilityActions,['trinket',"Gladiator's Medallion"],['mount','Summon Mount'],['enemy','Next Enemy'],['ally','Next Ally'],['mobility','Mobility Ability Shortcut'],['pause','Settings / Pause']];$('#bindGrid').innerHTML=actions.map(a=>`<button class="bind" data-bind="${a[0]}"><span>${a[1]}</span><strong>${bindLabel(binds[a[0]])}</strong></button>`).join('');document.querySelectorAll('.bind').forEach(x=>x.onclick=()=>{this.awaitFocusBind=null;this.awaitBind=x.dataset.bind;document.querySelectorAll('.bind').forEach(b=>b.classList.toggle('waiting',b===x));document.querySelectorAll('.focus-bind-btn').forEach(b=>b.classList.remove('waiting'));x.querySelector('strong').textContent='Press key…';});this.renderFocusSettings();}
  focusEligibleAbilities(cls){const selfOnly=['buff','dash','defensive','shieldSelf','push','healerEscape','monkDefensive','iceBlock','natureSwiftness','ghanir','ultimateRadiance','discFade','discFear','archangel','darkArchangel','angelicBody','paladinGuard','paladinSteed'];const normallyBlocked=['heal','hot','shield','spiritBlossom','ironbark','bigHeal','cleanse',...selfOnly];const blocked=cls==='sage'?selfOnly:normallyBlocked;return AB[cls].map((a,i)=>({a,i})).filter(x=>!blocked.includes(x.a.type));}
@@ -6874,14 +7823,28 @@ renderActions(){
  o.classList.remove('hidden');
 }
  finaliseFinish(won){if(!this.finishPending)return;this.finishPending=false;const reward=this.awardProgression(won);if(this.queueType==='tournament'&&this.tournament?.active)this.recordTournamentGame(won);let pd=this.player.stats;const allyHeal=this.units.filter(u=>u.team==='ally'&&['sage','pala','disc'].includes(u.cls)).reduce((a,u)=>a+u.stats.healing,0),enemyHeal=this.units.filter(u=>u.team==='enemy'&&['sage','pala','disc'].includes(u.cls)).reduce((a,u)=>a+u.stats.healing,0);let o=$('#overlay');const queue=reward.queueType||'ranked';const tournamentFinishedText=this.tournament?.finished?(this.tournament?.eliminated?'Tournament Eliminated':(this.tournament?.champion!=null&&this.tournament?.teams?.[this.tournament.champion]?.player?'Tournament Champion':'Tournament Complete')):this.tournamentRoundName();const summaryLine=queue==='ranked'?`<span>${CLASS_INFO[reward.cls].badge} ${CLASS_INFO[reward.cls].name} ${reward.mode.toUpperCase()} <strong>${reward.gained>=0?'+':''}${reward.gained} Rating</strong></span><span>💠 <strong>+${reward.shards}</strong> Valor Shards</span>${reward.achievementShards?`<span>✨ <strong>+${reward.achievementShards.toLocaleString()}</strong> Achievement Shards</span>`:''}<span>New ${reward.mode.toUpperCase()} Rating <strong>${reward.newRating}</strong></span>`:queue==='tournament'?`<span>🏟️ <strong>${tournamentFinishedText}</strong></span><span>Series ${this.tournament?.seriesWins||0} - ${this.tournament?.seriesLosses||0}</span><span>💠 <strong>+${reward.shards}</strong> Valor Shards</span>`:queue==='skirmish'?`<span>${CLASS_INFO[reward.cls].badge} ${CLASS_INFO[reward.cls].name} ${reward.mode.toUpperCase()} <strong>Skirmish</strong></span><span>💠 <strong>+${reward.shards}</strong> Valor Shards</span><span>Rating Unchanged <strong>${reward.newRating}</strong></span>`:`<span>${CLASS_INFO[reward.cls].badge} ${CLASS_INFO[reward.cls].name} <strong>Training Grounds</strong></span><span>No rating or shard rewards</span><span>Practice your single-target and cleave rotation</span>`;const cupWon=queue==='tournament'&&this.tournament?.finished&&this.tournament?.champion!=null&&this.tournament?.teams?.[this.tournament.champion]?.player;const dropHtml=queue==='ranked'?(reward.drop?`<div class="reward-drop">🏆 Arena Drop: <strong>${reward.drop.name}</strong> <span>ilvl ${reward.drop.ilvl} · Added to ${CLASS_INFO[reward.drop.classKey].name} Inventory</span></div>`:(won?`<div class="reward-drop no-drop">No item dropped this victory · Ranked win drop chance: 60%.</div>`:`<div class="reward-drop no-drop">Win ranked rounds for a 60% chance to receive an item drop.</div>`)):queue==='tournament'&&cupWon?`<div class="reward-drop">🏆 Aether Cup Champion: <strong>${mountSkinPreviewDefinition(this.tournament?.rewardMountId||chronocrownMountIdForClass(this.tournament?.playerClass||reward.cls),this.tournament?.rewardSkinId||chronocrownSkinIdForClass(this.tournament?.playerClass||reward.cls)).name+' — '+(mountSkinPreviewDefinition(this.tournament?.rewardMountId||chronocrownMountIdForClass(this.tournament?.playerClass||reward.cls),this.tournament?.rewardSkinId||chronocrownSkinIdForClass(this.tournament?.playerClass||reward.cls)).skinLabel||'Colour')}</strong> <span>${this.tournament?.rewardUnlocked?'Unlocked and equipped':'Colour scheme recorded · equipped'}</span></div>`:`<div class="reward-drop no-drop">${queue==='tournament'?'Aether Cup games grant light shard progress. Use View Bracket to inspect every simulated series result.':queue==='skirmish'?'Skirmishes avoid rating swings while still granting light shard progress.':'Training mode is for pure practice and does not grant progression rewards.'}</div>`;const achievementHtml=reward.achievements&&reward.achievements.length?`<div class="reward-drop">✨ Achievements Earned: <strong>${reward.achievements.map(a=>a.name).join(', ')}</strong><span>${reward.achievementShards?`+${reward.achievementShards.toLocaleString()} Valor Shards`:''}</span></div>`:'';const tournamentBracket=queue==='tournament'?this.renderTournamentBracketHTML(true):'';const tournamentButtons=queue==='tournament'?(game.tournament?.finished?`<button class="minor-btn" onclick="game.openTournament()">View Final Bracket</button><button class="minor-btn" onclick="game.openTournament()">Start Over</button>`:`<button class="minor-btn" onclick="game.openTournament()">View Bracket</button><button class="minor-btn" onclick="game.nextTournamentMatch()">Continue Tournament</button>`):`<button class="minor-btn" onclick="game.start()">Rematch</button>`;o.innerHTML=`<div class="result glass progression-result ${queue==='tournament'?'tournament-result':''}"><h2 class="${won?'victory':'defeat'}">${won?'VICTORY':'DEFEAT'}</h2><p style="color:var(--muted)">Match completed in ${fmt(this.time)}</p><div class="stats"><div class="stat">Your Damage<strong>${Math.round(pd.damage)}</strong></div><div class="stat">Killing Blows<strong>${pd.kb}</strong></div><div class="stat">Allied Healing<strong>${Math.round(allyHeal)}</strong></div><div class="stat">Enemy Healing<strong>${Math.round(enemyHeal)}</strong></div></div><div class="reward-summary">${summaryLine}</div>${tournamentBracket}${dropHtml}${achievementHtml}<div class="menu-actions result-actions"><button class="main-btn" onclick="game.openEncounterDetails('damage',game.units.indexOf(game.player))">Match Details</button><button class="minor-btn" onclick="game.openArmoury('${reward.cls}')">Armoury</button>${tournamentButtons}<button class="minor-btn" onclick="game.returnMenu()">Menu</button></div></div>`;o.classList.remove('hidden');(reward.achievements||[]).forEach(a=>this.queueAchievementToast(a));this.refreshMenuProgress();}
- returnMenu(){if(this.hudEditMode)this.finishHudEdit();this.phase='menu';this.paused=false;this.forceTournamentStart=false;this.clear();this.resetPerformance();$('#pauseMenu').classList.add('hidden');$('#settings').classList.add('hidden');$('#hud').classList.add('hidden');$('#overlay').classList.add('hidden');$('#menu').classList.remove('hidden');this.selectMenuChampionPreview($('#classSelect')?.value||'flame');this.refreshMenuProgress();}
+ returnMenu(){if(this.hudEditMode)this.finishHudEdit();this.phase='menu';this.paused=false;this.forceTournamentStart=false;this.clear();this.resetPerformance();$('#edgeAlert')?.classList.remove('low-health','crowd-controlled');$('#pauseMenu').classList.add('hidden');$('#settings').classList.add('hidden');$('#hud').classList.add('hidden');$('#overlay').classList.add('hidden');$('#menu').classList.remove('hidden');this.selectMenuChampionPreview($('#classSelect')?.value||'flame');this.refreshMenuProgress();}
  update(dt){this.effectQueryFrame=(this.effectQueryFrame||0)+1;if(this.netGuest){if(this.netSession)this.netSession.guestFrame(dt);}else{if(this.phase==='countdown'&&!this.paused){this.count-=dt;if(this.count<=0){this.phase='fight';this.message('FIGHT!');}else this.message(`Begins in ${Math.ceil(this.count)}`);}
-  if(this.phase==='fight'&&!this.paused){this.time+=dt;if(this.time>=BALANCE.dampStart)this.dampening=clamp((Math.floor((this.time-BALANCE.dampStart)/BALANCE.dampInterval)+1)*BALANCE.dampStep,0,BALANCE.dampCap);this.playerMove(dt);this.units.forEach(u=>u.update(dt));const aiStep=1/60;this.aiAccumulator=Math.min(.10,(this.aiAccumulator||0)+dt);let aiSteps=0;while(this.aiAccumulator>=aiStep&&aiSteps<6){this.units.forEach(u=>u.ai?.update(aiStep));this.aiAccumulator-=aiStep;aiSteps++;}this.updateSupportAttacks();const aliveAlly=this.units.some(u=>u.team==='ally'&&u.alive&&!u.healingStreamTotem),aliveEnemy=this.units.some(u=>u.team==='enemy'&&u.alive&&!u.healingStreamTotem);if(!aliveEnemy)this.finish(true);if(!aliveAlly)this.finish(false);}if(this.netSession)this.netSession.hostFrame(dt);}
-  this.effects.forEach(e=>{e.life-=dt;if(e.update)e.update(dt);if(e.follow&&!e.follow.alive)e.dead=true;});this.effects=this.effects.filter(e=>{if(e.life<=0||e.obj.dead||e.dead){this.scene.remove(e.obj);this.queueDispose(e.obj);return false;}return true;});const fxCap=this.mode==='3v3'?96:190;if(this.effects.length>fxCap){const extra=this.effects.splice(0,this.effects.length-fxCap);extra.forEach(e=>{if(e.obj){this.scene.remove(e.obj);this.queueDispose(e.obj);}});}
-  this.updateUI();}
- updateCamera(dt){if(!this.player||this.phase==='menu')return;const r=this.cameraRig,focus=new THREE.Vector3(this.player.visualX??this.player.x,1.35,this.player.visualZ??this.player.z);const planar=Math.cos(r.pitch)*r.distance;const desired=new THREE.Vector3(focus.x+Math.sin(r.yaw)*planar,focus.y+Math.sin(r.pitch)*r.distance+1.25,focus.z+Math.cos(r.yaw)*planar);if(progression.settings?.instantCamera!==false)this.camera.position.copy(desired);else this.camera.position.lerp(desired,1-Math.pow(.0005,dt));this.camera.lookAt(focus.x,focus.y+.2,focus.z);}
+  if(this.phase==='fight'&&!this.paused){this.time+=dt;if(this.time>=BALANCE.dampStart)this.dampening=clamp((Math.floor((this.time-BALANCE.dampStart)/BALANCE.dampInterval)+1)*BALANCE.dampStep,0,BALANCE.dampCap);this.playerMove(dt);this.units.forEach(u=>u.update(dt));const aiStep=1/60;this.aiAccumulator=Math.min(.10,(this.aiAccumulator||0)+dt);let aiSteps=0;while(this.aiAccumulator>=aiStep&&aiSteps<6){this.units.forEach(u=>u.ai?.update(aiStep));this.aiAccumulator-=aiStep;aiSteps++;}this.updateSupportAttacks();const aliveAlly=this.units.some(u=>u.team==='ally'&&u.alive&&!u.healingStreamTotem),aliveEnemy=this.units.some(u=>u.team==='enemy'&&u.alive&&!u.healingStreamTotem);if(!aliveEnemy)this.finish(true);if(!aliveAlly)this.finish(false);}if(typeof this.netSession?.hostFrame==='function')this.netSession.hostFrame(dt);}
+  const effectCount=this.effects.length;let removedEffects=0;for(let read=0;read<effectCount;read++){const index=read-removedEffects,e=this.effects[index];e.life-=dt;if(e.update)e.update(dt);if(e.follow&&!e.follow.alive)e.dead=true;if(e.life<=0||e.obj.dead||e.dead){this.scene.remove(e.obj);this.queueDispose(e.obj);this.effects.splice(index,1);removedEffects++;}}
+  const fxCap=this.mode==='3v3'?96:190;for(let index=0;this.effects.length>fxCap&&index<this.effects.length;){const effect=this.effects[index];if(effect.critical){index++;continue;}this.effects.splice(index,1);if(effect.obj){this.scene.remove(effect.obj);this.queueDispose(effect.obj);}}
+  this.updateGroundImpacts?.();this.pruneExpiredSummons();this.updateUI();}
+ pruneExpiredSummons(){
+  for(let i=this.units.length-1;i>=0;i--){
+   const unit=this.units[i];
+   if(unit.alive||unit.netSummon||!(unit.healingStreamTotem||unit.summonedUnit))continue;
+   if(this.target===unit)this.target=null;
+   for(const other of this.units){
+    other.ai?.reactiveHealth?.delete(unit);
+    if(other.ai?.focus===unit)other.ai.focus=null;
+    if(other.ai?.healFocus===unit)other.ai.healFocus=null;
+   }
+   unit.destroy();this.units.splice(i,1);
+  }
+ }
+ updateCamera(dt){if(!this.player||this.phase==='menu')return;const r=this.cameraRig,focus=this.cameraFocus.set(this.player.visualX??this.player.x,1.35,this.player.visualZ??this.player.z),planar=Math.cos(r.pitch)*r.distance,desired=this.cameraDesired.set(focus.x+Math.sin(r.yaw)*planar,focus.y+Math.sin(r.pitch)*r.distance+1.25,focus.z+Math.cos(r.yaw)*planar);if(progression.settings?.instantCamera!==false)this.camera.position.copy(desired);else this.camera.position.lerp(desired,1-Math.pow(.0005,dt));this.camera.lookAt(focus.x,focus.y+.2,focus.z);}
  animate(){
-  requestAnimationFrame(()=>this.animate());const frameStart=performance.now(),now=frameStart;
+  requestAnimationFrame(this.animationFrame);const frameStart=performance.now(),now=frameStart;
   const elapsed=Math.min(.20,Math.max(0,(now-(this.lastLoopAt||now))/1000));this.lastLoopAt=now;
   if(document.hidden){this.simulationAccumulator=0;this.aiAccumulator=0;this.lastVisualAt=now;this.lastRenderedAt=now;return;}
   const active=this.phase!=='menu';
@@ -6899,17 +7862,35 @@ renderActions(){
    this.renderer.render(this.scene,this.camera);
    this.updateNameplatePositions();
   }
-  else{this.updateMenuChampionPreview(visualDt);this.updateGuidePreview(visualDt);this.updateArmouryPreview(visualDt);}
+  else{this.updateMenuChampionPreview(visualDt);this.updateGuidePreview(visualDt);this.updateArmouryPreview(visualDt);this.updateRankingCharacterPreview(visualDt);}
   this.recordFps(now,performance.now()-frameStart);
  }
 }
 
+// Records are stored per class, but the public bracket tabs represent a player's
+// complete 1v1/2v2/3v3 history. Decorate the existing ranking views with the
+// correctly aggregated W-L totals and a readable win percentage.
+const aetherCoreRenderLocalRankings=Game.prototype.renderLocalRankings;
+Game.prototype.renderLocalRankings=function(){
+ aetherCoreRenderLocalRankings.call(this);const identity=rankingIdentity(),local=localRankingProfile(),remote=rankingPlayersCache.slice(),hasRemoteSelf=remote.some(profile=>profile.playerId===identity.playerId),profiles=hasRemoteSelf?remote:[...remote,local],mode=['overall','1v1','2v2','3v3'].includes(this.rankingBracket)?this.rankingBracket:'overall';
+ const browserHead=document.querySelector('#localRankingsContent .ranking-browser-head');if(browserHead&&!browserHead.querySelector('[data-ranking-search]')){const search=document.createElement('input');search.type='search';search.placeholder='Search player nickname';search.setAttribute('data-ranking-search','');search.className='ranking-player-search';search.oninput=()=>{const query=search.value.trim().toLowerCase();document.querySelectorAll('#localRankingsContent [data-ranking-player]').forEach(row=>{const name=row.querySelector('.ranking-player-name strong')?.textContent?.toLowerCase()||'';row.classList.toggle('hidden',!!query&&!name.includes(query));});};browserHead.insertBefore(search,browserHead.lastElementChild);}
+ document.querySelectorAll('#localRankingsContent [data-ranking-player]').forEach(row=>{const profile=profiles.find(item=>String(item.playerId)===String(row.dataset.rankingPlayer));if(!profile)return;const record=this.rankingBracketRecord(profile,mode),host=row.querySelector('.ranking-player-record');if(host)host.innerHTML=`<strong>${record.wins}W – ${record.losses}L</strong><small>${record.matches?`${record.winRate}% win rate · ${record.matches} games`:'No tracked games yet'}</small>`;});
+};
+const aetherCoreRenderRankingProfile=Game.prototype.renderRankingProfile;
+Game.prototype.renderRankingProfile=function(profile){
+ aetherCoreRenderRankingProfile.call(this,profile);const actions=document.querySelector('#localRankingsContent .ranking-profile-actions');if(actions&&profile?.playerId!==rankingIdentity().playerId){const friend=document.createElement('button');friend.className='main-btn ranking-friend-action';friend.textContent=window.aetherSocial?.friends?.includes(profile.playerId)?'Message Friend':'Send Friend Request';friend.onclick=()=>window.aetherSocial?.addFriend(profile,true);actions.appendChild(friend);}document.querySelectorAll('#localRankingsContent .ranking-brackets .ranking-bracket').forEach((card,index)=>{const mode=['1v1','2v2','3v3'][index];if(!mode)return;const record=this.rankingBracketRecord(profile,mode),small=card.querySelector('small');if(small)small.textContent=`${record.wins}W – ${record.losses}L · ${record.matches?record.winRate+'% win rate':'No tracked matches yet'}`;});
+};
+const aetherCoreRenderRankingBuild=Game.prototype.renderRankingBuild;
+Game.prototype.renderRankingBuild=function(profile,cls){
+ aetherCoreRenderRankingBuild.call(this,profile,cls);document.querySelectorAll('#localRankingsContent .ranking-brackets .ranking-bracket').forEach((card,index)=>{const mode=['1v1','2v2','3v3'][index];if(!mode)return;const record=this.rankingBracketRecord(profile,mode,cls),small=card.querySelector('small');if(small)small.textContent=`${record.wins}W – ${record.losses}L · ${record.matches?record.winRate+'% win rate':'No tracked matches yet'}`;});
+};
+
 // The mount journal keeps native-refresh motion on healthy machines and only
 // reduces its refresh rate after the workload-based recovery tiers engage.
 Game.prototype.animateMountPreview=function(){
- if(this.mountPreviewAnimating)return;this.mountPreviewAnimating=true;let last=0;
- const draw=now=>{if(!this.mountPreviewAnimating||$('#mountJournal').classList.contains('hidden')){this.mountPreviewAnimating=false;return;}requestAnimationFrame(draw);if(document.hidden)return;const dt=Math.min(.05,Math.max(0,(now-(last||now))/1000));last=now;const canvas=$('#mountPreviewCanvas');this.resizePreviewRenderer(this.mountPreviewRenderer,this.mountPreviewCamera,canvas,'mount');if(this.mountPreviewModel){if(!this.mountPreviewDragging)this.mountPreviewYaw+=dt*.36;this.mountPreviewModel.rotation.y=this.mountPreviewYaw;const legs=this.mountPreviewModel.userData.legs||[];legs.forEach((leg,i)=>leg.rotation.x=(i%2?1:-1)*Math.sin(now*.004)*.14);if(this.mountPreviewModel.userData.ring)this.mountPreviewModel.userData.ring.rotation.z+=dt*.48;if(this.mountPreviewModel.userData.tickFX)this.mountPreviewModel.userData.tickFX(now*.001,dt);}this.mountPreviewRenderer.render(this.mountPreviewScene,this.mountPreviewCamera);};
- requestAnimationFrame(draw);
+ if(this.mountPreviewFrame!=null)return;this.mountPreviewAnimating=true;let last=0;
+ const draw=now=>{this.mountPreviewFrame=null;if(!this.mountPreviewAnimating||$('#mountJournal').classList.contains('hidden')){this.mountPreviewAnimating=false;return;}this.mountPreviewFrame=requestAnimationFrame(draw);if(document.hidden)return;const dt=Math.min(.05,Math.max(0,(now-(last||now))/1000));last=now;const canvas=$('#mountPreviewCanvas');this.resizePreviewRenderer(this.mountPreviewRenderer,this.mountPreviewCamera,canvas,'mount');if(this.mountPreviewModel){if(!this.mountPreviewDragging)this.mountPreviewYaw+=dt*.36;this.mountPreviewModel.rotation.y=this.mountPreviewYaw;const legs=this.mountPreviewModel.userData.legs||[];legs.forEach((leg,i)=>leg.rotation.x=(i%2?1:-1)*Math.sin(now*.004)*.14);if(this.mountPreviewModel.userData.ring)this.mountPreviewModel.userData.ring.rotation.z+=dt*.48;if(this.mountPreviewModel.userData.tickFX)this.mountPreviewModel.userData.tickFX(now*.001,dt);}this.mountPreviewRenderer.render(this.mountPreviewScene,this.mountPreviewCamera);};
+ this.mountPreviewFrame=requestAnimationFrame(draw);
 };
 
 // Runtime extensions are kept outside the large combat switch so the new destructible
@@ -6923,16 +7904,26 @@ Game.prototype.vfxChaosBolt=function(caster,target,onHit){
  for(let i=0;i<5;i++){const shell=new THREE.Mesh(new THREE.TorusGeometry(.52+i*.055,.075,6,18,Math.PI*1.35),darkMat.clone());shell.rotation.set(i*.73,.42+i*.88,i*.51);shell.position.z=(i-2)*.22;root.add(shell);}
  const motes=[];for(let i=0;i<6;i++){const mote=new THREE.Mesh(new THREE.OctahedronGeometry(.055+(i%3)*.018,0),new THREE.MeshBasicMaterial({color:i%3?green:0x050505,transparent:true,opacity:.92,depthWrite:false,blending:i%3?THREE.AdditiveBlending:THREE.NormalBlending}));root.add(mote);motes.push(mote);}
  root.position.set(caster.x,1.38,caster.z);this.scene.add(root);let elapsed=0,finished=false;
- const fx={obj:root,life:2.2,update:dt=>{elapsed+=dt;if(finished||!caster.alive||!target.alive){fx.dead=true;return;}const dx=target.x-root.position.x,dy=1.25-root.position.y,dz=target.z-root.position.z,d=Math.hypot(dx,dy,dz)||.001,step=Math.min(d,18*dt);root.position.x+=dx/d*step;root.position.y+=dy/d*step;root.position.z+=dz/d*step;root.lookAt(target.x,1.25,target.z);core.scale.x=.91+Math.sin(elapsed*26)*.09;core.scale.y=.76+Math.sin(elapsed*22+1)*.08;root.children.slice(1,6).forEach((part,i)=>{part.rotation.x+=dt*(7+i);part.rotation.z+=dt*(i%2?8:-8);part.material.opacity=.64+Math.sin(elapsed*17+i)*.18;});motes.forEach((m,i)=>{const a=elapsed*(9+i*.18)+i*.91,r=.62+(i%3)*.13;m.position.set(Math.cos(a)*r,Math.sin(a*1.4)*.44,(i-3)*.22);m.material.opacity=.48+Math.abs(Math.sin(elapsed*15+i))*.44;});if(d<.72){finished=true;onHit?.();this.vfxNova(target,green,2.25,12);this.vfxGlyph(target,acid,.78);this.vfxSpiral(target,0x111111,.8);this.vfxRing(target,green,2.6);this.audio.play('shadow');fx.dead=true;}}};
+ const fx={obj:root,life:3,update:dt=>{elapsed+=dt;if(finished||(!this.netGuest&&!caster.alive)||!target.alive){fx.dead=true;return;}if(this.netGuest&&!this.arena.los({x:root.position.x,z:root.position.z},target)){fx.dead=true;return;}const dx=target.x-root.position.x,dy=1.25-root.position.y,dz=target.z-root.position.z,d=Math.hypot(dx,dy,dz)||.001,step=Math.min(d,(this.netGuest?22:18)*dt);root.position.x+=dx/d*step;root.position.y+=dy/d*step;root.position.z+=dz/d*step;root.lookAt(target.x,1.25,target.z);core.scale.x=.91+Math.sin(elapsed*26)*.09;core.scale.y=.76+Math.sin(elapsed*22+1)*.08;root.children.slice(1,6).forEach((part,i)=>{part.rotation.x+=dt*(7+i);part.rotation.z+=dt*(i%2?8:-8);part.material.opacity=.64+Math.sin(elapsed*17+i)*.18;});motes.forEach((m,i)=>{const a=elapsed*(9+i*.18)+i*.91,r=.62+(i%3)*.13;m.position.set(Math.cos(a)*r,Math.sin(a*1.4)*.44,(i-3)*.22);m.material.opacity=.48+Math.abs(Math.sin(elapsed*15+i))*.44;});if(d<.45+step){finished=true;onHit?.();this.vfxNova(target,green,2.25,12);this.vfxGlyph(target,acid,.78);this.vfxSpiral(target,0x111111,.8);this.vfxRing(target,green,2.6);this.audio.play('shadow');fx.dead=true;}}};
  this.effects.push(fx);
 };
-Game.prototype.vfxCrimsonVial=function(caster,duration=10){
+Game.prototype.vfxCrimsonVial=function(caster,duration=6){
  if(!caster?.alive||!this.scene)return;const root=new THREE.Group(),red=0xe3294f,deep=0x721129;
  const ring=new THREE.Mesh(new THREE.RingGeometry(.78,1.02,36),new THREE.MeshBasicMaterial({color:red,transparent:true,opacity:.55,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending}));ring.rotation.x=-Math.PI/2;ring.position.y=.07;root.add(ring);
  const bottle=new THREE.Group(),glass=new THREE.MeshStandardMaterial({color:0xc9163e,emissive:red,emissiveIntensity:1.4,transparent:true,opacity:.82,roughness:.22});const body=new THREE.Mesh(new THREE.CylinderGeometry(.13,.18,.42,10),glass),neck=new THREE.Mesh(new THREE.CylinderGeometry(.065,.09,.18,9),glass.clone()),cork=new THREE.Mesh(new THREE.CylinderGeometry(.072,.072,.07,8),new THREE.MeshStandardMaterial({color:0x6b361d,roughness:1}));neck.position.y=.29;cork.position.y=.415;bottle.add(body,neck,cork);bottle.position.set(.42,1.63,-.28);bottle.rotation.z=-.42;root.add(bottle);
  const motes=[];for(let i=0;i<7;i++){const mote=new THREE.Mesh(new THREE.SphereGeometry(.045+(i%3)*.018,6,5),new THREE.MeshBasicMaterial({color:i%3?red:0xff8094,transparent:true,opacity:.82,depthWrite:false,blending:THREE.AdditiveBlending}));root.add(mote);motes.push(mote);}
  this.scene.add(root);let elapsed=0;
  this.effects.push({obj:root,life:duration+.12,follow:caster,update:dt=>{elapsed+=dt;if(!caster.alive||!caster.has('crimsonVial')){root.dead=true;return;}root.position.set(caster.x,0,caster.z);root.rotation.y=caster.mesh?.rotation?.y||0;bottle.visible=elapsed<.9;bottle.rotation.x=Math.sin(Math.min(1,elapsed/.75)*Math.PI)*-.36;ring.rotation.z+=dt*1.7;ring.material.opacity=.28+Math.sin(elapsed*6)*.16;motes.forEach((m,i)=>{const phase=(elapsed*.55+i/7)%1,a=elapsed*(2.1+(i%3)*.16)+i*Math.PI/3.5,r=.68+(i%4)*.12;m.position.set(Math.cos(a)*r,.18+phase*2.15,Math.sin(a)*r);m.scale.setScalar(.7+Math.sin(elapsed*8+i)*.24);m.material.opacity=.22+(1-phase)*.65;});}});
+};
+Game.prototype.vfxAbilityGlow=function(caster,ability,target){
+ if(!caster?.alive||!ability||$('#reducedFX')?.checked||!this.scene||!this.fxAllowed(2))return;
+ const palette={fire:0xff6a27,shadow:0xa34cff,physical:0xffcf72,storm:0x62ddff,wind:0x70f0bf,nature:0x63e88a,heal:0x63e88a,holy:0xffdc72},colour=palette[ability.school]||COLORS[caster.cls]||0xd7e7ff;
+ const anchor=target?.alive&&Number.isFinite(target.x)&&Number.isFinite(target.z)?target:caster;
+ this.abilityGlowGeometry=this.abilityGlowGeometry||{ring:new THREE.RingGeometry(.42,.63,20),core:new THREE.SphereGeometry(.42,8,6)};this.abilityGlowGeometry.ring.userData.aetherShared=true;this.abilityGlowGeometry.core.userData.aetherShared=true;
+ const material=opacity=>new THREE.MeshBasicMaterial({color:colour,transparent:true,opacity,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+ const root=new THREE.Group(),ring=new THREE.Mesh(this.abilityGlowGeometry.ring,material(.68)),core=new THREE.Mesh(this.abilityGlowGeometry.core,material(.18));
+ ring.rotation.x=-Math.PI/2;ring.position.y=.08;core.position.y=.72;core.scale.set(1.25,.7,1.25);root.add(ring,core);root.position.set(anchor.x,0,anchor.z);this.scene.add(root);let elapsed=0;
+ this.effects.push({obj:root,life:.34,follow:anchor,update:dt=>{elapsed+=dt;if(anchor.alive===false){root.dead=true;return;}root.position.set(anchor.x,0,anchor.z);const p=Math.min(1,elapsed/.34),scale=1+p*1.15;ring.scale.setScalar(scale);core.scale.set(1.25+p*.8,.7+p*.25,1.25+p*.8);ring.material.opacity=.68*(1-p);core.material.opacity=.18*(1-p);ring.rotation.z+=dt*5;}});
 };
 Game.prototype.currentAbilityDamagePreview=function(ability){
  const c=this.player;if(!c||!ability)return null;
@@ -6947,6 +7938,7 @@ Game.prototype.currentAbilityDamagePreview=function(ability){
  if(c.cls==='storm')out*=.805;
  if(c.has('darkArchangel'))out*=1.30;
  if(c.has('defensive')?.damagePenalty)out*=1-c.has('defensive').damagePenalty;
+ if(c.has('crimsonVial'))out*=.75;
  if(c.has('avatar'))out*=1.18;
  if(c.has('totemMastery'))out*=1.03;
  if(c.has('avengingWings'))out*=1+Number(c.has('avengingWings').damageBonus||0);
@@ -6966,10 +7958,11 @@ Game.prototype.gearAdjustedAbilityTooltip=function(ability){
 };
 const aetherCoreTryAbility=Game.prototype.tryAbility;
 Game.prototype.tryAbility=function(caster,index,target,show=false){
- const ability=AB[caster?.cls]?.[index],stormkeeperSpark=!!(caster?.cls==='storm'&&index===0&&caster.has?.('stormkeeper'));
- if(['healingStreamTotem','crimsonVial'].includes(ability?.type))target=caster;
+ const ability=unitAbilities(caster)?.[index],stormkeeperSpark=!!(caster?.cls==='storm'&&index===0&&caster.has?.('stormkeeper'));
+ if(['healingStreamTotem','crimsonVial','reverseHarm'].includes(ability?.type))target=caster;
  const interruptsBefore=caster?.stats?.interrupts||0;
  const used=aetherCoreTryAbility.call(this,caster,index,target,show);
+ if(used&&caster.mounted){caster.mounted=false;if(caster.mountVisual)caster.mountVisual.visible=false;}
  if(used&&ability?.type==='soulDrain'&&caster.cast?.soulDrain){
   const quickened=target?.effects?.some(e=>e.type==='burn'&&e.label==='Immolate'&&e.source===caster&&e.time>0);
   if(quickened){caster.cast.total=1.5;caster.cast.left=Math.min(caster.cast.left,1.5);this.float(caster,'IMMOLATE · SIPHON QUICKENED','info');}
@@ -6991,9 +7984,14 @@ Game.prototype.tryAbility=function(caster,index,target,show=false){
  return used;
 };
 const aetherCoreCastFor=Game.prototype.castFor;
-Game.prototype.castFor=function(unit,index,target){if(['healingStreamTotem','crimsonVial'].includes(AB[unit?.cls]?.[index]?.type))target=unit;return aetherCoreCastFor.call(this,unit,index,target);};
+Game.prototype.castFor=function(unit,index,target){if(['healingStreamTotem','crimsonVial','reverseHarm'].includes(unitAbilities(unit)?.[index]?.type))target=unit;return aetherCoreCastFor.call(this,unit,index,target);};
 const aetherCoreResolve=Game.prototype.resolve;
 Game.prototype.resolve=function(caster,ability,target,opts={}){
+ this.vfxAbilityGlow(caster,ability,target);
+ if(ability?.name==='Smoke Veil'){
+  caster.effect('defensive',4,{reduction:Number.EPSILON});caster.effect('smokePower',8);caster.effect('cheapReady',8);caster.effect('smokeBombReady',8);caster.effect('stealth',8);
+  this.animateAction(caster,ability);this.audio.playAbility(ability,caster);this.vfxGlyph(caster,0x7862a6,.78);this.vfxRing(caster,0x7151a5,2.2);this.float(caster,'STEALTH · VEILED ASSAULT','info');return;
+ }
  if(ability?.type==='karma'){
   caster.effects=caster.effects.filter(e=>e.type!=='touchKarma');caster.effect('touchKarma',4,{reflectPct:.30,healPct:.50});
   this.animateAction(caster,ability);this.audio.playAbility(ability,caster);this.shieldBubble(caster,COLORS.wind,4);this.vfxOrbit(caster,COLORS.wind,1.95);this.vfxRing(caster,COLORS.wind,3.1);this.vfxKarmaMark(caster,4);this.float(caster,'TOUCH OF KARMA · 30% REDIRECT · 50% HEAL','info');return;
@@ -7014,11 +8012,17 @@ Game.prototype.resolve=function(caster,ability,target,opts={}){
  if(ability?.type==='summonInfernal'){
   this.animateAction(caster,ability);this.audio.playAbility(ability,caster);this.dropInfernal(caster,target.x,target.z,ability);return;
  }
+ if(ability?.type==='reverseHarm'){
+  const before=caster.hp,amount=Math.round(caster.maxHp*.16);caster.receiveHeal(caster,amount,'Reverse Harm');
+  const actual=Math.max(0,caster.hp-before),enemy=this.units.filter(u=>u.alive&&u.team!==caster.team&&dist(caster,u)<=5&&this.arena.los(caster,u)).sort((a,b)=>dist(caster,a)-dist(caster,b))[0];
+  this.animateAction(caster,{name:'Reverse Harm',type:'buff',school:'heal'});this.vfxRing(caster,COLORS.wind,1.2);
+  if(actual&&enemy){enemy.takeDamage(caster,actual,'Reverse Harm');this.lightning(caster,enemy);}return;
+ }
  if(ability?.type==='crimsonVial'){
   caster.effects=caster.effects.filter(e=>e.type!=='crimsonVial');
-  caster.effect('crimsonVial',10.05,{vialElapsed:0,ticks:10});
+  caster.effect('crimsonVial',6.05,{vialElapsed:0,ticks:6,pct:.025});
   caster.vialDrinkMotion={elapsed:0,duration:.9};
-  this.animateAction(caster,ability);this.audio.playAbility(ability,caster);this.vfxCrimsonVial(caster,10);this.vfxGlyph(caster,0xef4b67,.75);this.vfxRing(caster,0x9d173e,1.55);this.float(caster,'CRIMSON VIAL · 15% OVER 10 SEC','heal');return;
+  this.animateAction(caster,ability);this.audio.playAbility(ability,caster);this.vfxCrimsonVial(caster,6);this.vfxGlyph(caster,0xef4b67,.75);this.vfxRing(caster,0x9d173e,1.55);this.float(caster,'CRIMSON VIAL · DAMAGE -25%','heal');return;
  }
  if(ability?.type==='frostShock'){
   this.animateAction(caster,ability);this.audio.playAbility(ability,caster);
@@ -7037,7 +8041,7 @@ Game.prototype.resolve=function(caster,ability,target,opts={}){
 };
 const aetherCoreCharacterUpdate=Character.prototype.update;
 Character.prototype.update=function(dt){
- if(!this.game.netGuest){const vial=this.has?.('crimsonVial');if(vial&&(vial.ticks||0)>0){vial.vialElapsed=(vial.vialElapsed||0)+dt;while(vial.vialElapsed>=1&&(vial.ticks||0)>0){vial.vialElapsed-=1;vial.ticks--;const amount=Math.max(1,Math.round(this.maxHp*.015)),actual=Math.min(this.maxHp-this.hp,amount);if(actual>0){this.hp+=actual;this.stats.healing+=actual;this.stats.healingByAbility['Crimson Vial']=(this.stats.healingByAbility['Crimson Vial']||0)+actual;this.stats.healingByTarget[this.name]=(this.stats.healingByTarget[this.name]||0)+actual;this.game.float(this,actual,'heal');this.game.vfxBurst(this,0xa92552,.42);}}}}
+ if(!this.game.netGuest){const vial=this.has?.('crimsonVial');if(vial&&(vial.ticks||0)>0){vial.vialElapsed=(vial.vialElapsed||0)+dt;while(vial.vialElapsed>=1&&(vial.ticks||0)>0){vial.vialElapsed-=1;vial.ticks--;const amount=Math.max(1,Math.round(this.maxHp*(Number(vial.pct||.025)+crimsonVialBonus(this)))),actual=Math.min(this.maxHp-this.hp,amount);if(actual>0){this.hp+=actual;this.stats.healing+=actual;this.stats.healingByAbility['Crimson Vial']=(this.stats.healingByAbility['Crimson Vial']||0)+actual;this.stats.healingByTarget[this.name]=(this.stats.healingByTarget[this.name]||0)+actual;this.game.float(this,actual,'heal');this.game.vfxBurst(this,0xa92552,.42);}}}}
  const result=aetherCoreCharacterUpdate.call(this,dt),motion=this.windSpecialMotion,drink=this.vialDrinkMotion;
  if(drink&&this.mesh){drink.elapsed+=dt;const p=Math.min(1,drink.elapsed/drink.duration),lift=Math.sin(p*Math.PI);if(this.armR)this.armR.rotation.x=-.85-lift*.95;if(this.armR)this.armR.rotation.z=-.18-lift*.34;if(this.handR)this.handR.position.set(.30,.82+lift*.78,-.12-lift*.34);if(this.torso)this.torso.rotation.x=-lift*.08;if(p>=1)this.vialDrinkMotion=null;}
  if(motion&&this.mesh){motion.elapsed+=dt;const p=Math.min(1,motion.elapsed/motion.duration),smooth=p*p*(3-2*p);if(motion.type==='backflip'){this.mesh.rotation.x=-Math.PI*2*smooth;this.mesh.position.y+=Math.sin(p*Math.PI)*1.42;}else{this.mesh.rotation.x=-Math.sin(p*Math.PI)*.30;this.mesh.position.y+=Math.sin(p*Math.PI)*.48;}if(p>=1){this.mesh.rotation.x=0;this.windSpecialMotion=null;}}
@@ -7223,11 +8227,27 @@ Game.prototype.spawnGuardianAngel=function(owner,target,duration=6){
  this.vfxGlyph(target,COLORS.holy,1.05);this.vfxRing(target,COLORS.holy,2.6);this.float(target,'GUARDIAN ANGEL · IMMUNE WHILE VAL’KYR LIVES','info');this.log(`${owner.name} summoned a 124-health Guardian Val’kyr for ${duration} sec to protect ${target.name}.`);
 };
 Game.prototype.dropInfernal=function(owner,x,z,ability){
- if(!owner?.alive)return;
- const holder=new THREE.Group(),warningMat=new THREE.MeshBasicMaterial({color:0x65ff20,transparent:true,opacity:.68,side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending}),warning=new THREE.Mesh(new THREE.RingGeometry(.7,ability.radius||5,28),warningMat),rockMat=new THREE.MeshBasicMaterial({color:0x65d92a}),rock=new THREE.Mesh(new THREE.DodecahedronGeometry(.92,0),rockMat);
- warning.rotation.x=-Math.PI/2;warning.position.set(x,.07,z);rock.position.set(x+1.8,17,z-1.1);holder.add(warning,rock);this.scene.add(holder);let elapsed=0;
- this.effects.push({obj:holder,life:1.05,update:dt=>{elapsed+=dt;warning.material.opacity=.30+Math.abs(Math.sin(elapsed*15))*.38;warning.rotation.z+=dt*.7;rock.rotation.x+=dt*4.2;rock.rotation.z+=dt*3.1;rock.position.y-=dt*17.4;rock.position.x-=dt*1.85;rock.position.z+=dt*1.12;if(elapsed>=.92&&!holder.userData.landed){holder.userData.landed=true;const radius=ability.radius||5;this.vfxRing({x,z},0x65ff20,radius);this.vfxNova({x,z},0x258c16,3.2,8);this.vfxGlyph({x,z},0xb2ff74,.66);this.shake=Math.max(this.shake,.11);let struck=0;this.units.filter(u=>u.team!==owner.team&&u.alive&&!u.healingStreamTotem&&Math.hypot(u.x-x,u.z-z)<=radius&&this.arena.los(owner,u)).forEach(u=>{if(this.damage(owner,u,ability.value||90,'Infernal Impact')){this.applyStun(u,2);if(struck<2)this.vfxGlyph(u,0x65ff20,.48);struck++;}});this.spawnInfernal(owner,x,z,ability);this.float(owner,`INFERNAL LANDED · ${struck} STUNNED`,'info');this.log(`${owner.name}'s Infernal landed, striking ${struck} enem${struck===1?'y':'ies'} and stunning for 2 sec.`);}}});
+ this.scheduleGroundImpact('infernal',owner,x,z,.98,ability);
 };
+Game.prototype.groundWarning=function(kind,x,z,duration=.98,radius=5){
+ const colour=kind==='infernal'?0x65ff20:0xff7038,group=new THREE.Group(),mat=new THREE.MeshBasicMaterial({color:colour,transparent:true,opacity:.8,side:THREE.DoubleSide,depthWrite:false});
+ const rim=new THREE.Mesh(new THREE.RingGeometry(radius-.13,radius,48),mat),fill=new THREE.Mesh(new THREE.CircleGeometry(radius,40),new THREE.MeshBasicMaterial({color:colour,transparent:true,opacity:.13,side:THREE.DoubleSide,depthWrite:false}));
+ rim.rotation.x=fill.rotation.x=-Math.PI/2;rim.position.set(x,.065,z);fill.position.set(x,.06,z);group.add(fill,rim);
+ const reduced=!!$('#reducedFX')?.checked,rock=reduced?null:new THREE.Mesh(kind==='infernal'?new THREE.DodecahedronGeometry(.92,0):new THREE.IcosahedronGeometry(.72,1),new THREE.MeshBasicMaterial({color:colour}));if(rock)group.add(rock);this.scene.add(group);let elapsed=0;
+ this.effects.push({obj:group,life:duration+.06,critical:true,update:dt=>{elapsed+=dt;const p=clamp(elapsed/duration,0,1);rim.material.opacity=.6+Math.sin(p*Math.PI*8)*.2;fill.material.opacity=.08+p*.12;if(rock){rock.position.set(x+(1-p)*1.8,(1-p)*17,z-(1-p)*1.1);rock.rotation.x+=dt*4;rock.rotation.z+=dt*3;}}});
+};
+Game.prototype.scheduleGroundImpact=function(kind,owner,x,z,delay,ability={}){if(!owner?.alive)return;const pending=this.pendingGroundImpacts||(this.pendingGroundImpacts=[]);pending.push({kind,owner,x,z,at:this.time+delay,ability:{...ability}});this.groundWarning(kind,x,z,delay,ability.radius||(kind==='meteor'?5.2:5));};
+Game.prototype.updateGroundImpacts=function(){
+ if(this.netGuest||this.phase!=='fight'||this.paused||!this.pendingGroundImpacts?.length)return;
+ const ready=[];this.pendingGroundImpacts=this.pendingGroundImpacts.filter(impact=>{if(impact.at>this.time)return true;ready.push(impact);return false;});
+ for(const {kind,owner,x,z,ability} of ready){if(!owner.alive||!this.units.includes(owner))continue;const point={x,z},infernal=kind==='infernal',radius=ability.radius||(infernal?5:5.2),colour=infernal?0x65ff20:COLORS.fire;
+  this.vfxRing(point,colour,radius);this.vfxNova(point,colour,3.2,10);this.shake=Math.max(this.shake,.11);this.audio.play(infernal?'shadow':'meteorImpact',{x,z,game:this});
+  for(const unit of this.units){if(!unit.alive||unit.team===owner.team||Math.hypot(unit.x-x,unit.z-z)>radius||(infernal&&(unit.healingStreamTotem||!this.arena.los(point,unit))))continue;const hit=this.damage(owner,unit,infernal?(ability.value||90):205,infernal?'Infernal Impact':'Meteorfall');if(hit){if(infernal){this.applyStun(unit,2);unit.effect('infernalExposure',10,{source:owner});}else unit.effect('burn',5,{value:17,source:owner});}}
+  if(infernal){this.spawnInfernal(owner,x,z,ability);this.float(owner,'INFERNAL LANDED','info');}else{owner.effects=owner.effects.filter(effect=>effect.type!=='meteorLance');owner.effect('meteorLance',9999,{stacks:1,pct:.15});owner.cds[1]=0;this.float(owner,'METEOR LANCE READY','info');}
+ }
+};
+const aetherClearGroundImpacts=Game.prototype.clear;
+Game.prototype.clear=function(){this.pendingGroundImpacts=[];return aetherClearGroundImpacts.call(this);};
 Game.prototype.spawnInfernal=function(owner,x,z,ability){
  this.units.filter(u=>u.infernalSummon&&u.alive&&u.totemOwner===owner).forEach(u=>u.die(null));
  const infernal=this.spawn('Infernal','soul',owner.team,x,z,false);infernal.ai=null;infernal.infernalSummon=true;infernal.summonedUnit=true;infernal.healingStreamTotem=true;infernal.totemOwner=owner;infernal.maxHp=Math.max(1,Math.round(owner.maxHp*.25));infernal.hp=infernal.maxHp;infernal.maxResource=0;infernal.resource=0;infernal.moveSpeed=3.6;infernal.expiresAt=this.time+(ability.duration||10);infernal.nextPulseAt=this.time+2;infernal.nextManaAt=this.time+1;infernal.slamTime=0;infernal.mesh.children.forEach(child=>child.visible=false);if(infernal.clickHitbox)infernal.clickHitbox.visible=true;infernal.effect('infernalLifetime',ability.duration||10,{source:owner});
@@ -7246,6 +8266,10 @@ Game.prototype.spawnInfernal=function(owner,x,z,ability){
  const backSpikes=[];for(const side of [-1,1]){const spike=rock(new THREE.ConeGeometry(.28,1.28,7),[side*.67,3.20,.35],[1,1,1],stone);spike.rotation.z=-side*.48;spike.rotation.x=-.26;backSpikes.push(spike);}
  const aura=new THREE.Mesh(new THREE.RingGeometry(1.28,1.58,24),felFx.clone());aura.rotation.x=-Math.PI/2;aura.position.y=.06;visual.add(aura);const innerAura=new THREE.Mesh(new THREE.RingGeometry(.72,.82,20),felFx.clone());innerAura.rotation.x=-Math.PI/2;innerAura.position.y=.07;visual.add(innerAura);visual.scale.setScalar(1.12);infernal.mesh.add(visual);infernal.infernalVisual=visual;infernal.receiveHeal=()=>{};infernal.nextTargetAt=0;infernal.chaseTarget=null;
  infernal.die=(killer)=>{if(!infernal.alive)return;infernal.alive=false;infernal.hp=0;infernal.cast=null;infernal.mesh.visible=false;if(infernal.plate)infernal.plate.style.opacity='0';if(killer){killer.stats.kb++;this.float(infernal,'INFERNAL DESTROYED','error');this.log(`${killer.name} destroyed ${owner.name}'s Infernal.`);}if(this.target===infernal)this.target=null;};
+ if(ability.authoritative){
+  infernal.update=dt=>{if(!infernal.alive){infernal.mesh.visible=false;return;}const previousX=infernal.visualX??infernal.x,previousZ=infernal.visualZ??infernal.z,walking=Math.hypot(infernal.x-previousX,infernal.z-previousZ)>.004,stunned=!!(infernal.has('stun')||infernal.has('furyStun')||infernal.has('cheapStun')||infernal.has('gouge')||infernal.has('blind')||infernal.has('windIncap')||infernal.has('fear'));infernal.slamTime=Math.max(0,(infernal.slamTime||0)-dt);infernal.visualX=infernal.x;infernal.visualZ=infernal.z;infernal.mesh.position.set(infernal.x,0,infernal.z);const focus=this.netSession?.byId?.(infernal.netFocusId);if(focus&&!stunned)infernal.mesh.rotation.y=Math.atan2(focus.x-infernal.x,focus.z-infernal.z);const moving=walking&&!stunned,gait=Math.sin(this.time*7.4)*(moving ? .34 : .05),heave=Math.abs(Math.sin(this.time*7.4))*(moving ? .09 : .025),slam=infernal.slamTime>0?Math.sin((1-infernal.slamTime/.62)*Math.PI):0;armPivots.forEach((arm,i)=>arm.rotation.x=slam?-1.72*slam:(i?1:-1)*gait);legPivots.forEach((leg,i)=>leg.rotation.x=(i?-1:1)*gait*.72);visual.position.y=heave-slam*.12;visual.rotation.x=slam*.16;aura.rotation.z-=dt*1.5;innerAura.rotation.z+=dt*2.1;chestCore.scale.setScalar(1+Math.sin(this.time*7)*.08);};
+  return infernal;
+ }
  infernal.update=dt=>{
   if(!infernal.alive)return;infernal.effects=infernal.effects.filter(e=>(e.time-=dt)>0);if(!owner.alive||this.time>=infernal.expiresAt){infernal.die(null);return;}
   const stunned=!!(infernal.has('stun')||infernal.has('furyStun')||infernal.has('cheapStun')||infernal.has('gouge')||infernal.has('blind')||infernal.has('windIncap')||infernal.has('fear'));
@@ -7256,6 +8280,7 @@ Game.prototype.spawnInfernal=function(owner,x,z,ability){
   infernal.slamTime=Math.max(0,infernal.slamTime-dt);infernal.visualX=infernal.x;infernal.visualZ=infernal.z;infernal.mesh.position.set(infernal.x,0,infernal.z);const gait=Math.sin(this.time*7.4)*(walking?.34:.05),heave=Math.abs(Math.sin(this.time*7.4))*(walking?.09:.025),slam=infernal.slamTime>0?Math.sin((1-infernal.slamTime/.62)*Math.PI):0;armPivots.forEach((arm,i)=>arm.rotation.x=slam?-1.72*slam:(i?1:-1)*gait);legPivots.forEach((leg,i)=>leg.rotation.x=(i?-1:1)*gait*.72);visual.position.y=heave-slam*.12;visual.rotation.x=slam*.16;aura.rotation.z-=dt*1.5;innerAura.rotation.z+=dt*2.1;chestCore.scale.setScalar(1+Math.sin(this.time*7)*.08);
  };
  this.vfxRing(infernal,owner.team==='ally'?COLORS.ally:COLORS.enemy,2.4);this.vfxNova(infernal,0x65ff20,2.5,8);this.float(infernal,`${infernal.maxHp} HP · CHASING`,'info');this.log(`${owner.name} summoned a killable Infernal with ${infernal.maxHp} health for 10 sec; it will chase the nearest enemy.`);
+ return infernal;
 };
 Game.prototype.spawnHealingStreamTotem=function(owner,ability){
  if(!owner?.alive)return;this.units.filter(u=>u.healingStreamTotem&&u.alive&&u.totemOwner===owner).forEach(u=>u.die(null));
@@ -7267,9 +8292,164 @@ Game.prototype.spawnHealingStreamTotem=function(owner,ability){
  totem.update=(dt)=>{if(!totem.alive)return;if(this.time>=totem.expiresAt){totem.die(null);return;}totem.visualX=totem.x;totem.visualZ=totem.z;totem.mesh.position.set(totem.x,0,totem.z);visual.rotation.y+=dt*.75;crystal.rotation.y+=dt*2.6;range.material.opacity=.38+Math.sin(this.time*5)*.18;if(this.time>=totem.nextPulseAt){totem.nextPulseAt+=2;const allies=this.units.filter(u=>u.alive&&!u.healingStreamTotem&&u.team===owner.team&&dist(u,totem)<=18);allies.forEach((u,i)=>{this.heal(owner,u,ability.value||90,'Healing Stream Totem');this.vfxGlyph(u,0x82f4ff,.48);if(i<3)this.vfxRing(u,0x62dff5,.85);});this.vfxNova(totem,0x75efff,2.0,12);this.float(totem,`HEALING STREAM ×${allies.length}`,'heal');}};
  this.vfxRing(totem,teamColour,1.8);this.vfxGlyph(totem,0x8ff7ff,.75);this.float(totem,'280 HP · 10 SEC · 18M','info');this.log(`${owner.name} summoned a 280-health Healing Stream Totem for 10 sec with an 18m healing radius.`);
 };
+const aetherDuelPreview=Game.prototype.preview;
+Game.prototype.preview=function(){this.syncMenuCards();const result=aetherDuelPreview.call(this);if($('#modeSelect')?.value==='1v1'){const chosen=$('#classSelect')?.value||'flame',arena=this.arena?.displayName||'Random Arena';$('#composition').innerHTML=`<strong class="blue">You:</strong> ${CLASS_INFO[chosen].name}<br><strong class="red">Opponent:</strong> Random damage class<br><small style="color:var(--muted)">Arena: <strong>${arena}</strong> · A DPS-only duel with dedicated 1v1 bot tactics and its own rating.</small>`;}return result;};
+const aetherDuelSafeStart=Game.prototype.start;
+Game.prototype.start=function(){this.syncMenuCards();return aetherDuelSafeStart.call(this);};
+
+function releaseNoticeFingerprint(value){
+ let hash=2166136261;
+ for(let i=0;i<value.length;i++){hash^=value.charCodeAt(i);hash=Math.imul(hash,16777619);}
+ return (hash>>>0).toString(36);
+}
+function setupReleaseNotice(force=false){
+ const modal=$('#updateNotice'),entry=$('#changelogModal .changelog-entry.current');
+ if(!modal||!entry)return;
+ const version=entry.querySelector(':scope > div strong')?.textContent?.trim()||'Latest Update';
+ const title=entry.querySelector(':scope > div span')?.textContent?.trim()||'Aetherfall Arena';
+ const buildToken=($('#updateNotice')?.ownerDocument?.querySelector('script[src*="game-runtime.js"]')?.src||'').split('?')[1]||'';
+ const fingerprint=`${version}:${releaseNoticeFingerprint(`${entry.textContent}|${buildToken}`)}`;
+ const storageKey='aetherfallSeenReleaseNotice';
+ let seen='';try{seen=localStorage.getItem(storageKey)||'';}catch(e){}
+ if(!force&&seen===fingerprint)return;
+
+ const classTags=new Set(['Flame Duelist','Flame','Shadowblade','Stormwarden','Windwalker','Soulweaver','Lifesage','Paladin','Discipline','Warrior']);
+ const classList=$('#updateNoticeClassList'),generalList=$('#updateNoticeGeneralList');
+ classList.replaceChildren();generalList.replaceChildren();
+ const addNote=(li)=>{
+  const rawTag=li.querySelector('em')?.textContent?.trim()||'[Update]',tag=rawTag.replace(/^\[|\]$/g,''),text=li.textContent.replace(rawTag,'').trim();
+  const classChange=classTags.has(tag),row=document.createElement('div'),badge=document.createElement('span'),copy=document.createElement('p');
+  row.className=`update-note${classChange?' class-change':''}`;badge.className='update-note-tag';badge.textContent=tag;copy.textContent=text;row.append(badge,copy);(classChange?classList:generalList).appendChild(row);
+ };
+ entry.querySelectorAll(':scope > ul > li').forEach(addNote);
+ $('#updateNoticeClasses').classList.toggle('hidden',!classList.children.length);
+ $('#updateNoticeGeneral').classList.toggle('hidden',!generalList.children.length);
+ $('#updateNoticeVersion').textContent=version;
+ $('#updateNoticeTitle').textContent=title;
+ $('#updateNoticeSubtitle').textContent='Here is what changed since the last build you opened.';
+ const close=()=>modal.classList.add('hidden');
+ $('#updateNoticeDismiss').onclick=close;
+ $('#updateNoticeChangelog').onclick=()=>{close();$('#changelogModal')?.classList.remove('hidden');};
+ modal.onclick=e=>{if(e.target===modal)close();};
+ modal.classList.remove('hidden');
+ try{localStorage.setItem(storageKey,fingerprint);}catch(e){}
+}
+window.showLatestUpdateNotice=()=>setupReleaseNotice(true);
+function setupPlayerIdentity(){
+ const modal=$('#nicknameSetup'),form=$('#nicknameSetupForm'),input=$('#nicknameSetupInput'),error=$('#nicknameSetupError'),share=$('#nicknameShareRankings');
+ if(!modal||!form||!input){setupReleaseNotice();return;}
+ if(getPlayerNickname()){modal.classList.add('hidden');queueRankingPublish(1200);setupReleaseNotice();return;}
+ modal.classList.remove('hidden');setTimeout(()=>input.focus(),40);
+ form.onsubmit=e=>{e.preventDefault();const nickname=setPlayerNickname(input.value);if(!nickname){error.textContent='Choose a nickname between 2 and 24 visible characters.';input.focus();return;}progression.settings.shareOfflineRankings=!!share?.checked;saveProgression();if(progression.settings.shareOfflineRankings)queueRankingPublish(50);error.textContent='';modal.classList.add('hidden');if(window.game){window.game.player&&(window.game.player.name=nickname);window.game.refreshMenuProgress?.();}setupReleaseNotice();};
+}
+window.showNicknameSetup=()=>{const modal=$('#nicknameSetup'),input=$('#nicknameSetupInput');if(modal){input.value=getPlayerNickname();modal.classList.remove('hidden');setTimeout(()=>input.focus(),40);}};
+
+const SOCIAL_FRIENDS_KEY='aetherfallFriendsV1';
+function socialEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+class AetherSocialClient{
+ constructor(){this.peer=null;this.view='global';this.polling=false;this.lastPayload='';this.friends=this.loadFriends();this.bind();document.body.classList.add('social-ready');this.refreshProfiles().finally(()=>{this.renderFriends();this.poll();});this.timer=setInterval(()=>this.poll(),4000);this.presenceTimer=setInterval(()=>this.heartbeat().catch(()=>{}),30000);}
+ loadFriends(){try{return [...new Set(JSON.parse(localStorage.getItem(SOCIAL_FRIENDS_KEY)||'[]').filter(id=>/^[a-zA-Z0-9_-]{8,80}$/.test(id)))];}catch(e){return [];}}
+ saveFriends(){try{localStorage.setItem(SOCIAL_FRIENDS_KEY,JSON.stringify(this.friends));}catch(e){}this.renderFriends();}
+ identity(){return {...rankingIdentity(),nickname:playerNickname()};}
+ profile(id){return rankingPlayersCache.find(profile=>String(profile.playerId)===String(id))||(this.contacts||[]).find(profile=>String(profile.playerId)===String(id))||null;}
+ status(text,error=false){const host=$('#socialStatus');if(!host)return;host.textContent=text||'';host.classList.toggle('error',!!error);}
+ async request(query='',options={}){const response=await fetch(`/api/social${query}`,{headers:{'content-type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Social service unavailable.');return data;}
+ authHeaders(){const identity=this.identity();return {'content-type':'application/json','x-player-id':identity.playerId,authorization:`Bearer ${identity.token}`};}
+ async ensureRegistered(){const nickname=getPlayerNickname();if(!nickname)throw new Error('Choose your arena nickname before using chat.');if(this.registeredNickname===nickname)return;await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'register'})});this.registeredNickname=nickname;}
+ async heartbeat(){
+  if(!getPlayerNickname()||this.heartbeatPending||Date.now()-(this.lastHeartbeatAt||0)<25000)return;
+  this.heartbeatPending=true;
+  try{await this.ensureRegistered();await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'heartbeat'})});this.lastHeartbeatAt=Date.now();}
+  finally{this.heartbeatPending=false;}
+ }
+ async refreshContacts(){
+  if(!getPlayerNickname())return;await this.ensureRegistered();await this.heartbeat();
+  const data=await this.request('?channel=contacts',{headers:this.authHeaders()});
+  this.contacts=Array.isArray(data.contacts)?data.contacts:[];this.requests=data.requests||[];this.suggestions=data.suggestions||[];
+  this.friends=this.contacts.map(c=>c.playerId);this.saveFriends();this.renderNotifications();
+ }
+ renderNotifications(){
+  const unread=(this.contacts||[]).filter(c=>c.unread),incoming=(this.requests||[]).filter(c=>c.incoming);
+  let notice=$('#socialNotice');if(!notice){notice=document.createElement('button');notice.id='socialNotice';notice.className='social-notice';notice.setAttribute('aria-live','polite');document.body.appendChild(notice);}
+  const count=unread.length+incoming.length;notice.hidden=!count;
+  notice.textContent=[unread.length?`${unread.length} player${unread.length===1?'':'s'} messaged you`:'',incoming.length?`${incoming.length} friend request${incoming.length===1?'':'s'}`:''].filter(Boolean).join(' · ');
+  notice.onclick=()=>{this.show('friends');$('#socialDock').classList.remove('collapsed');$('#socialDock').classList.add('notification-open');};
+ }
+ async answerRequest(id,accept){
+  try{await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),channel:'private',peerId:id,action:accept?'acceptFriend':'declineFriend'})});await this.refreshContacts();this.status(accept?'Friend request accepted.':'Friend request declined.');}catch(e){this.status(e.message,true);}
+ }
+ bind(){
+const dock=$('#socialDock'),collapse=$('#socialCollapse');let collapsed=innerWidth<=1280;try{const saved=localStorage.getItem('aetherfallSocialCollapsed');if(saved!==null)collapsed=saved==='1';}catch(e){}dock?.classList.toggle('collapsed',collapsed);if(collapse){collapse.textContent=collapsed?'+':'−';collapse.onclick=()=>{const next=!dock.classList.contains('collapsed');dock.classList.toggle('collapsed',next);collapse.textContent=next?'+':'−';if(next)dock.classList.remove('notification-open');try{localStorage.setItem('aetherfallSocialCollapsed',next?'1':'0');}catch(e){}};}
+  document.querySelectorAll('[data-social-tab]').forEach(button=>button.onclick=()=>this.show(button.dataset.socialTab));
+  $('#globalChatForm').onsubmit=event=>{event.preventDefault();this.send('global',$('#globalChatInput'));};
+  $('#privateChatForm').onsubmit=event=>{event.preventDefault();this.send('private',$('#privateChatInput'));};
+  $('#friendSearchForm').onsubmit=event=>{event.preventDefault();this.search($('#friendSearchInput').value);};
+  $('#privateChatBack').onclick=()=>this.show('friends');
+  $('#friendInviteBtn').onclick=()=>this.invite();
+ }
+ show(view){this.view=view==='friends'?'friends':'global';this.peer=null;$('#privateChat').classList.add('hidden');$('#socialGlobal').classList.toggle('hidden',this.view!=='global');$('#socialFriends').classList.toggle('hidden',this.view!=='friends');document.querySelectorAll('[data-social-tab]').forEach(button=>button.classList.toggle('active',button.dataset.socialTab===this.view));if(this.view==='friends')this.renderFriends();this.lastPayload='';this.poll();}
+ async refreshProfiles(){try{await fetchOfflineRankings();}catch(e){this.status('Player search is temporarily unavailable.',true);}}
+ async search(raw){const query=String(raw||'').trim().toLowerCase(),host=$('#friendSearchResults');if(!host)return;if(query.length<2){host.innerHTML='<div class="social-empty">Enter at least two characters.</div>';return;}host.innerHTML='<div class="social-empty">Searching players…</div>';await this.refreshProfiles();const me=this.identity().playerId,results=rankingPlayersCache.filter(profile=>profile.playerId!==me&&String(profile.nickname||'').toLowerCase().includes(query)).slice(0,8);host.innerHTML=results.length?results.map(profile=>`<button class="friend-result" data-social-player="${socialEscape(profile.playerId)}"><span>${classIcon(profile.highestClass||'flame',CLASS_INFO[profile.highestClass]?.badge||'✦')}</span><span><strong>${socialEscape(profile.nickname)}</strong><small>${Math.round(Number(profile.highestRating)||1600)} highest rating</small></span><b>${this.friends.includes(profile.playerId)?'Message':'Add'}</b></button>`).join(''):'<div class="social-empty">No published player matches that nickname.</div>';host.querySelectorAll('[data-social-player]').forEach(button=>button.onclick=()=>{const profile=results.find(item=>item.playerId===button.dataset.socialPlayer);if(profile)this.addFriend(profile,true);});}
+ async addFriend(profile,open=false){
+  if(!profile?.playerId||profile.playerId===this.identity().playerId)return;
+  if(this.friends.includes(profile.playerId)){if(open)this.openPrivate(profile.playerId);return;}
+  try{await this.ensureRegistered();const data=await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'friend',channel:'private',peerId:profile.playerId})});
+  await this.refreshContacts();this.status(data.accepted?'Already friends.':`Friend request sent to ${profile.nickname}. They must accept before chatting.`);
+  if(data.accepted&&open)this.openPrivate(profile.playerId);
+  }catch(error){this.status(error.message,true);}
+ }
+ async removeFriend(id){try{await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'removeFriend',channel:'private',peerId:id})});this.friends=this.friends.filter(friend=>friend!==id);this.contacts=(this.contacts||[]).filter(friend=>friend.playerId!==id);this.saveFriends();if(this.peer===id)this.show('friends');}catch(error){this.status(error.message,true);}}
+ renderFriends(){
+  const host=$('#friendList'),count=$('#socialFriendCount');if(count)count.textContent=String(this.friends.length);if(!host)return;
+  host.innerHTML=(this.requests||[]).map(r=>`<div class="friend-request"><strong>${socialEscape(r.nickname)}</strong><span>${r.incoming?'Wants to be your friend':'Request sent · awaiting acceptance'}</span>${r.incoming?`<button data-accept="${socialEscape(r.playerId)}">Accept</button><button data-decline="${socialEscape(r.playerId)}">Decline</button>`:`<button data-friend-remove="${socialEscape(r.playerId)}">Cancel request</button>`}</div>`).join('')+
+  (this.friends.length?[...this.friends].sort((a,b)=>Number(!!this.contacts?.find(c=>c.playerId===b)?.online)-Number(!!this.contacts?.find(c=>c.playerId===a)?.online)||(this.profile(a)?.nickname||'').localeCompare(this.profile(b)?.nickname||'')).map(id=>{const profile=this.profile(id),contact=this.contacts?.find(c=>c.playerId===id),name=profile?.nickname||'Gladiator',cls=profile?.highestClass||'flame';return `<div class="friend-row"><button data-friend-open="${socialEscape(id)}"><span>${classIcon(cls,CLASS_INFO[cls]?.badge||'✦')}</span><span><strong>${socialEscape(name)} ${contact?.unread?'<b class="unread-dot">New</b>':''}</strong><small class="friend-presence ${contact?.online?'online':'offline'}"><i aria-hidden="true"></i>${contact?.online?'Online':'Offline'}</small></span></button><button class="friend-remove" data-friend-remove="${socialEscape(id)}" title="Remove friend">×</button></div>`;}).join(''):'<div class="social-empty">Search a player to send a friend request.</div>');
+  host.querySelectorAll('[data-friend-open]').forEach(b=>b.onclick=()=>this.openPrivate(b.dataset.friendOpen));
+  host.querySelectorAll('[data-friend-remove]').forEach(b=>b.onclick=()=>this.removeFriend(b.dataset.friendRemove));
+  host.querySelectorAll('[data-accept]').forEach(b=>b.onclick=()=>this.answerRequest(b.dataset.accept,true));
+  host.querySelectorAll('[data-decline]').forEach(b=>b.onclick=()=>this.answerRequest(b.dataset.decline,false));
+  (this.suggestions||[]).forEach(profile=>{const row=document.createElement('div');row.className='friend-request';const label=document.createElement('strong');label.textContent=profile.nickname;const note=document.createElement('span');note.textContent='Previous contact · friendship needs confirmation';const send=document.createElement('button');send.textContent='Send request';send.onclick=()=>this.addFriend(profile);row.append(label,note,send);host.appendChild(row);});
+ }
+ openPrivate(id){this.peer=id;this.view='private';window.game?.closeLocalRankings();$('#socialDock').classList.remove('collapsed');$('#socialCollapse').textContent='−';const profile=this.profile(id);$('#privateChatName').textContent=profile?.nickname||'Gladiator';$('#socialGlobal').classList.add('hidden');$('#socialFriends').classList.add('hidden');$('#privateChat').classList.remove('hidden');document.querySelectorAll('[data-social-tab]').forEach(button=>button.classList.remove('active'));this.lastPayload='';this.poll();}
+ renderMessages(messages,host){
+  const me=this.identity().playerId;if(!host)return;
+  messages=messages.filter(m=>Date.now()<(m.expiresAt||m.createdAt+(m.type==='invite'?300000:3600000)));
+  const signature=JSON.stringify(messages.map(m=>[m.id,m.createdAt]));if(signature===this.lastPayload)return;this.lastPayload=signature;
+  host.replaceChildren();
+  if(!messages.length){const empty=document.createElement('div');empty.className='social-empty';empty.textContent='No recent messages. Messages expire after 1 hour.';host.appendChild(empty);return;}
+  messages.forEach(message=>{
+   const row=document.createElement('div');row.className=`social-message ${message.senderId===me?'mine':''} ${message.type==='invite'?'invite':''}`;
+   const meta=document.createElement('div');meta.className='social-message-meta';const name=document.createElement('strong');name.textContent=message.senderName||'Gladiator';
+   const time=document.createElement('span');time.textContent=new Date(message.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});meta.append(name,time);
+   const copy=document.createElement('p');copy.textContent=message.type==='invite'?`${message.format?.toUpperCase()||'2V2'} lobby invitation · expires in 5 minutes`:message.text||'';row.append(meta,copy);
+   if(message.type==='invite'&&message.invite&&message.senderId!==me){
+    const dismiss=async(join)=>{if(join){window.aetherJoinFriendInvite?.(message.invite);}try{await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'dismissInvite',channel:'private',peerId:message.senderId,messageId:message.id})});row.remove();this.lastPayload='';}catch(e){this.status(e.message,true);}};
+    const join=document.createElement('button');join.className='social-join';join.textContent='Join Lobby';join.onclick=()=>dismiss(true);
+    const close=document.createElement('button');close.className='social-join';close.textContent='Dismiss';close.onclick=()=>dismiss(false);row.append(join,close);
+   }host.appendChild(row);
+  });host.scrollTop=host.scrollHeight;
+ }
+ async poll(){
+  if(this.polling||document.hidden)return;this.polling=true;const view=this.view,peer=this.peer;
+  try{await this.refreshContacts();
+   const dock=$('#socialDock'),visible=dock&&!dock.classList.contains('collapsed')&&(!$('#menu').classList.contains('hidden')||dock.classList.contains('notification-open'));
+   if(visible&&view==='private'&&peer){
+    const data=await this.request(`?channel=private&peerId=${encodeURIComponent(peer)}`,{headers:this.authHeaders()});
+    if(this.view===view&&this.peer===peer){this.renderMessages(data.messages||[],$('#privateChatMessages'));const through=Math.max(0,...(data.messages||[]).filter(m=>m.senderId!==this.identity().playerId).map(m=>m.createdAt));
+     if(through>(this.readTimes?.[peer]||0)){await this.request('',{method:'POST',body:JSON.stringify({...this.identity(),action:'read',channel:'private',peerId:peer,through})});(this.readTimes||={})[peer]=through;const c=this.contacts.find(c=>c.playerId===peer);if(c)c.unread=false;this.renderNotifications();}
+    }
+   }else if(visible&&view==='global'){const data=await this.request('?channel=global');if(this.view===view)this.renderMessages(data.messages||[],$('#globalChatMessages'));}
+  }catch(error){this.status(error.message,true);}finally{this.polling=false;}
+ }
+ async send(channel,input,extra={}){const text=String(input?.value||'').trim();if(!extra.type&&!text)return false;const identity=this.identity(),body={...identity,channel,peerId:channel==='private'?this.peer:null,text,...extra};if(channel==='private'&&!this.peer)return false;try{if(input)input.disabled=true;await this.ensureRegistered();await this.request('',{method:'POST',body:JSON.stringify(body)});if(input)input.value='';this.lastPayload='';await this.poll();return true;}catch(error){this.status(error.message,true);return false;}finally{if(input){input.disabled=false;input.focus();}}}
+ async invite(){if(!this.peer)return;const format=$('#friendInviteFormat')?.value==='1v1'?'1v1':'2v2';if(typeof window.aetherCreateFriendInvite!=='function'){this.status('Online lobby controls are still loading.',true);return;}try{await this.ensureRegistered();const invite=await window.aetherCreateFriendInvite(format);if(await this.send('private',null,{type:'invite',invite,format}))this.status(`${format.toUpperCase()} lobby created and invitation sent.`);}catch(error){this.status(error.message||'Could not create the lobby.',true);}}
+}
+function setupAetherSocial(){if($('#socialDock')&&!window.aetherSocial)window.aetherSocial=new AetherSocialClient();}
+setupAetherSocial();
+
 /* Explicit bridge for the separately-scoped multiplayer script. Keeping these
    references behind one object prevents ReferenceErrors across script scopes. */
-window.AETHER_ONLINE_BRIDGE={CLASS_INFO:CLASS_INFO,AB:AB,AIController:AIController,getProgression:()=>progression,getNormalizedGearStats:(cls,ilvl=990)=>{const totals=blankStats(),preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];GEAR_SLOTS.forEach(slot=>{const values=itemStatValues({classKey:cls,slot,ilvl,statA:preferred[0],statB:preferred[1]});GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});return totals;}};
+window.AETHER_ONLINE_BRIDGE={BALANCE,TALENT_TREES,TALENT_UNLOCKED_ABILITIES,randomBotTalents,buildUnitAbilities,classTalentStaminaMult,getMountDefinition:mountDefinition,mountSkinPreviewDefinition:mountSkinPreviewDefinition,buildMountVisual:buildMountVisual,CLASS_INFO:CLASS_INFO,AB:AB,AIController:AIController,getProgression:()=>progression,getPlayerNickname:()=>playerNickname(),getNormalizedGearStats:(cls,ilvl=990)=>{const totals=blankStats(),preferred=GEAR_BUILD_INFO[cls]?.stats||['Power','Vitality'];GEAR_SLOTS.forEach(slot=>{const values=itemStatValues({classKey:cls,slot,ilvl,statA:preferred[0],statB:preferred[1]});GEAR_STATS.forEach(stat=>totals[stat]+=values[stat]||0);});return totals;}};
+setupPlayerIdentity();
 window.__aetherStart=async()=>{ if(window.__aetherStarted)return; window.__aetherStarted=true; try{ await AetherKit.loadAll(); }catch(e){ console.error('AetherKit model load failed:',e); } syncTalentUnlockedAbilities();const game=new Game(); window.game=game;try{window.CLASSES=CLASSES;window.GEAR_CLASSES=GEAR_CLASSES;}catch(e){}document.addEventListener('click',e=>{if(e.target.closest&&e.target.closest('#closeTalents')){$('#talents')?.classList.add('hidden');document.getElementById('talentTip')?.remove();return;}if(e.target.closest&&e.target.closest('#talentsBtn')){e.preventDefault();try{aetherBasicTalentTree(($('#classSelect')&&$('#classSelect').value)||'flame');}catch(err){console.error('Talent button fallback failed:',err);try{game.safeOpenTalents(($('#classSelect')&&$('#classSelect').value)||'flame');}catch(e2){console.error(e2);$('#talents')?.classList.remove('hidden');}}}}); };
 if(window.__THREE_READY){ window.__aetherStart(); }
 })();

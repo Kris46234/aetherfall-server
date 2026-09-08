@@ -4869,7 +4869,7 @@ export const combatTuning = {
           "cd": 34,
           "cost": 0,
           "value": 0,
-          "tip": "Defensive stance. Reduce incoming damage by 50% for 6 sec and immediately heal yourself for 135. A large jade willow barrier clearly shows the defensive. Target: yourself or the area around you."
+          "tip": "Defensive stance. Reduce incoming damage by 50% for 6 sec and immediately heal yourself for 8% of maximum health (before healing modifiers). A large jade willow barrier clearly shows the defensive. Target: yourself or the area around you."
         },
         {
           "name": "Incapacitate",

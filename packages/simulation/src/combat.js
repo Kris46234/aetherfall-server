@@ -625,7 +625,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       }
       case 'monkDefensive':
         addEffect(source, 'defensive', 6, { reduction: .50 });
-        heal(source, source, 135, 'Willow Guard');
+        heal(source, source, source.maxHp * .08, 'Willow Guard');
         return true;
       case 'windIncap':
         return applyCrowdControl(target, 'windIncap', ability.baseValue || 3, 'incap') > 0;

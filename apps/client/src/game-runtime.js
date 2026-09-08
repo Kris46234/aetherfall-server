@@ -1312,7 +1312,7 @@ Object.assign(TALENT_UNLOCKED_ABILITIES.pala,{
 
 // Chaos Bolt is a two-spell specialisation conversion: Unstable Affliction becomes
 // Chaos Bolt, while Creeping Torment becomes the faster fire damage-over-time cast.
-const CHAOS_IMMOLATE_ABILITY={name:'Immolate',icon:'🔥',type:'immolate',school:'fire',range:25,cast:1.35,cd:0,cost:2,value:86,dotValue:35,tip:'Burn an enemy for 86 Fire damage immediately and another 280 Fire damage over 8 sec. Immolate has a 1.35 sec cast time and no cooldown. Essence Siphon channels 1 sec faster against your Immolated target.'};
+const CHAOS_IMMOLATE_ABILITY={name:'Immolate',icon:'🔥',type:'immolate',school:'fire',range:25,cast:1.35,cd:0,cost:2,value:146.2,dotValue:59.5,tip:'Burn an enemy for 146.2 Fire damage immediately and another 476 Fire damage over 8 sec. Immolate has a 1.35 sec cast time and no cooldown. Essence Siphon channels 1 sec faster against your Immolated target.'};
 const soulFear=AB.soul.find(a=>a.name==='Fear');if(soulFear)soulFear.cd=6;
 const soulSiphon=AB.soul.find(a=>a.name==='Essence Siphon');if(soulSiphon)soulSiphon.tip='Channel for 2.5 sec, draining the target every 0.5 sec and healing yourself. Soul Scar and Creeping Torment strengthen each tick. Press Essence Siphon again to stop the channel early.';
 Object.assign(TALENT_UNLOCKED_ABILITIES.shadow,{
@@ -1405,7 +1405,7 @@ const ABILITY_TOOLTIP_REWRITES={
  ,'Frost Shock':'Deal 38 Frost damage and slow the enemy by 25% for up to 3 sec; repeated roots or snares shorten the slow. The Frost Shock mark remains for 8 sec, increasing your Arc Spark and Forked Current damage against that enemy by 15%.'
  ,'Pandemic Bloom':'Instantly deal 274 Shadow damage to an enemy. Shadowfury empowers your next Pandemic Bloom by 20% for 8 sec.'
  ,'Chaos Bolt':'After a 1.6 sec cast, launch a devastating bolt of chaos for 510 Shadow damage. Chaos Bolt always critically strikes, and your Critical Strike chance further increases its damage. Learning it replaces Unstable Affliction and transforms Creeping Torment into Immolate. Every Essence Siphon tick reduces its 10 sec cooldown by 3 sec.'
- ,'Immolate':'After a 1.35 sec cast, burn an enemy for 86 Fire damage immediately and another 280 Fire damage over 8 sec. Immolate has no cooldown and makes Essence Siphon channel 1 sec faster against that target.'
+ ,'Immolate':'After a 1.35 sec cast, burn an enemy for 146.2 Fire damage immediately and another 476 Fire damage over 8 sec. Immolate has no cooldown and makes Essence Siphon channel 1 sec faster against that target.'
  ,'Essence Siphon':'Channel for 2.5 sec, damaging the enemy and healing yourself every 0.5 sec. Soul Scar and Creeping Torment strengthen every tick. Press Essence Siphon again to stop the channel early.'
  ,'Mortal Horror':'Fear an enemy for up to 3.5 sec and immediately heal yourself for 20% maximum health before dampening. Your periodic damage does not break this fear, but direct damage can.'
  ,'Dark Pact':'Shield yourself for 30% of your maximum health for 6 sec. Dark Pact does not grant Soul Barrier’s interrupt immunity. Barrier Rites increases the amount absorbed by 3% per rank.'

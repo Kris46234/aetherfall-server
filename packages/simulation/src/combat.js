@@ -143,7 +143,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       ability.school = 'fire';
       ability.castTime = 1.35;
       ability.cooldown = 0;
-      ability.baseValue = 86;
+      ability.baseValue = 146.2;
       ability.immolate = true;
     }
     if (ability.id === 'flame_phoenix_guard') {
@@ -1022,7 +1022,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         if (ability.immolate) {
           const hit = damage(source, target, ability.baseValue, 'Immolate', { school: 'fire' }).hit;
           if (hit) addEffect(target, 'burn', 8, {
-            effectKey: `immolate:${source.id}`, sourceId: source.id, value: 35,
+            effectKey: `immolate:${source.id}`, sourceId: source.id, value: 59.5,
             label: 'Immolate', interval: 1, tickRemaining: 1
           });
           return hit;

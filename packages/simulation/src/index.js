@@ -313,12 +313,10 @@ export function createSimulation({
       if (bladestorm) combat.addEffect(unit, 'bladestorm', 4, { immune: true });
       emit({
         type: 'castStarted', unitId, abilityId: ability.id, targetId: unit.id,
-        abilityName: ability.name, abilityType: ability.type,
         sequence: action.sequence, channel: true, duration: round(duration),
         school: ability.school, uninterruptible: !!unit.cast.uninterruptible
       });
     } else if (castTime > 0) {
-      if(unit.classId==='flame'&&Number(unit.talents?.flame_tempered_focus||0)>0&&[...state.units.values()].some(other=>other.alive&&other.team!==unit.team&&distance(unit,other)<8))combat.addEffect(unit,'temperedFocus',2,{reduction:Number(unit.talents.flame_tempered_focus)*.02});
       unit.cast = {
         abilityId: ability.id,
         ability,
@@ -332,12 +330,11 @@ export function createSimulation({
       };
       emit({
         type: 'castStarted', unitId, abilityId: ability.id, targetId: target?.id || null,
-        abilityName: ability.name, abilityType: ability.type,
         sequence: action.sequence, channel: false, duration: round(castTime),
         school: ability.school, uninterruptible: false
       });
     } else {
-      emit({ type: 'actionComplete', unitId, abilityId: ability.id, abilityName: ability.name, abilityType: ability.type, targetId: target?.id || null, sequence: action.sequence });
+      emit({ type: 'actionComplete', unitId, abilityId: ability.id, targetId: target?.id || null, sequence: action.sequence });
       if (ability.type === 'dash') {
         const dx = Number(action.directionX), dz = Number(action.directionZ), length = Math.hypot(dx, dz);
         unit.actionDirection = Number.isFinite(length) && length > .001 ? { x: dx / length, z: dz / length } : null;
@@ -430,7 +427,6 @@ export function createSimulation({
             if (target?.alive && !hostileStealth && distance(unit, target) <= completed.ability.range + unit.radius + target.radius && hasLineOfSight(unit, target, state.arena.pillars, .05)) {
               emit({
                 type: 'actionComplete', unitId: unit.id, abilityId: completed.abilityId,
-                abilityName: completed.ability.name, abilityType: completed.ability.type,
                 targetId: completed.targetId, sequence: completed.sequence
               });
               combat.resolveAbility(unit, completed.ability, target);
@@ -442,7 +438,6 @@ export function createSimulation({
             }
           } else emit({
             type: 'actionComplete', unitId: unit.id, abilityId: completed.abilityId,
-            abilityName: completed.ability.name, abilityType: completed.ability.type,
             targetId: completed.targetId, sequence: completed.sequence
           });
         }

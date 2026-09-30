@@ -1,18 +1,14 @@
 import {combatTuning as data} from '../generated/combat-tuning.generated.js';
 // Apply shared choice-pool limits to old or stale client builds at the lobby boundary.
 export function limitTalentPools(classId,talents={}){
- const nodes=data.trees[classId]||[],result={},counts=new Map(),choices=new Set();
- for(const node of nodes){const rank=Math.min(Number(node.max)||1,Math.max(0,Math.floor(Number(talents[node.id])||0)));if(rank>0)result[node.id]=rank;}
- for(const node of nodes){
+ const result={...talents},counts=new Map(),choices=new Set();
+ for(const node of data.trees[classId]||[]){
   if(node.choice&&Number(result[node.id])>0){if(choices.has(node.choice)){delete result[node.id];continue;}choices.add(node.choice);}
   if(!node.capstoneGroup||!(Number(result[node.id])>0))continue;
   const count=counts.get(node.capstoneGroup)||0;
   if(count>=(node.capstoneLimit||2))delete result[node.id];
   else counts.set(node.capstoneGroup,count+1);
  }
- const deepest=nodes.filter(node=>!node.virtualChoice).slice().sort((a,b)=>(b.y||0)-(a.y||0)||(b.x||0)-(a.x||0));
- let spent=Object.values(result).reduce((sum,rank)=>sum+rank,0);
- while(spent>28){const node=deepest.find(entry=>Number(result[entry.id]||0)>0);if(!node)break;if(--result[node.id]<=0)delete result[node.id];spent--;}
  return result;
 }
 export function normalizedVitals(classId,talents={}){
@@ -26,15 +22,7 @@ export function normalizedVitals(classId,talents={}){
 export function botBuild(classId,random){
  const bank=data.builds[classId]||[{}],build=limitTalentPools(classId,{...bank[Math.floor(random()*bank.length)]});
  if(classId==='shadow'&&Number(build.eviscerate)>0&&random()<.72)build.shadow_find_weakness=1+(random()<.48?1:0);
- const tree=data.trees[classId]||[],spent=()=>Object.values(build).reduce((sum,rank)=>sum+Number(rank||0),0);
- while(spent()<28){const candidates=tree.filter(node=>{
-  if(node.virtualChoice||Number(build[node.id]||0)>=(Number(node.max)||1))return false;
-  if(node.req?.length&&!node.req.some(id=>Number(build[id]||0)>0))return false;
-  if(node.choice&&tree.some(other=>other.id!==node.id&&other.choice===node.choice&&Number(build[other.id]||0)>0))return false;
-  if(node.capstoneGroup&&tree.filter(other=>other.capstoneGroup===node.capstoneGroup&&Number(build[other.id]||0)>0).length>=(node.capstoneLimit||2)&&!build[node.id])return false;
-  return true;
- });if(!candidates.length)break;const choice=candidates[Math.floor(random()*candidates.length)];build[choice.id]=Number(build[choice.id]||0)+1;}
- return limitTalentPools(classId,build);
+ return build;
 }
 export function tuneAbility(ability){
  const defs=data.abilities[ability.classId];if(!defs)return ability;

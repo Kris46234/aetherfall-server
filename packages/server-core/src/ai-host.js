@@ -76,6 +76,7 @@ export function abilityListFor(classId, talents) {
     const ability = BY_CLASS_NAME.get(classId + '|' + name);
     if (ability) list.push(toClientAbility(ability));
   }
+  if(classId==='disc'&&Number(learned.disc_dark_archangel)>0){const smite=list.find(a=>a.name==='Smite');if(smite)Object.assign(smite,{name:'Mind Spike',school:'shadow',cast:1.30,value:102,atonementHeal:96});}
   for (const talentId of [...(CLIENT_TALENT_ORDER[classId] || []),...(classId==='wind'?['wind_reverse_harm']:[])]) {
     if (!(Number(learned[talentId]) > 0)) continue;
     const ability = BY_ID.get(talentId);
@@ -85,6 +86,12 @@ export function abilityListFor(classId, talents) {
       /* The client swaps Chaos Bolt in over Unstable Affliction rather than appending
          it, so indices after that point must not shift. */
       const replaced = list.findIndex(a => a.name === 'Unstable Affliction');
+      if (replaced >= 0) list.splice(replaced, 1, tuned);
+      else list.push(tuned);
+      continue;
+    }
+    if (classId === 'shadow' && talentId === 'eviscerate') {
+      const replaced = list.findIndex(a => a.name === 'Viper Cut');
       if (replaced >= 0) list.splice(replaced, 1, tuned);
       else list.push(tuned);
       continue;

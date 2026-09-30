@@ -302,7 +302,7 @@ export function createSimulation({
         school: ability.school,
         channel: true,
         uninterruptible: bladestorm || ability.type === 'fistsChannel',
-        moveSpeedMultiplier: discPenance ? 1 : bladestorm ? .78 : soulDrain ? 0 : .30,
+        moveSpeedMultiplier: discPenance ? 1 : bladestorm ? .78 : soulDrain ? 0 : (combat.hasTalent(unit,'cyclonetech')&&combat.getEffect(unit,'defensive')?1:.30),
         tickInterval: discPenance ? (ability.radiant ? .35 : .5) : soulDrain ? .5 : bladestorm ? .55 : .4,
         tickRemaining: .02,
         radius: ability.range || (bladestorm ? 5.2 : 5),

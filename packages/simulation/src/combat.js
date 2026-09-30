@@ -36,7 +36,7 @@ const SUPPORTED_TYPES = new Set([
   'discMend', 'discSolace', 'painSuppression', 'ultimateRadiance', 'discFear',
   'discFade', 'archangel', 'darkArchangel', 'angelicBody', 'volcanicEruption', 'avengingWings', 'alterTime'
   , 'freedom', 'guardianAngel', 'summonInfernal', 'healingStreamTotem'
-  , 'reverseHarm', 'crimsonVial', 'gouge', 'groundStun', 'chaosBolt', 'intercept', 'sharpenBlade'
+  , 'reverseHarm', 'crimsonVial', 'gouge', 'groundStun', 'chaosBolt', 'intercept', 'sharpenBlade', 'shadowStrike'
 ]);
 const round = value => Number(value.toFixed(4));
 
@@ -57,7 +57,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
       else if(charge.kind==='cloudstep') damage(unit,target,charge.value,charge.label,{school:charge.school,melee:true});
       else if(damage(unit,target,charge.value,charge.label).hit){
         applyCrowdControl(target,'root',1.5,'root');addEffect(target,'slow',4,{pct:.45,sourceId:unit.id});
-        const rank=talentRank(unit,'war_hold_the_line');if(rank)addEffect(unit,'holdTheLine',3,{reduction:rank*.02});
+        const rank=talentRank(unit,'war_hold_the_line'),relentless=talentRank(unit,'war_relentless_charge');if(rank)addEffect(unit,'holdTheLine',3+relentless*.5,{reduction:rank*.02});if(relentless)unit.resource=Math.min(unit.maxResource,unit.resource+5*relentless);
       }
     } else if(charge.remaining<=0)unit.charge=null;
     return true;
@@ -109,7 +109,7 @@ export function createCombatResolver({ state, emit, fixedDt, random }) {
     // final authority and refuse that movement.
     if (isControlled(unit) || getEffect(unit, 'root') || getEffect(unit, 'iceBlock')) return 0;
     const slow = getEffect(unit, 'slow');
-    const speed = getEffect(unit, 'freedom') || getEffect(unit, 'tigersLust') || getEffect(unit, 'divineSteed') || getEffect(unit, 'discFade') || getEffect(unit, 'angelicBody');
+    const speed = getEffect(unit, 'freedom') || getEffect(unit, 'tigersLust') || getEffect(unit, 'divineSteed') || getEffect(unit, 'discFade') || getEffect(unit, 'angelicBody') || getEffect(unit, 'bloodFrenzy') || getEffect(unit, 'comboSpeed') || getEffect(unit, 'faeMomentum');
     const channel = unit.cast?.channel ? unit.cast.moveSpeedMultiplier || 1 : 1;
     const pounce = getEffect(unit, 'pounceSpeed');
 return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.speed || 1) * channel * (unit.mounted ? 1.704 : 1);
@@ -126,6 +126,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   function prepareAbility(unit, source) {
     const ability = { ...source };
     if (ability.id === 'pala_judgement' || ability.type === 'bestowFaith') ability.cost = 0;
+    if(ability.id==='disc.smite'&&hasTalent(unit,'disc_dark_archangel'))Object.assign(ability,{name:'Mind Spike',school:'shadow',castTime:1.30,baseValue:102,atonementHeal:96});
+    if(getEffect(unit,'borrowedTime')&&['disc.smite','disc.shadow_mend'].includes(ability.id)){ability.castTime=Math.max(.45,ability.castTime*.80);ability.borrowedTime=true;}
+    if(ability.type==='chaosBolt'&&getEffect(unit,'backdraft')){ability.castTime=Math.max(.75,ability.castTime*(1-talentRank(unit,'souldrain')*.12));ability.backdraft=true;}
     // Reach and resource costs come from the generated, client-matched tuning.
     if (ability.type === 'iceBlock' && hasTalent(unit,'flame_glacial_recovery')) ability.cooldown = 40;
     if (ability.id === 'soul_void_mend') {
@@ -136,6 +139,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       ability.baseValue = 510;
       ability.alwaysCritical = true;
       ability.commitCooldownOnComplete = true;
+      if(getEffect(unit,'backdraft')){ability.castTime=Math.max(.75,ability.castTime*(1-talentRank(unit,'souldrain')*.12));ability.backdraft=true;}
     }
     if (ability.id === 'soul.creeping_torment' && hasTalent(unit, 'soul_void_mend')) {
       ability.name = 'Immolate';
@@ -184,6 +188,10 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (ability.id === 'pala.divine_steed') {
       ability.cooldown = Math.max(10, ability.cooldown - talentRank(unit, 'steadfast') * 2);
     }
+    if (ability.type === 'freedom') {
+      ability.cooldown = Math.max(8, ability.cooldown - talentRank(unit, 'pala_unbound_freedom') * 2);
+    }
+    if (ability.type === 'fear') ability.cooldown = Math.max(2, ability.cooldown - talentRank(unit, 'soul_fear_tactics'));
     if (ability.id === 'warrior.shield_wall') {
       ability.cooldown = Math.max(20, ability.cooldown - talentRank(unit, 'ironwall') * 3);
     }
@@ -268,6 +276,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (unit.classId === 'warrior' && /Rend|Gushing Wound/i.test(label)) {
       multiplier *= 1 + talentRank(unit, 'deepwounds') * .05;
     }
+    multiplier *= 1 + talentRank(unit, ({flame:'flame_scorching_lessons',storm:'storm_static_charge',wind:'wind_chi_flow',soul:'soul_sacrifice',disc:'disc_inner_shadow',shadow:'shadow_master_assassin'})[unit.classId]) * .02;
     return multiplier;
   }
 
@@ -286,7 +295,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       * (getEffect(unit, 'ghanir') && ['Blooming Echo', 'Rejuvenate'].includes(label) ? 1.50 : 1)
       * (getEffect(unit, 'archangel') && /Atonement/.test(label) ? 1.30 : 1)
       * holyTraining
-      * radiance;
+      * radiance
+      * (1 + talentRank(unit, ({wind:'wind_chi_flow',sage:'sage_natural_wisdom',pala:'pala_divine_wisdom',disc:'disc_inner_light'})[unit.classId]) * .02);
   }
 
   function damage(source, target, amount, label, options = {}) {
@@ -314,12 +324,51 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     }
     if (getEffect(target, 'cloakShadows') && options.school !== 'physical' && !options.melee) return { hit: false, amount: 0, absorbed: 0, immune: true };
     if (getEffect(target, 'evasion') && options.melee && random() < Number(getEffect(target, 'evasion').pct || .50)) return { hit: false, amount: 0, absorbed: 0, dodged: true };
+    const comboReady = getEffect(source, 'comboMasteryReady');
+    const twilight = getEffect(source, 'twilightSurge');
+    const backdraft = getEffect(source, 'backdraft');
+    const holyFavour = getEffect(source, 'crusaderFavour');
     let outgoing = Number(amount) * (options.exact?1:damageMultiplier(source, label));
     const frostMark = getEffect(target, 'frostShockAmp');
     if (frostMark?.sourceId === source.id && /Arc Spark|Forked Current/i.test(String(label))) outgoing *= 1.15;
-    if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && target.hp / target.maxHp < .35) {
-      outgoing *= 1 + talentRank(source, 'executioner') * .05;
+    const lightningRod = getEffect(target,'lightningRod');
+    if(lightningRod?.sourceId===source.id&&/Arc Spark|Forked Current/i.test(String(label)))outgoing*=1.20;
+    if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && [...target.effects.values()].some(effect => effect.type === 'bleed' && effect.label === 'Rend' && effect.sourceId === source.id)) outgoing *= 1 + talentRank(source, 'executioner') * .06;
+    if (source.classId === 'shadow' && label === 'Shadowstrike') outgoing *= 1 + talentRank(source, 'eviscerate') * .08;
+    if (source.classId === 'shadow' && label === 'Eviscerate') outgoing *= 1 + talentRank(source, 'eviscerate') * .12;
+    if (source.classId === 'storm' && /Forked Current|Volcanic|Lava|Tempest/i.test(label)) outgoing *= 1 + talentRank(source, 'lavacore') * .04;
+    if (source.classId === 'wind' && /Fists of Fury/i.test(label) && getEffect(source, 'defensive')) outgoing *= 1 + talentRank(source, 'cyclonetech') * .12;
+    if (source.classId === 'wind' && /Zephyr Palm|Cloudstep Kick/i.test(label) && comboReady) outgoing *= 1 + talentRank(source, 'tigerdash') * .25;
+    if (source.classId === 'soul' && /Essence Siphon|Chaos Bolt|Immolate/i.test(label)) outgoing *= 1 + talentRank(source, 'souldrain') * .04;
+    if (source.classId === 'soul' && /Soul Scar|Creeping Torment|Unstable Affliction|Essence Siphon/i.test(label)) {
+      const afflictions = ['soulScar','agony','unstableAffliction'].reduce((count,type)=>count+(getEffect(target,type)?.sourceId===source.id?1:0),0);
+      outgoing *= 1 + afflictions * talentRank(source, 'pandemic') * .03;
     }
+    if (label === 'Chaos Bolt' && backdraft) outgoing *= 1 + talentRank(source, 'souldrain') * .05;
+    if (label === 'Mind Spike' && twilight) outgoing *= 1 + Number(twilight.pct || .35);
+    if (/Holy Shock/.test(label) && holyFavour) outgoing *= 1 + Number(holyFavour.stacks || 1) * (Number(holyFavour.pct || 0) + talentRank(source,'pala_awakening')*.03);
+    const twilightHoly=getEffect(source,'twilightHoly'),twilightShadow=getEffect(source,'twilightShadow');if(source.classId==='disc'&&label==='Mind Spike'&&twilightHoly)outgoing*=1.15;if(source.classId==='disc'&&/Smite|Solace|Penance/.test(label)&&twilightShadow)outgoing*=1.15;
+    const weakness = getEffect(target, 'findWeakness');
+    if (source.classId === 'shadow' && weakness?.sourceId === source.id && /Shadowstrike|Night Slash|Eviscerate/.test(label)) outgoing *= 1 + talentRank(source, 'shadow_find_weakness') * .05;
+    if(source.classId==='flame'&&/Living Bomb|Meteor/.test(label))outgoing*=1+talentRank(source,'flame_living_flame')*.04;
+    if(source.classId==='flame'&&/Meteor Lance|Ember Lance/.test(label))outgoing*=1+talentRank(source,'flame_meteoric_precision')*.15;
+    if(source.classId==='flame'&&label==='Cinder Bolt'&&getEffect(source,'instantBolt'))outgoing*=1+talentRank(source,'flame_temporal_velocity')*.06;
+    if(source.classId==='flame'&&label==='Cinder Bolt'&&getEffect(source,'prismaticFocus'))outgoing*=1+talentRank(source,'flame_prismatic_focus')*.08;
+    if(source.classId==='warrior'&&/Mortal Swing|Warbreaker|Slicing Winds/.test(label))outgoing*=1+talentRank(source,'war_crushing_force')*.04;
+    if(source.classId==='warrior'&&/Rend|Gushing Wound|Internal Bleeding/.test(label))outgoing*=1+talentRank(source,'war_bloodletting')*.05;
+    if(source.classId==='storm'&&/Arc Spark|Forked Current/.test(label)){outgoing*=1+talentRank(source,'storm_conduction')*.03;const rod=getEffect(target,'lightningRod');if(rod?.sourceId===source.id)outgoing*=1+talentRank(source,'storm_supercell')*.03;if(getEffect(source,'elementalEquilibrium'))outgoing*=1+talentRank(source,'storm_elemental_equilibrium')*.08;}
+    if(source.classId==='wind'&&/Zephyr Palm|Cloudstep Kick/.test(label)){outgoing*=1+Number(getEffect(source,'comboMomentum')?.stacks||0)*talentRank(source,'wind_hit_combo')*.03;if(comboReady)outgoing*=1+talentRank(source,'wind_meridian_strikes')*.10;}
+    if(source.classId==='wind'&&/Fists of Fury|Cyclone Barrage/.test(label))outgoing*=1+talentRank(source,'wind_jadefire_fists')*.05;
+    if(source.classId==='soul'&&/Soul Scar|Creeping Torment|Unstable Affliction|Essence Siphon/.test(label))outgoing*=1+talentRank(source,'soul_creeping_death')*.04;
+    if(source.classId==='soul'&&/Essence Siphon/.test(label))outgoing*=1+talentRank(source,'soul_malefic_grasp')*.05+Number(getEffect(source,'inevitableDemise')?.empowered||0);
+    if(source.classId==='soul'&&label==='Chaos Bolt')outgoing*=1+talentRank(source,'soul_ruin')*.05;
+    if(source.classId==='soul'&&/Immolate/.test(label))outgoing*=1+talentRank(source,'soul_demonfire')*.05;
+    if(source.classId==='disc'&&/Smite|Solace|Penance/.test(label)){const atonements=[...state.units.values()].filter(unit=>unit.team===source.team&&getEffect(unit,'atonement')?.sourceId===source.id).length;outgoing*=1+Math.min(3,atonements)*talentRank(source,'disc_many_sins')*.03;}
+    if(source.classId==='disc'&&/Mind Spike|Penance/.test(label))outgoing*=1+talentRank(source,'disc_shadow_covenant')*.05;
+    if(source.classId==='shadow'&&/Poison|Garrote|Internal Bleeding|Viper Cut|Rend/.test(label))outgoing*=1+talentRank(source,'shadow_deadly_brew')*.04;
+    if(source.classId==='shadow'&&getEffect(target,'vendetta')?.sourceId===source.id&&/Garrote|Internal Bleeding|Bleed|Rend/.test(label))outgoing*=1+talentRank(source,'shadow_doomblade')*.03;
+    if(source.classId==='shadow'&&/Shadowstrike|Eviscerate/.test(label))outgoing*=1+talentRank(source,'shadow_deeper_daggers')*.05;
+    if(source.classId==='shadow'&&getEffect(source,'controlledChaos'))outgoing*=1+talentRank(source,'shadow_controlled_chaos')*.04;
     if (!Number.isFinite(outgoing) || outgoing <= 0) return { hit: false, amount: 0, absorbed: 0 };
     source.combatUntil = Math.max(Number(source.combatUntil) || 0, state.time + 4);
     target.combatUntil = Math.max(Number(target.combatUntil) || 0, state.time + 4);
@@ -328,6 +377,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     for (const type of BREAKABLE_CONTROL) {if(type==='fear'&&options.periodic&&getEffect(target,'fear')?.breakFromDots===false)continue;removeEffect(target, type, 'damage');}
     const defensive = getEffect(target, 'defensive');
     if (defensive) outgoing *= 1 - Number(defensive.reduction ?? .35);
+    const elusive = getEffect(target, 'elusiveSteps');if(elusive)outgoing*=1-Number(elusive.reduction||.04);
     if (getEffect(target, 'infernalExposure')) outgoing *= 1.10;
     const staticGuard = getEffect(target, 'staticAegisGuard');
     if (staticGuard) outgoing *= 1 - Number(staticGuard.reduction || .20);
@@ -359,6 +409,41 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         ability: label, amount: actual, absorbed: Math.round(absorbed),
         periodic: !!options.periodic
       });
+      if (source.classId === 'flame' && label === 'Cinder Bolt' && talentRank(source, 'meteorimpact') > 0 && getEffect(target, 'burn')?.sourceId === source.id) {
+        const readyAt = Number(source.cooldowns.get('flame.meteor') || 0);
+        if (readyAt > 0) source.cooldowns.set('flame.meteor', Math.max(0, readyAt - .5 * talentRank(source, 'meteorimpact')));
+      }
+      if(source.classId==='flame'&&talentRank(source,'flame_kindling')>0&&/Burn|Living Bomb/.test(label)&&!getEffect(source,'kindlingLock')){const ready=Number(source.cooldowns.get('flame.meteor')||0);if(ready>0)source.cooldowns.set('flame.meteor',Math.max(0,ready-.15*talentRank(source,'flame_kindling')));addEffect(source,'kindlingLock',.5);}
+      if(source.classId==='flame'&&label==='Cinder Bolt'&&getEffect(source,'prismaticFocus'))removeEffect(source,'prismaticFocus','consumed');
+      if (source.classId === 'warrior' && label === 'Mortal Swing' && talentRank(source, 'executioner') > 0 && !getEffect(source, 'colossusLock') && target.alive) {
+        const found=[...target.effects.entries()].find(([,effect])=>effect.type==='bleed'&&effect.label==='Rend'&&effect.sourceId===source.id);
+        if(found){const [key,rend]=found,removed=Math.min(3,rend.remaining),ticks=removed/Math.max(.1,Number(rend.interval||1)),conversion=.55*(1+talentRank(source,'war_colossal_might')*.20),rupture=Number(rend.value||0)*ticks*conversion*talentRank(source,'executioner');rend.remaining=Math.max(0,rend.remaining-removed);if(rend.remaining<=0)target.effects.delete(key);addEffect(source,'colossusLock',3);if(rupture>0)damage(source,target,rupture,'Colossus Rupture',{school:'physical'});}
+      }
+      if (source.classId === 'warrior' && talentRank(source,'battlehardened') > 0 && /Rend|Gushing Wound|Internal Bleeding/i.test(label)){heal(source,source,actual*(.15*talentRank(source,'battlehardened')+.05*talentRank(source,'war_red_thirst')),'Bloodsteel');if(hasTalent(source,'war_blood_frenzy'))addEffect(source,'bloodFrenzy',2,{speed:1.12});}
+      if(source.classId==='warrior'&&label==='Mortal Swing'&&target.hp/target.maxHp<.35&&hasTalent(source,'war_execution_rhythm'))source.resource=Math.min(source.maxResource,source.resource+8);
+      if(source.classId==='warrior'&&/Mortal Swing|Rend|Warbreaker/.test(label)&&talentRank(source,'war_anger_management')>0){for(const id of ['war_skullbreaker','warrior.avatar']){const ready=Number(source.cooldowns.get(id)||0);if(ready>0)source.cooldowns.set(id,Math.max(0,ready-.5*talentRank(source,'war_anger_management')));}}
+      if (source.classId === 'storm' && label === 'Arc Spark' && talentRank(source,'lavacore') > 0) addEffect(target,'lightningRod',getEffect(source,'stormkeeper')?6:4,{sourceId:source.id});
+      if (source.classId === 'storm' && /Arc Spark|Forked Current/i.test(label) && talentRank(source,'grounded') > 0) {const rank=talentRank(source,'grounded'),harmony=1+talentRank(source,'storm_earthen_harmony')*.15,cap=source.maxHp*.08*rank*harmony,gain=source.maxHp*.0075*rank*harmony;source.shield=Math.min(cap,source.shield+gain);addEffect(source,'earthward',8,{value:Math.round(source.shield)});}
+      if(source.classId==='storm'&&label==='Arc Spark'){source.resource=Math.min(source.maxResource,source.resource+talentRank(source,'storm_flowing_mana'));if(options.stormkeeperSpark&&hasTalent(source,'storm_overcharge')){const ready=Number(source.cooldowns.get('storm.forked_current')||0);if(ready>0)source.cooldowns.set('storm.forked_current',Math.max(0,ready-1));}}
+      if(source.classId==='storm'&&/Arc Spark|Forked Current/.test(label)&&getEffect(source,'elementalEquilibrium'))removeEffect(source,'elementalEquilibrium','consumed');
+      if (source.classId === 'wind' && /Zephyr Palm|Cloudstep Kick/i.test(label) && talentRank(source,'tigerdash') > 0) {if(comboReady){removeEffect(source,'comboMasteryReady','consumed');source.resource=Math.min(source.maxResource,source.resource+8);if(hasTalent(source,'wind_dance_of_wind'))addEffect(source,'comboSpeed',2,{speed:1.20});}else{const old=getEffect(source,'comboMomentum'),alternating=old?.last&&old.last!==label,stacks=alternating?Math.min(3,Number(old.stacks||0)+1):1;removeEffect(source,'comboMomentum','refreshed');if(stacks>=3)addEffect(source,'comboMasteryReady',10);else addEffect(source,'comboMomentum',10,{stacks,last:label});}}
+      if(source.classId==='wind'&&label==='Zephyr Palm')source.resource=Math.min(source.maxResource,source.resource+2*talentRank(source,'wind_quickened_chi'));
+      if(source.classId==='wind'&&label==='Cloudstep Kick'&&talentRank(source,'wind_elusive_steps'))addEffect(source,'elusiveSteps',2,{reduction:talentRank(source,'wind_elusive_steps')*.02});
+      if (source.classId === 'wind' && /Fists of Fury/i.test(label) && talentRank(source,'cyclonetech') > 0) heal(source,source,actual*(.10*talentRank(source,'cyclonetech')+.08*talentRank(source,'wind_jade_recovery')),'Jade Brawler');
+      if (source.classId === 'soul' && /Soul Scar|Creeping Torment|Unstable Affliction|Essence Siphon/i.test(label) && talentRank(source,'pandemic') > 0) heal(source,source,actual*.03*talentRank(source,'pandemic'),'Affliction Siphon');
+      if(source.classId==='soul'&&hasTalent(source,'soul_inevitable_demise')&&/Soul Scar|Creeping Torment|Unstable Affliction/.test(label)){const stacks=Number(getEffect(source,'inevitableCounter')?.stacks||0)+1;removeEffect(source,'inevitableCounter','progress');if(stacks>=5){source.resource=Math.min(source.maxResource,source.resource+5);addEffect(source,'inevitableDemise',10,{empowered:.20});}else addEffect(source,'inevitableCounter',30,{stacks});}
+      if(source.classId==='soul'&&label==='Essence Siphon'&&getEffect(source,'inevitableDemise'))removeEffect(source,'inevitableDemise','consumed');
+      if(source.classId==='soul'&&label==='Chaos Bolt'&&backdraft&&hasTalent(source,'soul_reverse_entropy'))source.resource=Math.min(source.maxResource,source.resource+6);
+      if (source.classId === 'disc' && /Smite|Mind Spike|Solace|Penance/i.test(label) && talentRank(source,'disc_archangel') > 0) for(const ally of state.units.values()){const atonement=getEffect(ally,'atonement');if(atonement?.sourceId===source.id)atonement.remaining=Math.min(18,atonement.remaining+.35);}
+      if(source.classId==='disc'&&label==='Mind Spike'&&hasTalent(source,'disc_harsh_discipline')){const stacks=Number(getEffect(source,'harshDisciplineCount')?.stacks||0)+1;removeEffect(source,'harshDisciplineCount','progress');if(stacks>=2){removeEffect(source,'harshDisciplineReady','replaced');addEffect(source,'harshDisciplineReady',15);}else addEffect(source,'harshDisciplineCount',20,{stacks});}
+      if (source.classId === 'pala' && /Righteous Strike|Judgement|Judgment/i.test(label) && talentRank(source,'radiance') > 0) {const rank=talentRank(source,'radiance'),stacks=Math.min(3,Number(getEffect(source,'crusaderFavour')?.stacks||0)+1);addEffect(source,'crusaderFavour',12,{stacks,pct:.10*rank});const shock=Number(source.cooldowns.get('pala.holy_shock')||0);if(shock)source.cooldowns.set('pala.holy_shock',Math.max(0,shock-.75*rank));}
+      if(source.classId==='pala'&&/Judgement|Judgment/.test(label)&&talentRank(source,'pala_glimmer')>0){const marked=[...state.units.values()].find(unit=>unit.alive&&getEffect(unit,'glimmer')?.sourceId===source.id);if(marked){const echo=actual*.04*talentRank(source,'pala_glimmer');if(marked.team===source.team)heal(source,marked,echo,'Glimmer of Light');else if(marked!==target)damage(source,marked,echo,'Glimmer of Light',{school:'holy'});}}
+      if(source.classId==='pala'&&/Righteous Strike|Judgement|Judgment/.test(label)&&hasTalent(source,'pala_crusaders_might')){const ready=Number(source.cooldowns.get('pala.holy_shock')||0);if(ready>0)source.cooldowns.set('pala.holy_shock',Math.max(0,ready-1));}
+      if(source.classId==='shadow'&&hasTalent(source,'shadow_venomous_wounds')&&/Poison|Garrote|Internal Bleeding|Bleed|Rend/.test(label)){const stacks=Number(getEffect(source,'venomousCounter')?.stacks||0)+1;removeEffect(source,'venomousCounter','progress');if(stacks>=4)source.resource=Math.min(source.maxResource,source.resource+6);else addEffect(source,'venomousCounter',30,{stacks});}
+      if(source.classId==='shadow'&&label==='Eviscerate')source.resource=Math.min(source.maxResource,source.resource+3*talentRank(source,'shadow_relentless_strikes'));
+      if (label === 'Mind Spike' && twilight) removeEffect(source,'twilightSurge','consumed');
+      if(source.classId==='disc'&&hasTalent(source,'disc_twilight_equilibrium')){if(label==='Mind Spike'){removeEffect(source,'twilightHoly','consumed');removeEffect(source,'twilightShadow','replaced');addEffect(source,'twilightShadow',10);}else if(/Smite|Solace|Penance/.test(label)){removeEffect(source,'twilightShadow','consumed');removeEffect(source,'twilightHoly','replaced');addEffect(source,'twilightHoly',10);}}
+      if (label === 'Chaos Bolt' && backdraft) removeEffect(source,'backdraft','consumed');
       if (karma && !options.cannotReflect && source !== target && source.alive && label !== 'Touch of Karma') {
         damage(target, source, Math.max(1, Math.round(actual * .30)), 'Touch of Karma', { cannotReflect: true, school: 'wind' });
         heal(target, target, actual * .50, 'Touch of Karma');
@@ -388,13 +473,35 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (!source?.alive || !target?.alive) return 0;
     const wound = getEffect(target, 'mortalWound');
     const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
-    const requested = Number(amount) * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
+    const periodic = /Blooming Echo|Rejuvenate|Spirit Blossom|Atonement|Bloodsteel|Affliction Siphon|Grove Echo|Beacon Mirror|Jade Brawler/i.test(String(label||''));
+    const before = target.hp, missing = Math.max(0,target.maxHp-before);
+    let adjusted = Number(amount);
+    if(source.classId==='sage'&&label==='Spirit Blossom')adjusted*=1+talentRank(source,'wildgrowth')*.06;
+    if(source.classId==='disc'&&/Atonement/.test(label)&&talentRank(source,'disc_archangel')>0)adjusted*=1.10;
+    const favour=getEffect(source,'crusaderFavour');if(source.classId==='pala'&&/Holy Shock/.test(label)&&favour)adjusted*=1+Number(favour.stacks||1)*(Number(favour.pct||0)+talentRank(source,'pala_awakening')*.03);
+    if(source.classId==='sage'&&periodic)adjusted*=1+talentRank(source,'sage_photosynthesis')*.04;
+    if(source.classId==='sage'&&getEffect(target,'dreamSeed')&&!periodic)adjusted*=1+talentRank(source,'sage_lucid_mending')*.02;
+    if(source.classId==='soul'&&/Essence Siphon/.test(label))adjusted*=1+talentRank(source,'soul_malefic_grasp')*.05;
+    if(source.classId==='disc'&&/Penance Atonement/.test(label))adjusted*=1+talentRank(source,'disc_contrition')*.06;
+    const requested = adjusted * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
-    if (!actual) return 0;
-    target.hp += actual;
-    source.stats.healing += actual;
-    source.stats.healingByAbility[label] = (source.stats.healingByAbility[label] || 0) + actual;
-    emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual });
+    if (actual) {
+      target.hp += actual;
+      source.stats.healing += actual;
+      source.stats.healingByAbility[label] = (source.stats.healingByAbility[label] || 0) + actual;
+      emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual });
+    }
+    if(source.classId==='storm'&&label==='Healing Surge'&&talentRank(source,'grounded')>0){applyShield(source,target,target.maxHp*.05*talentRank(source,'grounded')*(1+talentRank(source,'storm_earthen_harmony')*.15),8);if(hasTalent(source,'storm_resurgence'))source.resource=Math.min(source.maxResource,source.resource+3);if(talentRank(source,'storm_elemental_equilibrium'))addEffect(source,'elementalEquilibrium',10);}
+    if(source.classId==='sage'&&label==='Verdant Mend'&&actual>0&&talentRank(source,'wildgrowth')>0&&[...target.effects.values()].some(effect=>effect.type==='hot'&&effect.sourceId===source.id)){
+      const ally=[...state.units.values()].filter(unit=>unit.alive&&unit.team===source.team&&unit!==target&&distance(unit,target)<=28).sort((a,b)=>a.hp/a.maxHp-b.hp/b.maxHp)[0];
+      if(ally)heal(source,ally,actual*.12*talentRank(source,'wildgrowth'),'Grove Echo');
+    }
+    if(source.classId==='sage'&&label==='Verdant Mend'&&talentRank(source,'sage_verdant_infusion'))for(const effect of target.effects.values())if(effect.type==='hot'&&effect.sourceId===source.id)effect.remaining=Math.min(18,effect.remaining+talentRank(source,'sage_verdant_infusion'));
+    if(source.classId==='sage'&&label==='Spirit Blossom'&&hasTalent(source,'sage_grove_blossom'))for(const unit of state.units.values())if(unit.alive&&unit.team===source.team&&distance(unit,source)<=12)for(const effect of unit.effects.values())if(effect.type==='hot'&&effect.sourceId===source.id)effect.remaining=Math.max(effect.remaining,6);
+    if(source.classId==='sage'&&talentRank(source,'barkskin')>0&&!periodic){const rank=talentRank(source,'barkskin'),power=1+talentRank(source,'sage_dreamstate')*.15,minimum=label==='Renewal Tide'?target.maxHp*.02*rank:0,overheal=Math.max(0,requested-missing),seed=Math.max(minimum,overheal*.30*rank)*power,cap=target.maxHp*.08*rank*power;if(seed>0){const existing=Number(getEffect(target,'dreamSeed')?.value||0),next=Math.min(cap,existing+seed);addEffect(target,'dreamSeed',10,{value:Math.round(next),sourceId:source.id});target.shield=Math.max(target.shield,Math.round(next));}}
+    if(source.classId==='sage'&&label==='Renewal Tide'&&hasTalent(source,'sage_waking_dream')){const ward=Math.round(target.maxHp*.04);target.shield=Math.max(target.shield,ward);addEffect(target,'dreamSeed',10,{value:ward,sourceId:source.id});}
+    if(source.classId==='pala'&&talentRank(source,'guardianlight')>0&&!periodic&&actual>0){const beacon=[...state.units.values()].find(unit=>unit.alive&&unit.team===source.team&&unit!==target&&[...unit.effects.values()].some(effect=>effect.type==='beaconFaith'&&effect.sourceId===source.id));if(beacon)heal(source,beacon,actual*(.15*talentRank(source,'guardianlight')+.05*talentRank(source,'pala_beacon_light')),'Beacon Mirror');}
+    if(source.classId==='pala'&&actual>0&&target.hp/target.maxHp<.30&&getEffect(target,'beaconFaith')?.sourceId===source.id&&hasTalent(source,'pala_saved_by_light')&&!getEffect(source,'savedLightLock')){applyShield(source,target,target.maxHp*.10,6);addEffect(source,'savedLightLock',30);}
     return actual;
   }
 
@@ -494,6 +601,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
 
   function resolveAbility(source, ability, target) {
     const label = ability.name;
+    if (ability.borrowedTime) removeEffect(source, 'borrowedTime', 'consumed');
     switch (ability.type) {
       case 'damage': {
         let amount = ability.baseValue;
@@ -502,16 +610,19 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           amount *= 1.20;
           removeEffect(source, 'pandemicSurge', 'consumed');
         }
-        if (ability.id === 'flame.cinder_bolt' && ability.instantProc) amount *= 1.20;
+        if (ability.id === 'flame.cinder_bolt' && ability.instantProc) amount *= 1 + Number(getEffect(source,'instantBolt')?.pct || .20);
         if (ability.id === 'flame.ember_lance') {
           if (getEffect(target, 'burn')) amount *= 1.30;
           if (ability.meteorProc) amount *= 1.15;
         }
+        let damageLabel = label;
         if (ability.id === 'shadow.night_slash' && getEffect(source, 'eviscerateReady')) {
-          amount *= 1.45;
+          amount *= hasTalent(source, 'eviscerate') ? 1.85 : 1.45;
+          damageLabel = 'Eviscerate';
           removeEffect(source, 'eviscerateReady', 'consumed');
+          if(hasTalent(source,'eviscerate'))source.resource=Math.min(source.maxResource,source.resource+18);
         }
-        const result = damage(source, target, amount, label, { school: ability.school });
+        const result = damage(source, target, amount, damageLabel, { school: ability.school, melee: source.classId === 'shadow', stormkeeperSpark: !!ability.stormkeeperSpark });
         if (ability.id === 'flame.cinder_bolt' && result.hit) {
           source.resource = Math.min(source.maxResource, source.resource + 4);
           if (ability.instantProc) {
@@ -522,9 +633,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         }
         if (ability.id === 'flame.ember_lance' && result.hit) {
           source.resource = Math.min(source.maxResource, source.resource + 6);
-          if (ability.meteorProc) removeEffect(source, 'meteorLance', 'consumed');
+          if (ability.meteorProc) {const proc=getEffect(source,'meteorLance');if(proc){proc.stacks=Number(proc.stacks||1)-1;if(proc.stacks<=0)removeEffect(source,'meteorLance','consumed');}}
         }
-        if (ability.id === 'shadow.night_slash' && result.hit) {
+        if (ability.id === 'shadow.night_slash' && result.hit && !hasTalent(source, 'eviscerate')) {
           const marks = Math.min(3, Number(getEffect(source, 'shadowMarks')?.stacks || 0) + 1);
           if (marks >= 3) {
             removeEffect(source, 'shadowMarks', 'converted');
@@ -613,6 +724,17 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         }
         return true;
       }
+      case 'shadowStrike': {
+        const hit = damage(source, target, ability.baseValue, 'Shadowstrike', { school: 'physical', melee: true }).hit;
+        if (!hit) return false;
+        source.resource=Math.min(source.maxResource,source.resource+4);
+        const stacks = Math.min(3, Number(getEffect(source, 'shadowTechnique')?.stacks || 0) + 1);
+        removeEffect(source, 'shadowTechnique', 'refreshed');
+        if (talentRank(source, 'shadow_find_weakness') > 0) addEffect(target, 'findWeakness', 4, { sourceId: source.id });
+        if (stacks >= 3) addEffect(source, 'eviscerateReady', 10);
+        else addEffect(source, 'shadowTechnique', 8, { stacks });
+        return true;
+      }
       case 'whirlingDragonPunch': {
         let hits = 0;
         for (const unit of state.units.values()) {
@@ -687,7 +809,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       case 'freedom':
         removeEffect(target, 'slow', 'freedom');
         removeEffect(target, 'root', 'freedom');
-        addEffect(target, 'freedom', 5, { sourceId: source.id, speed: 1.30 });
+        addEffect(target, 'freedom', 5, { sourceId: source.id, speed: 1.30+talentRank(source,'pala_unbound_freedom')*.05 });
         return true;
       case 'guardianAngel': {
         const guardianId = `guardian-${source.id}-${state.tick}`;
@@ -726,7 +848,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       case 'gouge':
         /* Incapacitate that any damage breaks early. */
-        return applyCrowdControl(target, 'gouge', ability.baseValue || 3, 'incap') > 0;
+      {const applied=applyCrowdControl(target,'gouge',ability.baseValue||3,'incap')>0;if(applied&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);return applied;}
       case 'chaosBolt':
         projectiles.push({sourceId:source.id,targetId:target.id,x:source.x,z:source.z,value:(ability.baseValue||510)*1.5,life:3});
         emit({type:'presentation',cue:'chaosBoltLaunch',sourceId:source.id,targetId:target.id});
@@ -806,6 +928,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             : damage(source, target, value, label, { school: 'holy' }).hit) || landed;
           if (critical) addEffect(source, 'infusion', 10);
         }
+        if(talentRank(source,'pala_glimmer')>0){for(const unit of state.units.values())if(getEffect(unit,'glimmer')?.sourceId===source.id)removeEffect(unit,'glimmer','replaced');addEffect(target,'glimmer',8,{sourceId:source.id});}
+        if (getEffect(source,'crusaderFavour')) removeEffect(source,'crusaderFavour','consumed');
         return landed;
       }
       case 'mortalSwing': {
@@ -923,6 +1047,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       case 'bestowFaith':
         addEffect(target, 'bestowFaith', 4, { sourceId: source.id, value: ability.baseValue || 240 });
+        if(talentRank(source,'guardianlight')>0)addEffect(target,'beaconFaith',12,{sourceId:source.id});
+        if(talentRank(source,'pala_bestowed_grace')>0)heal(source,target,target.maxHp*.03*talentRank(source,'pala_bestowed_grace'),'Bestowed Grace');
         return true;
       case 'cleanse': {
         const freedom = ability.name === 'Blessing of Freedom';
@@ -931,13 +1057,14 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           : ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'root', 'slow', 'burn', 'poison', 'bleed', 'livingBomb', 'soulScar', 'agony', 'unstableAffliction', 'flameShock'];
         const removed = removable.find(type => getEffect(target, type));
         if (removed) removeEffect(target, removed, 'dispelled');
+        if(removed&&source.classId==='sage'&&talentRank(source,'sage_fae_momentum'))addEffect(source,'faeMomentum',2,{speed:1+talentRank(source,'sage_fae_momentum')*.10});
         return !!removed;
       }
       case 'shield':
         applyShield(source, target, ability.baseValue, 7);
         return true;
       case 'blind':
-        return applyCrowdControl(target, 'blind', ability.baseValue || 3, 'incap') > 0;
+      {const applied=applyCrowdControl(target,'blind',ability.baseValue||3,'incap')>0;if(applied&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);return applied;}
       case 'shieldSelf':
         applyShield(source, source, ability.id === 'soul_dark_pact' ? source.maxHp * .30 : ability.baseValue, 6);
         if (source.classId === 'soul' && ability.id !== 'soul_dark_pact') addEffect(source, 'interruptWard', 6);
@@ -964,10 +1091,12 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         resolvePillarCollisions(source, state.arena.pillars, source.radius);
         resolveArenaBounds(source, state.arena, source.radius);
         addEffect(source, 'defensive', 2, { reduction: .20 });
+        if(source.classId==='flame'&&talentRank(source,'counterheat')>0){const rank=talentRank(source,'counterheat'),stacks=Math.min(3,Number(getEffect(source,'instantBolt')?.stacks||0)+1);addEffect(source,'instantBolt',10,{stacks,pct:rank*.05});}
+        if(source.classId==='flame'&&hasTalent(source,'flame_afterimage'))applyShield(source,source,source.maxHp*.06,3);
         return true;
       }
       case 'poly':
-        return applyCrowdControl(target, 'poly', ability.baseValue || 7, 'incap') > 0;
+      {const applied=applyCrowdControl(target,'poly',ability.baseValue||7,'incap')>0;if(applied&&talentRank(source,'flame_prismatic_focus'))addEffect(source,'prismaticFocus',10);return applied;}
       case 'interruptProc': {
         if (!target.cast || target.cast.uninterruptible) return false;
         const school = target.cast.school;
@@ -1016,6 +1145,10 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           addEffect(source, 'smokePower', 8);
           addEffect(source, 'cheapReady', 8);
           addEffect(source, 'stealth', 8);
+          if(hasTalent(source,'eviscerate')){
+            source.cooldowns.delete('eviscerate');source.resource=Math.min(source.maxResource,source.resource+10);
+            removeEffect(source,'shadowTechnique','refreshed');removeEffect(source,'eviscerateReady','refreshed');if(hasTalent(source,'shadow_premeditation'))addEffect(source,'eviscerateReady',10);else addEffect(source,'shadowTechnique',8,{stacks:2});
+          }
         }
         return true;
       case 'dot': {
@@ -1025,6 +1158,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             effectKey: `immolate:${source.id}`, sourceId: source.id, value: 59.5,
             label: 'Immolate', interval: 1, tickRemaining: 1
           });
+          if(hit&&talentRank(source,'souldrain')>0)addEffect(source,'backdraft',12,{rank:talentRank(source,'souldrain')});
           return hit;
         }
         const garrote = ability.id === 'shadow_garrote';
@@ -1049,6 +1183,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         if (hit) {
           applyCrowdControl(target, 'stun', ability.id === 'shadow.ribbreaker' ? 4 : 6, 'stun');
           if (source.classId === 'shadow') addEffect(source, 'eviscerateReady', 10);
+          if(source.classId==='shadow'&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);
           if(ability.id==='shadow.ribbreaker'&&hasTalent(source,'shadow_shadowstep'))addEffect(target,'bleed',6,{sourceId:source.id,value:28.1,label:'Internal Bleeding',school:'physical',interval:1,tickRemaining:1});
           if (ability.id === 'soul_shadowfury') addEffect(source, 'pandemicSurge', 8, { pct: .20 });
         }
@@ -1074,7 +1209,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         addEffect(source, 'evasion', 8, { pct: .50 });
         return true;
       case 'vendetta':
-        addEffect(target, 'vendetta', 8, { sourceId: source.id });
+        addEffect(target, 'vendetta', 10+talentRank(source,'shadow_doomblade'), { sourceId: source.id });
         return true;
       case 'shiv': {
         const hit = damage(source, target, ability.baseValue, label, { school: 'physical', melee: true }).hit;
@@ -1198,6 +1333,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           addEffect(source, 'alterTime', 5, { x: source.x, z: source.z, hp: source.hp, abilityId: ability.id });
           emit({ type: 'presentation', cue: 'alterTimeSaved', sourceId: source.id, duration: 5 });
         }
+        if(talentRank(source,'counterheat')>0)source.cooldowns.delete('flame.blazing_step');
+        if(talentRank(source,'flame_rewind'))source.resource=Math.min(source.maxResource,source.resource+3*talentRank(source,'flame_rewind'));
         return true;
       }
       case 'undyingResolve':
@@ -1233,6 +1370,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         resolvePillarCollisions(source, state.arena.pillars, source.radius);
         resolveArenaBounds(source, state.arena, source.radius);
         addEffect(source, 'defensive', 3, { reduction: .30 });
+        if(talentRank(source,'sage_fae_momentum'))addEffect(source,'faeMomentum',2,{speed:1+talentRank(source,'sage_fae_momentum')*.10});
         return true;
       }
       case 'sleep':
@@ -1248,18 +1386,20 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         addEffect(target, 'defensive', 6, { sourceId: source.id, reduction: .20 });
         return true;
       case 'discSmite': {
-        const hit = damage(source, target, ability.baseValue, label, { school: 'holy' }).hit;
-        if (hit) healAtonements(source, 112, 'Smite Atonement');
+        const hit = damage(source, target, ability.baseValue, label, { school: ability.school || 'holy' }).hit;
+        if (hit) healAtonements(source, Number(ability.atonementHeal||112), `${label} Atonement`);
         return hit;
       }
       case 'discShield':
         applyShield(source, target, ability.baseValue, 8);
         applyAtonement(source, target, 14);
+        if(hasTalent(source,'disc_borrowed_time'))addEffect(source,'borrowedTime',10);
         return true;
       case 'discMend': {
         const healed = heal(source, target, ability.baseValue, label);
         applyAtonement(source, target, 14);
         if (source === target) addEffect(source, 'defensive', 4, { reduction: .10 });
+        if(talentRank(source,'disc_dark_archangel')>0)addEffect(source,'twilightSurge',10,{pct:.35});
         return healed > 0;
       }
       case 'discSolace': {
@@ -1328,12 +1468,13 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (cast.kind === 'discPenance') {
       const target = state.units.get(cast.targetId);
       if (!target?.alive) return;
+      if(cast.harshDiscipline===undefined){const ready=getEffect(source,'harshDisciplineReady'),rank=talentRank(source,'disc_harsh_discipline');cast.harshDiscipline=ready?1+rank*.12:1;if(ready)removeEffect(source,'harshDisciplineReady','consumed');}
       cast.ticks += 1;
-      if (target.team === source.team) heal(source, target, 132, 'Penance Direct Heal');
+      if (target.team === source.team) heal(source, target, 132*cast.harshDiscipline, 'Penance Direct Heal');
       else {
         const multiplier = cast.radiant ? 1.15 : 1;
-        if (damage(source, target, cast.baseValue * multiplier, cast.radiant ? 'Radiant Penance' : 'Penance', { school: 'holy' }).hit) {
-          healAtonements(source, 78 * multiplier, cast.radiant ? 'Radiant Penance Atonement' : 'Penance Atonement');
+        if (damage(source, target, cast.baseValue * multiplier * cast.harshDiscipline, cast.radiant ? 'Radiant Penance' : 'Penance', { school: 'holy' }).hit) {
+          healAtonements(source, 78 * multiplier * cast.harshDiscipline, cast.radiant ? 'Radiant Penance Atonement' : 'Penance Atonement');
         }
       }
       return;
@@ -1488,7 +1629,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             });
           }
         }
-        addEffect(unit, 'meteorLance', 60, { stacks: 1 });
+        addEffect(unit, 'meteorLance', 60, { stacks: talentRank(unit,'meteorimpact')>=2?2:1 });
         unit.cooldowns.delete('flame.ember_lance');
       }
       if (effect.remaining === 0 && type === 'touchOfDeath') {
@@ -1534,6 +1675,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     effectSnapshot,
     getEffect,
     heal,
+    hasTalent,
     isControlled,
     isSelfTarget: ability => SELF_TYPES.has(ability.type),
     movementMultiplier,

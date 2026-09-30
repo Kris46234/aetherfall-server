@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 const NL = String.fromCharCode(10);
-const sourcePath = new URL('../apps/client/src/game-runtime.js', import.meta.url);
+const sourcePath = new URL('../../src/game-runtime.js', import.meta.url);
 const outPath = new URL('../packages/server-core/generated/ai-controller.generated.js', import.meta.url);
 const source = await readFile(sourcePath, 'utf8');
 const lines = source.split(NL);

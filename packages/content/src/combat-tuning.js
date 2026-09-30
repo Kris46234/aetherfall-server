@@ -1,8 +1,9 @@
 import {combatTuning as data} from '../generated/combat-tuning.generated.js';
 // Apply shared choice-pool limits to old or stale client builds at the lobby boundary.
 export function limitTalentPools(classId,talents={}){
- const result={...talents},counts=new Map();
+ const result={...talents},counts=new Map(),choices=new Set();
  for(const node of data.trees[classId]||[]){
+  if(node.choice&&Number(result[node.id])>0){if(choices.has(node.choice)){delete result[node.id];continue;}choices.add(node.choice);}
   if(!node.capstoneGroup||!(Number(result[node.id])>0))continue;
   const count=counts.get(node.capstoneGroup)||0;
   if(count>=(node.capstoneLimit||2))delete result[node.id];
@@ -18,7 +19,11 @@ export function normalizedVitals(classId,talents={}){
  return {maxHp,hp:maxHp,maxResource:classId==='soul'?Math.round(baseResource*1.15):baseResource,
  resourceRegen:energy?data.balance.energyRegen:(classId==='soul'?1.30:classId==='storm'?1.20:1)*(healer?data.balance.healerManaRegen:data.balance.manaRegen)*(1+Math.min(.30,gear.Mana*.00075))*(classId==='disc'?.88:1)};
 }
-export function botBuild(classId,random){const bank=data.builds[classId]||[{}];return {...bank[Math.floor(random()*bank.length)]};}
+export function botBuild(classId,random){
+ const bank=data.builds[classId]||[{}],build=limitTalentPools(classId,{...bank[Math.floor(random()*bank.length)]});
+ if(classId==='shadow'&&Number(build.eviscerate)>0&&random()<.72)build.shadow_find_weakness=1+(random()<.48?1:0);
+ return build;
+}
 export function tuneAbility(ability){
  const defs=data.abilities[ability.classId];if(!defs)return ability;
  const match=ability.source==='talent'?defs.talents[ability.id]:defs.base.find(a=>a.name===ability.name);

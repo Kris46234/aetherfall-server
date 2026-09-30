@@ -217,7 +217,6 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
   }
   if (message.type === 'start') {
     const requestedFormat = cleanFormat(message.format);
-    if (live.room.host?.clientId === state.clientId) live.room.updateFormat(state.clientId, requestedFormat);
     const result = live.room.start(state.clientId, requestedFormat);
     json(socket, { type: 'startAck', ...result });
     if (result.ok) {
@@ -349,7 +348,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.53.0',
+      release: '2.57.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

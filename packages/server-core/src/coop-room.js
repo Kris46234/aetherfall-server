@@ -186,9 +186,12 @@ export class CoopRoom {
     if (this.phase === 'ended') this.resetToLobby();
     if (this.phase !== 'lobby') return { ok: false, reason: 'already_started' };
     if (!this.host || this.host.clientId !== clientId) return { ok: false, reason: 'host_only' };
+    // Format changes are a lobby operation because they deliberately unlock
+    // both players. Never mutate the format as a side effect of Start: a stale
+    // client request used to clear readiness immediately before this check.
+    if (format && cleanFormat(format) !== this.format) return { ok: false, reason: 'format_mismatch' };
     if (!HUMAN_SLOTS.every(slot=>this.players.get(slot)?.connected))return {ok:false,reason:'waiting_for_player'};
     if (!this.ready) return { ok: false, reason: 'players_not_ready' };
-    if (format) this.format = cleanFormat(format);
     this.phase = 'countdown';
     this.round += 1;
     this.countdownRemaining = MATCH_COUNTDOWN_SECONDS;

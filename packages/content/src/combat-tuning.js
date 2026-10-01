@@ -12,7 +12,7 @@ export function limitTalentPools(classId,talents={}){
  }
  const deepest=nodes.filter(node=>!node.virtualChoice).slice().sort((a,b)=>(b.y||0)-(a.y||0)||(b.x||0)-(a.x||0));
  let spent=Object.values(result).reduce((sum,rank)=>sum+rank,0);
- while(spent>28){const node=deepest.find(entry=>Number(result[entry.id]||0)>0);if(!node)break;if(--result[node.id]<=0)delete result[node.id];spent--;}
+ while(spent>29){const node=deepest.find(entry=>Number(result[entry.id]||0)>0);if(!node)break;if(--result[node.id]<=0)delete result[node.id];spent--;}
  return result;
 }
 export function normalizedVitals(classId,talents={}){
@@ -27,7 +27,7 @@ export function botBuild(classId,random){
  const bank=data.builds[classId]||[{}],build=limitTalentPools(classId,{...bank[Math.floor(random()*bank.length)]});
  if(classId==='shadow'&&Number(build.eviscerate)>0&&random()<.72)build.shadow_find_weakness=1+(random()<.48?1:0);
  const tree=data.trees[classId]||[],spent=()=>Object.values(build).reduce((sum,rank)=>sum+Number(rank||0),0);
- while(spent()<28){const candidates=tree.filter(node=>{
+ while(spent()<29){const candidates=tree.filter(node=>{
   if(node.virtualChoice||Number(build[node.id]||0)>=(Number(node.max)||1))return false;
   if(node.req?.length&&!node.req.some(id=>Number(build[id]||0)>0))return false;
   if(node.choice&&tree.some(other=>other.id!==node.id&&other.choice===node.choice&&Number(build[other.id]||0)>0))return false;

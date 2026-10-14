@@ -90,6 +90,7 @@ export function createSimulation({
         root: { level: 0, until: 0 }
       },
       talents: { ...(entry.talents || {}) },
+      enforceLoadout:!!entry.enforceLoadout,
       tigereyeStacks: Math.max(0, Math.min(6, Number(entry.tigereyeStacks) || 0)),
       tigereyePalmCounter: 0,
       stats: {
@@ -128,6 +129,10 @@ export function createSimulation({
     const x = Number(input.x);
     const z = Number(input.z);
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+    if (Object.hasOwn(input, 'targetId')) {
+      const selected = state.units.get(input.targetId);
+      unit.targetId = selected?.alive ? selected.id : null;
+    }
     const locked = combat.movementMultiplier(unit) <= 0;
     if (Number.isFinite(input.facing)) unit.facing = Math.atan2(Math.sin(input.facing),Math.cos(input.facing));
     if (Number.isSafeInteger(input.jumpSequence) && input.jumpSequence > (unit.jumpSequence||0)) {
@@ -200,6 +205,13 @@ export function createSimulation({
     const sourceAbility = abilities.get(action.abilityId);
     if (!sourceAbility || sourceAbility.classId !== unit.classId) return rejectAction(unit, action, 'unknown_ability');
     const ability = combat.prepareAbility(unit, sourceAbility);
+    if(unit.enforceLoadout){
+      if(sourceAbility.source==='talent'&&!Number(unit.talents[sourceAbility.id]))return rejectAction(unit,action,'talent_not_learned');
+      if(sourceAbility.id==='shadow.viper_cut'&&unit.talents.eviscerate)return rejectAction(unit,action,'ability_replaced');
+      if(sourceAbility.id==='soul.unstable_affliction'&&unit.talents.soul_void_mend)return rejectAction(unit,action,'ability_replaced');
+      if(sourceAbility.id==='storm_grounding_aegis')return rejectAction(unit,action,'ability_replaced');
+    }
+    if(ability.type==='chiExplosion'&&!combat.getEffect(unit,'chi'))return rejectAction(unit,action,'chi_required');
     if (!combat.supports(ability)) return rejectAction(unit, action, 'ability_not_migrated');
     const iceBlocked = combat.getEffect(unit, 'iceBlock');
     if (iceBlocked && ability.type === 'iceBlock') {
@@ -208,6 +220,11 @@ export function createSimulation({
       return { ok: true, reason: null };
     }
     if (iceBlocked) return rejectAction(unit, action, 'ice_blocked');
+    // Blink/root-cleansing escapes are not charges. Cloudstep's melee follow-up
+    // remains usable while rooted when its dash is on cooldown.
+    const chargeMovement = ['charge', 'intercept'].includes(ability.type)
+      || (ability.type === 'leap' && (ability.id === 'shadow.umbral_pounce' || ability.dashReady));
+    if (chargeMovement && combat.getEffect(unit, 'root')) return rejectAction(unit, action, 'rooted');
     if (combat.isControlled(unit) && !combat.getEffect(unit, 'bladestorm') && ability.type !== 'iceBlock') return rejectAction(unit, action, 'crowd_controlled');
     if (combat.getEffect(unit, 'silence') && ability.school !== 'physical') return rejectAction(unit, action, 'silenced');
     if (combat.getEffect(unit, `lock_${ability.school}`)) return rejectAction(unit, action, 'school_locked');
@@ -244,6 +261,7 @@ export function createSimulation({
     if (!target && action.targetId) {
       target = state.units.get(action.targetId);
       if (!target || !target.alive) return rejectAction(unit, action, 'target_unavailable');
+      if(unit.classId==='disc'&&['discSmite','discSolace','discPain'].includes(ability.type)&&target.team===unit.team){target=state.units.get(target.targetId);if(!target?.alive||target.team===unit.team)return rejectAction(unit,action,'ally_enemy_target_required');}
       if (target.team !== unit.team && combat.getEffect(target, 'stealth')) return rejectAction(unit, action, 'target_stealthed');
       if (ability.range > 0 && distance(unit, target) > ability.range + unit.radius + target.radius) {
         return rejectAction(unit, action, 'range');
@@ -273,7 +291,8 @@ export function createSimulation({
     if (!alterTimeReturn && ability.cooldown > 0 && !ability.commitCooldownOnComplete) unit.cooldowns.set(ability.id, ability.cooldown);
     if (!ability.offGlobal) unit.gcd = ability.gcd || 1;
     const castTime = Math.max(0, ability.castTime || 0);
-    if (['fistsChannel', 'bladestorm', 'soulDrain', 'discPenance'].includes(ability.type)) {
+    if (['fistsChannel', 'hurricaneStrikes', 'bladestorm', 'soulDrain', 'discPenance'].includes(ability.type)) {
+      const hurricane=ability.type==='hurricaneStrikes';
       const bladestorm = ability.type === 'bladestorm';
       const soulDrain = ability.type === 'soulDrain';
       const discPenance = ability.type === 'discPenance';
@@ -292,17 +311,17 @@ export function createSimulation({
       const quickSiphon = !!(immolate && immolate.label === 'Immolate' && immolate.sourceId === unit.id);
       const duration = soulDrain ? (quickSiphon ? 1.5 : 2.5) : discPenance ? castTime || 1.5 : bladestorm ? 4 : castTime || 2.5;
       unit.cast = {
-        kind: bladestorm ? 'bladestorm' : soulDrain ? 'soulDrain' : discPenance ? 'discPenance' : 'fists',
+        kind: hurricane?'hurricane':bladestorm ? 'bladestorm' : soulDrain ? 'soulDrain' : discPenance ? 'discPenance' : 'fists',
         abilityId: ability.id,
         ability,
-        targetId: soulDrain || discPenance ? target.id : unit.id,
+        targetId: hurricane || soulDrain || discPenance ? target.id : unit.id,
         sequence: action.sequence,
         remaining: duration,
         duration,
         school: ability.school,
         channel: true,
         uninterruptible: bladestorm || ability.type === 'fistsChannel',
-        moveSpeedMultiplier: discPenance ? 1 : bladestorm ? .78 : soulDrain ? 0 : (combat.hasTalent(unit,'cyclonetech')&&combat.getEffect(unit,'defensive')?1:.30),
+        moveSpeedMultiplier: hurricane || discPenance ? 1 : bladestorm ? .78 : soulDrain ? 0 : (combat.hasTalent(unit,'cyclonetech')&&combat.getEffect(unit,'defensive')?1:.30),
         tickInterval: discPenance ? (ability.radiant ? .35 : .5) : soulDrain ? .5 : bladestorm ? .55 : .4,
         tickRemaining: .02,
         radius: ability.range || (bladestorm ? 5.2 : 5),
@@ -310,7 +329,11 @@ export function createSimulation({
         radiant: !!ability.radiant,
         ticks: 0
       };
-      if (bladestorm) combat.addEffect(unit, 'bladestorm', 4, { immune: true });
+      if (bladestorm) {
+        combat.removeEffect(unit, 'root', 'bladestorm');
+        combat.removeEffect(unit, 'slow', 'bladestorm');
+        combat.addEffect(unit, 'bladestorm', 4, { immune: true });
+      }
       emit({
         type: 'castStarted', unitId, abilityId: ability.id, targetId: unit.id,
         abilityName: ability.name, abilityType: ability.type,
@@ -415,15 +438,17 @@ export function createSimulation({
       if (unit.cast) {
         if (unit.cast.channel) {
           unit.cast.tickRemaining -= fixedDt;
-          while (unit.cast.tickRemaining <= 0 && unit.cast.remaining > 0) {
-            combat.channelTick(unit, unit.cast);
-            unit.cast.tickRemaining += unit.cast.tickInterval;
+          const channel = unit.cast;
+          while (unit.cast === channel && channel.tickRemaining <= 0 && channel.remaining > 0) {
+            combat.channelTick(unit, channel);
+            if (unit.cast === channel) channel.tickRemaining += channel.tickInterval;
           }
         }
-        unit.cast.remaining = decrementTimer(unit.cast.remaining);
-        if (unit.cast.remaining === 0) {
+        if (unit.cast) unit.cast.remaining = decrementTimer(unit.cast.remaining);
+        if (unit.cast?.remaining === 0) {
           const completed = unit.cast;
           unit.cast = null;
+          if (completed.kind === 'bladestorm') combat.removeEffect(unit, 'bladestorm', 'completed');
           if (!completed.channel) {
             const target = state.units.get(completed.targetId);
             const hostileStealth = target?.team !== unit.team && combat.getEffect(target, 'stealth');
@@ -522,6 +547,8 @@ export function createSimulation({
         trinketCooldown: round(unit.trinketCooldown),
         cast: unit.cast ? {
           abilityId: unit.cast.abilityId,
+          abilityName: unit.cast.ability.name,
+          abilityType: unit.cast.ability.type,
           targetId: unit.cast.targetId,
           sequence: unit.cast.sequence,
           remaining: round(unit.cast.remaining),

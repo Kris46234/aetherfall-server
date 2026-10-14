@@ -1,4 +1,7 @@
 import {combatTuning as data} from '../generated/combat-tuning.generated.js';
+import '../generated/class-design.generated.js';
+export const classDesign=globalThis.AETHER_CLASS_DESIGN;
+export function replaceAbility(classId,talents,ability){const spec=classDesign.replace(classId,talents,{...ability,value:ability.baseValue,cast:ability.castTime,cd:ability.cooldown});return {...ability,...spec,baseValue:spec.value,castTime:spec.cast,cooldown:spec.cd};}
 // Apply shared choice-pool limits to old or stale client builds at the lobby boundary.
 export function limitTalentPools(classId,talents={}){
  const nodes=data.trees[classId]||[],result={},counts=new Map(),choices=new Set();

@@ -12,6 +12,7 @@ import {
   createAIControllerClass, createGameHelpers, CLIENT_BASE_ORDER, CLIENT_TALENT_ORDER
 } from '../generated/ai-controller.generated.js';
 import { catalogue } from '../../content/src/catalogue.js';
+import {classDesign} from '../../content/src/combat-tuning.js';
 import { hasLineOfSight } from '../../simulation/src/geometry.js';
 
 const BALANCE = Object.freeze({ arenaX: 32, arenaZ: 22, gcd: 1, unitRadius: .62 });
@@ -76,11 +77,11 @@ export function abilityListFor(classId, talents) {
     const ability = BY_CLASS_NAME.get(classId + '|' + name);
     if (ability) list.push(toClientAbility(ability));
   }
-  if(classId==='disc'&&Number(learned.disc_dark_archangel)>0){const smite=list.find(a=>a.name==='Smite');if(smite)Object.assign(smite,{name:'Mind Spike',school:'shadow',cast:1.30,value:102,atonementHeal:96});}
+  if(classId==='disc'&&Number(learned.disc_dark_archangel)>0){const smite=list.find(a=>a.name==='Smite');if(smite)Object.assign(smite,{from:'Smite',name:'Mind Spike',school:'shadow',cast:1.30,value:102,atonementHeal:96});}
   for (const talentId of [...(CLIENT_TALENT_ORDER[classId] || []),...(classId==='wind'?['wind_reverse_harm']:[])]) {
     if (!(Number(learned[talentId]) > 0)) continue;
     const ability = BY_ID.get(talentId);
-    if (!ability) continue;
+    if (!ability || classId==='storm'&&talentId==='storm_grounding_aegis') continue;
     const tuned = toClientAbility(ability);
     if (classId === 'soul' && talentId === 'soul_void_mend') {
       /* The client swaps Chaos Bolt in over Unstable Affliction rather than appending
@@ -98,7 +99,7 @@ export function abilityListFor(classId, talents) {
     }
     list.push(tuned);
   }
-  return list;
+  return list.map(ability=>classDesign.replace(classId,learned,ability));
 }
 
 const EFFECT_ALIASES = new Map([['cloakShadows', 'cloak'], ['touchKarma', 'karma']]);
@@ -135,12 +136,18 @@ export function createAiHost(simulation, options) {
     /* The AI treats effects as an array (filter/some/find) while the simulation keeps
        a Map. Add value-iterating helpers rather than replacing the Map. */
     const effects = unit.effects;
+    const adaptEffect = effect => {
+      // Offline AI compares owner objects. Keep this view non-enumerable so
+      // authoritative snapshots never serialize a unit graph or circular reference.
+      if (!Object.getOwnPropertyDescriptor(effect, 'source')?.get) Object.defineProperty(effect, 'source', { configurable:true, enumerable:false, get:()=>state.units.get(effect.sourceId) });
+      return effect;
+    };
     const values = () => {
       const out = [];
       for (const [key, effect] of effects) {
         effect.time = effect.remaining;
         if (!effect.type) effect.type = key;
-        out.push(effect);
+        out.push(adaptEffect(effect));
       }
       return out;
     };
@@ -158,7 +165,7 @@ export function createAiHost(simulation, options) {
          duration check in the AI silently compares against undefined. */
       effect.time = effect.remaining;
       if (!effect.type) effect.type = type;
-      return effect;
+      return adaptEffect(effect);
     };
     unit.name = unit.displayName || unit.id;
     unit.ai = null;

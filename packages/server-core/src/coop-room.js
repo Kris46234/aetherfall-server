@@ -198,7 +198,7 @@ export class CoopRoom {
     const rosterEntry = (id, team, classId, x, z, talents = {}, displayName = classId) => {
       return {
         id, team, classId, displayName, itemLevel: ONLINE_ITEM_LEVEL,
-        x, z, ...normalizedVitals(classId,talents), speed: classSpeed(classId), talents
+        x, z, ...normalizedVitals(classId,talents), speed: classSpeed(classId), talents, enforceLoadout:true
       };
     };
     const first = this.players.get('player1');

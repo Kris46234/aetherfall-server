@@ -254,7 +254,8 @@ function handle(socket: WebSocket, message: Record<string, unknown>) {
   }
   if (message.type === 'input') {
     const accepted = live.room.input(state.clientId, {
-      sequence: Number(message.sequence), x: Number(message.x), z: Number(message.z), facing:Number(message.facing),jumpSequence:Number(message.jumpSequence)
+      sequence: Number(message.sequence), x: Number(message.x), z: Number(message.z), facing:Number(message.facing),jumpSequence:Number(message.jumpSequence),
+      ...(Object.hasOwn(message,'targetId')?{targetId:typeof message.targetId==='string'?cleanId(message.targetId):null}:{})
     });
     if (!accepted) json(socket, { type: 'inputRejected', sequence: message.sequence });
     return;
@@ -348,7 +349,7 @@ Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.59.0',
+      release: '2.60.7',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,

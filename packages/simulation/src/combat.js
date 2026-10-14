@@ -1,6 +1,6 @@
 import { distance, hasLineOfSight, resolveArenaBounds, resolvePillarCollisions } from './geometry.js';
 import { combatTuning } from '../../content/generated/combat-tuning.generated.js';
-import { replaceAbility } from '../../content/src/combat-tuning.js';
+import { replaceAbility, classDesign } from '../../content/src/combat-tuning.js';
 
 const TALENT_EFFECT_NODES = Object.fromEntries(Object.entries(combatTuning.trees).map(([classId,nodes])=>[classId,nodes.filter(node=>node.effects)]));
 
@@ -46,6 +46,11 @@ const SUPPORTED_TYPES = new Set([
 const round = value => Number(value.toFixed(4));
 
 export function createCombatResolver({ state, emit, fixedDt, random }) {
+  const shadowApi={rank:talentRank,get:getEffect,effects:t=>[...t.effects.values()],owned:(e,c)=>e.sourceId===c.id,time:e=>e.remaining,setTime:(e,n)=>{e.remaining=n;},random,
+    add:addEffect,remove:(c,k)=>removeEffect(c,k,'consumed'),energy:(c,n)=>{c.resource=Math.min(c.maxResource,c.resource+n);},
+    reduce:(c,key,n)=>{const id={viper:'shadow.viper_cut',veil:'shadow.smoke_veil',pounce:'shadow.umbral_pounce'}[key];c.cooldowns.set(id,Math.max(0,Number(c.cooldowns.get(id)||0)-n));},
+    proc:(c,label)=>emit({type:'presentation',cue:'shadowTalentProc',sourceId:c.id,label})
+  };
   // Gameplay travel is server-owned; visual effects never decide when damage lands.
   const projectiles = [];
   function advanceCharge(unit) {
@@ -160,6 +165,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       if(['Cloudstep Kick','Rising Sun Kick','Strike of the Windlord','Fists of Fury'].includes(label)&&(!source.chiGenerationAt||state.time>=source.chiGenerationAt)){addChi(source,1);source.chiGenerationAt=state.time+.8;}
     }
     if(source.classId==='shadow'){
+      classDesign.shadowTalents.onHit(shadowApi,source,target,label,!!options.periodic);
       const dance=getEffect(source,'shadowDance');if(label==='Eviscerate'&&dance){const extra=Math.min(.75,3-Number(dance.extended||0));dance.remaining+=extra;dance.extended=Number(dance.extended||0)+extra;}
       if(hasTalent(source,'shadow_sanguine_blades')){
         if(label==='Viper Cut')for(const effect of target.effects.values())if(effect.type==='bleed'&&effect.sourceId===source.id&&['Garrote','Internal Bleeding'].includes(effect.label))effect.remaining=Math.min(effect.label==='Garrote'?8:6,effect.remaining+2);
@@ -175,6 +181,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     const ability = replaceAbility(unit.classId,unit.talents,source);
     if(ability.type==='chiExplosion')ability.cooldown=Math.max(4.5,6-talentRank(unit,'longdash')*.5-talentRank(unit,'wind_nimble_brew')*.25);
     if(ability.type==='shadowStrike'&&getEffect(unit,'shadowDance')){ability.cooldown=0;ability.cost=14;}
+    if(unit.classId==='shadow')Object.assign(ability,classDesign.shadowTalents.modifyAbility(shadowApi,unit,ability));
     if(ability.name==='Verdant Mend'&&getEffect(unit,'emeraldFlight'))ability.castTime=0;
     if (ability.id === 'pala_judgement' || ability.type === 'bestowFaith') ability.cost = 0;
     if(ability.id==='flame.blazing_step')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'swiftstep'));
@@ -399,6 +406,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if(lightningRod?.sourceId===source.id&&/Arc Spark|Forked Current/i.test(String(label)))outgoing*=1.20;
     if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && [...target.effects.values()].some(effect => effect.type === 'bleed' && effect.label === 'Rend' && effect.sourceId === source.id)) outgoing *= 1 + talentRank(source, 'executioner') * .06;
     if (source.classId === 'shadow' && label === 'Shadowstrike') outgoing *= 1 + talentRank(source, 'eviscerate') * .08;
+    if(source.classId==='shadow')outgoing*=classDesign.shadowTalents.damageMultiplier(shadowApi,source,target,label);
     if (source.classId === 'shadow' && label === 'Eviscerate') outgoing *= 1 + talentRank(source, 'eviscerate') * .12;
     if (source.classId === 'storm' && /Forked Current|Volcanic|Lava|Tempest/i.test(label)) outgoing *= 1 + talentRank(source, 'lavacore') * .04;
     if (source.classId === 'wind' && /Fists of Fury|Hurricane Strikes/i.test(label) && getEffect(source, 'defensive')) outgoing *= 1 + talentRank(source, 'cyclonetech') * .12;
@@ -761,11 +769,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             removeEffect(source, 'shadowMarks', 'converted');
             addEffect(source, 'venomEdge', 12);
           } else addEffect(source, 'shadowMarks', 12, { stacks: marks });
-          if (getEffect(source, 'cheapReady')) {
-            removeEffect(source, 'cheapReady', 'consumed');
-            applyCrowdControl(target, 'stun', 3, 'stun');
-          }
         }
+        if(ability.id==='shadow.night_slash'&&result.hit&&getEffect(source,'smokePower'))applyCrowdControl(target,'stun',3,'stun');
         if (ability.id === 'storm.arc_spark') {
           if(ability.tempestProc){const bolts=getEffect(source,'tempestBolts');if(bolts){bolts.stacks=Math.max(0,Number(bolts.stacks||2)-1);if(!bolts.stacks)removeEffect(source,'tempestBolts','consumed');}}
           if(result.hit){source.resource = Math.min(source.maxResource, source.resource + (ability.tempestProc?5:4));
@@ -843,11 +848,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         const hit = damage(source, target, ability.baseValue, 'Shadowstrike', { school: 'physical', melee: true }).hit;
         if (!hit) return false;
         source.resource=Math.min(source.maxResource,source.resource+4);
-        const stacks = Math.min(3, Number(getEffect(source, 'shadowTechnique')?.stacks || 0) + (getEffect(source,'shadowDance')?2:1));
-        removeEffect(source, 'shadowTechnique', 'refreshed');
+        classDesign.shadowTalents.techniques(shadowApi,source);
         if (talentRank(source, 'shadow_find_weakness') > 0) addEffect(target, 'findWeakness', 4, { sourceId: source.id });
-        if (stacks >= 3) addEffect(source, 'eviscerateReady', 10);
-        else addEffect(source, 'shadowTechnique', 8, { stacks });
         return true;
       }
       case 'whirlingDragonPunch': {
@@ -1329,12 +1331,13 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       case 'vendetta':
         addEffect(target, 'vendetta', 10+talentRank(source,'shadow_doomblade'), { sourceId: source.id });
+        classDesign.shadowTalents.onVendetta(shadowApi,source,target);
         return true;
       case 'shiv': {
         const hit = damage(source, target, ability.baseValue, label, { school: 'physical', melee: true }).hit;
         if (hit) {
           addEffect(target, 'slow', 4, { pct: .65, sourceId: source.id });
-          addEffect(target, 'shivPoisonAmp', 4, { sourceId: source.id, pct: .30 });
+          addEffect(target, 'shivPoisonAmp', 8, { sourceId: source.id, pct: .30 });
         }
         return hit;
       }

@@ -1,5 +1,5 @@
-/* Shared, data-only class design. The generator copies this exact file into the
-   authoritative content bundle; both games use the same replacement rules. */
+/* Shared class design and pure talent decisions. The generator copies this file
+   into the authoritative bundle; combat engines provide effect/resource adapters. */
 (function(root){
  const node=(id,name,icon,lane,req,desc,max=1)=>({id,name,icon,talentLane:lane,req,desc,max,x:lane==='left'?20:lane==='right'?80:50,y:90});
  const nodes={
@@ -7,7 +7,18 @@
   wind:[node('wind_chi_explosion','Chi Explosion','💠','left',['tigerdash'],'Replaces Cloudstep Kick with an 8m Chi Explosion. Palm and your major attacks build up to 4 Chi. Consume all Chi for 90 damage plus 56 per Chi. At 3+ Chi, nearby enemies take 50% damage. At 4 Chi, gain 2 Tigereye stacks. No new button.'),node('wind_hurricane_strikes','Hurricane Strikes','🌪️','right',['cyclonetech'],'Replaces Fists of Fury. Channel four rushing strikes over 1.6 sec while moving at full speed. Each deals 115 damage to your chosen enemy within 8m, and 40% to nearby enemies. Landing the final strike grants 2 Chi. Can be interrupted by crowd control.')],
   storm:[node('storm_elemental_cycle','Elemental Rhythm','⚡','core',['overloadpath'],'Normal Arc Spark builds 25 Maelstrom; Forked Current builds 35. At 100, gain two Tempest Bolts and one Overload. Spend both rewards before building again. Replaces random Storm Surge.'),node('storm_lava_surge','Molten Feedback','🌋','left',['storm_lava_burst'],'Land a normal Arc Spark and Forked Current within 8 sec. Your next Shock readies one Eruption, if Eruption is ready. Repeated Shocks alone grant nothing.')],
   sage:[node('sage_swiftmend','Flourishing Mend','🌺','left',['wildgrowth'],'Replaces Renewal Tide with Swiftmend: an 18 sec recovery spell. Heal for 380, plus four ticks of one of your HoTs on the target, shortening that HoT by 4 sec. Empowers your next Verdant Mend just like Renewal Tide. Nature Swiftness lets you use Swiftmend once while it is on cooldown.'),node('sage_dream_echo','Dream Echo','🦋','right',['barkskin'],'Replaces Blooming Echo. Place an 8 sec Echo on an ally. Your next Verdant Mend, Renewal Tide or Swiftmend copies 45% of its base healing to each other Echo ally within 28m and line of sight, consuming those Echoes. Echo does not repeat itself.'),node('sage_emerald_flight','Emerald Flight','🪽','core',['sagepath'],'Fae Retreat prepares an instant Verdant Mend for 6 sec. Heal while repositioning instead of planting your feet.')],
-  shadow:[node('shadow_dance_mastery','Dance of Daggers','🌘','right',['eviscerate'],'Smoke Veil becomes Shadow Dance: a 6 sec offensive window on a 30 sec cooldown. Shadowstrike has no cooldown, costs 14 Energy and generates 2 techniques during Dance. Eviscerate extends Dance by 0.75 sec, up to 3 sec per window. Outside Dance, Shadowstrike generates one technique.'),node('shadow_sanguine_blades','Sanguine Blades','🩸','left',['garrote'],'Viper Cut on a target with your Garrote extends Garrote and Internal Bleeding by 2 sec, up to their original durations. Poison/bleed ticks reduce Vendetta cooldown by 0.25 sec, at most once each second.')],
+  shadow:[
+   node('shadow_dance_mastery','Dance of Daggers','🌘','right',['eviscerate'],'Smoke Veil becomes Shadow Dance: a 6 sec offensive window on a 30 sec cooldown. Shadowstrike has no cooldown, costs 14 Energy and generates 2 techniques during Dance. Eviscerate extends Dance by 0.75 sec, up to 3 sec per window. Outside Dance, Shadowstrike generates one technique.'),
+   node('shadow_sanguine_blades','Sanguine Blades','🩸','left',['garrote'],'Viper Cut on a target with your Garrote extends Garrote and Internal Bleeding by 2 sec, up to their original durations. Poison/bleed ticks reduce Vendetta cooldown by 0.25 sec, at most once each second.'),
+   node('shadow_venomous_vigor','Venomous Vigor','🦂','left',['garrote'],'Your poison damage against an enemy affected by your bleed restores 2 Energy. Can occur once every 1 sec across all targets.'),
+   node('shadow_toxic_opportunity','Toxic Opportunity','☠️','left',['shadow_venomous_vigor'],'Your poison damage against an enemy affected by your bleed has a 20% chance to reset Viper Cut and empower it for 10 sec. The empowered strike costs no Energy and deals 25% more direct damage. Can occur once every 10 sec; does not stack.'),
+   node('shadow_deathmark','Deathmark','🎯','left',['shadow_shadowstep'],'Vendetta refreshes your existing Viper Cut poison, Garrote and Internal Bleeding on its target to their full durations. Does not apply missing effects.'),
+   node('shadow_twisting_knife','Twisting Knife','🗡️','left',['shadow_deathmark'],'Shiv extends your active Vendetta on its target by 2 sec. Each Vendetta can be extended once. Requires Shiv to trigger.'),
+   node('shadow_followthrough','Predatory Rhythm','⚔️','right',['eviscerate'],'Eviscerate empowers your next Shadowstrike within 6 sec to deal 20% more damage and cost 6 less Energy. This effect does not stack.'),
+   node('shadow_echoing_strikes','Echoing Strikes','👥','right',['eviscerate'],'Shadowstrike has a 20% chance to generate one additional Shadow Technique and reduce Umbral Pounce cooldown by 2 sec. Can occur once every 5 sec. Techniques cannot exceed three.'),
+   node('shadow_deepening_shadows','Deepening Shadows','🌑','right',['shadow_dance_mastery'],'Eviscerate reduces Shadow Dance cooldown by 2 sec. Can occur once every 1 sec.'),
+   node('shadow_shadowed_finish','Shadowed Finish','💀','right',['shadow_find_weakness'],'Eviscerate deals 12% more damage to stunned enemies. Cheap Shot and Ribbreaker can create this opportunity, subject to normal stun diminishing returns.')
+  ],
   warrior:[node('war_execution_sentence','Execution Sentence','💀','left',['executioner'],'Mortal Swing deals 12% more damage below 25% enemy health and restores 4 Rage. Does not add another ability.')],
   flame:[node('flame_controlled_burn','Controlled Burn','🔥','left',['meteorimpact'],'Ember Lance on your Living Bomb reduces Combustion cooldown by 2 sec, at most once every 2 sec.')],
   soul:[node('soul_haunting_echo','Haunting Echo','👻','core',['cursepath'],'Fear prepares your next Essence Siphon tick to heal 25% more. Applies to Affliction and Chaos builds; the bonus is consumed by one tick.')],
@@ -22,6 +33,7 @@
  };
  function replace(cls,talents,input){
   let a={...input};
+  if(cls==='shadow'&&a.name==='Smoke Veil')a.tip='Vanish and gain 10% increased damage for 8 sec. Throughout Veiled Assault, each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Attacking breaks stealth, but does not end Veiled Assault.';
   if(cls==='wind'&&a.name==='Zephyr Palm')a.tip='Strike for 50 damage. Landing Zephyr Palm after a different damaging ability grants one Flow. At three Flow, your next Palm becomes Rising Sun Kick, dealing 271 damage for 12 Energy. Repeating Palm does not generate more Flow. With Chi Explosion, each Palm also generates one Chi.';
   if(cls==='warrior'&&a.name==='Mortal Swing')a.tip='Strike for 104 Physical damage. Pummel and Warbreaker empower this attack; consuming Warbreaker triggers three Slicing Winds. Battle Trance: Mortal Swings against your Rend target have a 25% chance to reset Rend and prepare Gushing Wound for 8 sec. This can occur once every 10 sec.';
   if(cls==='storm'&&a.type==='volcanicEruption')a={...a,school:'fire',cast:0,cd:12,value:280,offGlobal:false,tip:'Consume one charge to launch 280 Fire damage, followed by two 40-damage embers. Skybreaker Pulse or Molten Feedback prepares a charge for 10 sec. Instant cast. 12 sec cooldown.'};
@@ -31,8 +43,56 @@
   for(const [id,spec] of Object.entries(replacements))if(Number(talents?.[id])>0&&(a.name===spec.from||a.name===spec.name))a={...a,...spec};
   if(cls==='storm'&&a.name==='Flame Shock')a={...a,cd:6,tip:'Burn an enemy for 34 Fire damage each second for 12 sec. You do not need this effect to trigger Storm Surge. Icefury replaces this button with Frost Shock instead of adding another Shock.'};
   if(cls==='storm'&&Number(talents?.storm_grounding_aegis)>0&&['Flame Shock','Frost Shock'].includes(a.name))a={...a,from:'Flame Shock',name:'Frost Shock',icon:'❄️',type:'frostShock',school:'storm',range:25,cast:0,cd:6,cost:1,value:90,tip:'Deal 90 Frost damage and slow by 25% for 3 sec, subject to snare diminishing returns. Your Arc Spark and Forked Current deal 10% more damage to this target for 8 sec. Replaces Flame Shock; both never occupy separate buttons.'};
-  if(cls==='shadow'&&a.name==='Smoke Veil'&&Number(talents?.shadow_dance_mastery)>0)a={...a,from:'Smoke Veil',name:'Shadow Dance',cd:30,tip:'Enter Shadow Dance for 6 sec. Shadowstrike has no cooldown, costs 14 Energy and builds 2 techniques. Eviscerate extends Dance by 0.75 sec, up to 3 sec. Also prepares Cheap Shot and Smoke Bomb, but does not reduce damage taken.'};
+  if(cls==='shadow'&&a.name==='Smoke Veil'&&Number(talents?.shadow_dance_mastery)>0)a={...a,from:'Smoke Veil',name:'Shadow Dance',cd:30,tip:'Enter Shadow Dance for 6 sec. Shadowstrike has no cooldown, costs 14 Energy and builds 2 techniques. Eviscerate extends Dance by 0.75 sec, up to 3 sec. Also grants Veiled Assault for 8 sec: each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Does not reduce damage taken.'};
   return a;
  }
- root.AETHER_CLASS_DESIGN={nodes,replacements,replace};
+ // Shared combat decisions; adapters only translate offline/authoritative storage.
+ const shadowTalents={
+  modifyAbility(api,c,a){
+   if(a.type==='shadowStrike'&&api.get(c,'predatoryRhythm'))a={...a,cost:Math.max(0,a.cost-6)};
+   if(a.name==='Viper Cut'&&api.get(c,'toxicOpportunity'))a={...a,cost:0};
+   return a;
+  },
+  damageMultiplier(api,c,t,label){
+   if(label==='Shadowstrike'&&api.get(c,'predatoryRhythm'))return 1.20;
+   if(label==='Viper Cut'&&api.get(c,'toxicOpportunity'))return 1.25;
+   if(label==='Eviscerate'&&api.rank(c,'shadow_shadowed_finish')&&['stun','cheapStun','furyStun'].some(k=>api.get(t,k)))return 1.12;
+   return 1;
+  },
+  techniques(api,c){
+   let gain=api.get(c,'shadowDance')?2:1;
+   if(api.rank(c,'shadow_echoing_strikes')&&!api.get(c,'shadowEchoLock')&&api.random()<.20){gain++;api.add(c,'shadowEchoLock',5);api.reduce(c,'pounce',2);api.proc(c,'ECHOING STRIKES');}
+   // A banked finisher is never overwritten by another generator.
+   if(api.get(c,'eviscerateReady'))return;
+   const stacks=Math.min(3,Number(api.get(c,'shadowTechnique')?.stacks||0)+gain);
+   api.remove(c,'shadowTechnique');
+   if(stacks>=3){api.add(c,'eviscerateReady',10);api.proc(c,'EVISCERATE READY');}
+   else api.add(c,'shadowTechnique',8,{stacks});
+  },
+  onHit(api,c,t,label,periodic){
+   if(label==='Shadowstrike')api.remove(c,'predatoryRhythm');
+   if(label==='Viper Cut')api.remove(c,'toxicOpportunity');
+   if(label==='Eviscerate'){
+    if(api.rank(c,'shadow_followthrough')){api.add(c,'predatoryRhythm',6);api.proc(c,'PREDATORY RHYTHM');}
+    if(api.rank(c,'shadow_deepening_shadows')&&!api.get(c,'deepeningLock')){api.reduce(c,'veil',2);api.add(c,'deepeningLock',1);}
+   }
+   if(label==='Shiv'&&api.rank(c,'shadow_twisting_knife')){
+    const mark=api.effects(t).find(e=>e.type==='vendetta'&&api.owned(e,c));
+    if(mark&&!mark.twisted){api.setTime(mark,api.time(mark)+2);mark.twisted=true;}
+   }
+   if(!periodic||!/Poison/i.test(label)||!api.effects(t).some(e=>e.type==='bleed'&&api.owned(e,c)&&api.time(e)>0))return;
+   if(api.rank(c,'shadow_venomous_vigor')&&!api.get(c,'venomVigorLock')){api.energy(c,2);api.add(c,'venomVigorLock',1);}
+   if(api.rank(c,'shadow_toxic_opportunity')&&!api.get(c,'toxicOpportunity')&&!api.get(c,'toxicOpportunityLock')&&api.random()<.20){
+    api.reduce(c,'viper',99);api.add(c,'toxicOpportunity',10);api.add(c,'toxicOpportunityLock',10);api.proc(c,'TOXIC OPPORTUNITY');
+   }
+  },
+  onVendetta(api,c,t){
+   if(!api.rank(c,'shadow_deathmark'))return;
+   for(const e of api.effects(t))if(api.owned(e,c)){
+    if(e.type==='poison'||(e.type==='bleed'&&e.label==='Garrote'))api.setTime(e,8);
+    else if(e.type==='bleed'&&e.label==='Internal Bleeding')api.setTime(e,6);
+   }
+  }
+ };
+ root.AETHER_CLASS_DESIGN={nodes,replacements,replace,shadowTalents};
 })(globalThis);

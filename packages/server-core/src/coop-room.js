@@ -225,6 +225,7 @@ export class CoopRoom {
       ];
     this.simulation = createSimulation({
       seed: this.seed,
+      mode: this.format,
       arena: this.arena,
       roster
     });

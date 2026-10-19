@@ -29,6 +29,7 @@ function resourceDefaults(entry) {
 export function createSimulation({
   seed = 1,
   roster = [],
+  mode = '2v2',
   arena = { x: 24, z: 16, pillars: [] },
   abilities = defaultAbilityById,
   fixedDt = FIXED_DT
@@ -37,6 +38,7 @@ export function createSimulation({
   const random = createRandom(seed);
   const state = {
     seed,
+    mode,
     time: 0,
     tick: 0,
     eventSequence: 0,
@@ -90,6 +92,8 @@ export function createSimulation({
         root: { level: 0, until: 0 }
       },
       talents: { ...(entry.talents || {}) },
+      // Roster equipment comes from server-owned normalization, never actions.
+      gearStats: Object.fromEntries(Object.entries(entry.gearStats||{}).filter(([,value])=>Number.isFinite(value)&&value>=0)),
       enforceLoadout:!!entry.enforceLoadout,
       tigereyeStacks: Math.max(0, Math.min(6, Number(entry.tigereyeStacks) || 0)),
       tigereyePalmCounter: 0,

@@ -2,6 +2,8 @@
 // Both browsers send only inputs/actions; this process owns the entire match.
 import { getClass } from '../../packages/content/src/catalogue.js';
 import { CoopRoom } from '../../packages/server-core/src/coop-room.js';
+import { arenaFor } from '../../packages/content/src/arena-layouts.js';
+import { AccountAccess } from '../../packages/server-core/src/account-access.js';
 
 const PROTOCOL_VERSION = 20;
 const TICK_RATE = 30;
@@ -15,6 +17,7 @@ const MAX_ROOMS = 200;
 const MAX_MESSAGE_BYTES = 16 * 1024;
 const INSTANCE_ID = crypto.randomUUID().slice(0, 8);
 const ALLOWED_ORIGINS = new Set(String(Deno.env.get('ALLOWED_ORIGINS') || '').split(',').map(value => value.trim()).filter(Boolean));
+const accounts = new AccountAccess({endpoint:Deno.env.get('ACCOUNT_VERIFY_URL') || 'https://amazing-fenglisu-72d040.netlify.app/api/arena-account'});
 
 type SocketState = {
   clientId: string;
@@ -45,19 +48,6 @@ function cleanId(value: unknown) {
 
 function cleanFormat(value: unknown) {
   return value === '1v1' ? '1v1' : '2v2';
-}
-
-function arenaFor(code: string) {
-  const serpent = [...code].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 2 === 1;
-  return {
-    theme: serpent ? 'serpent' : 'runestone',
-    x: 32,
-    z: 22,
-    pillars: (serpent
-      ? [[-18, -10.7, 1.72], [18, -10.7, 1.72], [-18, 10.7, 1.72], [18, 10.7, 1.72]]
-      : [[-17, -10.2, 1.76], [17, -10.2, 1.76], [-17, 10.2, 1.76], [17, 10.2, 1.76]])
-      .map(([x, z, radius], index) => ({ id: `pillar-${index + 1}`, x, z, radius }))
-  };
 }
 
 function json(socket: WebSocket, value: unknown, droppable = false) {
@@ -133,12 +123,18 @@ function detach(socket: WebSocket) {
   broadcastLobby(live);
 }
 
-function join(socket: WebSocket, message: Record<string, unknown>) {
+function rejectAccount(socket: WebSocket, result: Record<string, unknown>) {
+  if(result.code==='ACCOUNT_CHECK_PENDING'||result.code==='ACCOUNT_CHECK_SUPERSEDED')return;
+  json(socket,{type:'accountDenied',reason:result.code||'ACCOUNT_AUTH_REQUIRED',ban:result.ban});
+  detach(socket);accounts.forget(socket);socketState.delete(socket);
+  try{socket.close(4003,'account access denied');}catch{/* already closed */}
+}
+
+async function join(socket: WebSocket, message: Record<string, unknown>) {
   const roomCode = cleanCode(message.roomCode);
   const clientId = cleanId(message.clientId);
   const classId = cleanId(message.classId);
   const sessionToken = cleanId(message.sessionToken);
-  const displayName = String(message.displayName || '').replace(/[<>]/g, '').trim().slice(0, 24);
   const format = cleanFormat(message.format);
   const talents = message.talents && typeof message.talents === 'object'
     ? Object.fromEntries(Object.entries(message.talents as Record<string, unknown>)
@@ -153,6 +149,16 @@ function join(socket: WebSocket, message: Record<string, unknown>) {
     json(socket, { type: 'error', reason: 'invalid_join' });
     return;
   }
+  const account=await accounts.verify(socket,message.playTicket,{refresh:!!accounts.current(socket)});
+  if(!account.allowed){rejectAccount(socket,account);return;}
+  if(socket.readyState!==WebSocket.OPEN)return;
+  const existingRoom=liveRooms.get(roomCode)?.room;
+  const oldPlayer=[...(existingRoom?.players.values()||[])].find(player=>player.clientId===clientId);
+  const tokenSlot=sessionToken?existingRoom?.sessions.get(sessionToken):null;
+  const sessionPlayer=tokenSlot?existingRoom?.players.get(tokenSlot):null;
+  const sessionClientId=sessionPlayer?.clientId;
+  if([oldPlayer,sessionPlayer].some(player=>player?.accountId&&player.accountId!==account.playerId)){rejectAccount(socket,{code:'ACCOUNT_SUBJECT_MISMATCH'});return;}
+  const displayName=account.nickname;
   detach(socket);
   let live: LiveRoom;
   try { live = getOrCreateRoom(roomCode, format); } catch {
@@ -165,7 +171,10 @@ function join(socket: WebSocket, message: Record<string, unknown>) {
     json(socket, { type: 'error', reason: result.reason });
     return;
   }
-  const replaced = live.sockets.get(clientId);
+  const joinedPlayer=[...live.room.players.values()].find(player=>player.clientId===clientId);
+  if(joinedPlayer)joinedPlayer.accountId=account.playerId;
+  const replaced = live.sockets.get(clientId) || (sessionClientId ? live.sockets.get(sessionClientId) : null);
+  if(sessionClientId&&sessionClientId!==clientId)live.sockets.delete(sessionClientId);
   live.sockets.set(clientId, socket);
   live.lastActive = Date.now();
   socketState.set(socket, { clientId, roomCode, sessionToken: result.sessionToken });
@@ -188,15 +197,22 @@ function join(socket: WebSocket, message: Record<string, unknown>) {
   }
 }
 
-function handle(socket: WebSocket, message: Record<string, unknown>) {
+async function handle(socket: WebSocket, message: Record<string, unknown>) {
   if (message.type === 'ping') {
     json(socket, { type: 'pong', clientTime: Number(message.clientTime) || 0, serverTime: Date.now() });
     return;
   }
   if (message.type === 'join') {
-    join(socket, message);
+    await join(socket, message);
     return;
   }
+  if(message.type==='authenticate'){
+    if(!socketState.has(socket)){rejectAccount(socket,{code:'ACCOUNT_AUTH_REQUIRED'});return;}
+    const result=await accounts.verify(socket,message.playTicket,{refresh:true});
+    if(!result.allowed)rejectAccount(socket,result);else json(socket,{type:'accountVerified',expiresAt:result.expiresAt});
+    return;
+  }
+  if(!accounts.current(socket)){rejectAccount(socket,{code:'ACCOUNT_AUTH_REQUIRED'});return;}
   const state = socketState.get(socket);
   const live = state ? liveRooms.get(state.roomCode) : null;
   if (!state || !live || live.sockets.get(state.clientId) !== socket) {
@@ -345,11 +361,19 @@ setInterval(() => {
   }
 }, 1000 / TICK_RATE);
 
+// No network calls inside the simulation tick. Recheck live accounts separately;
+// new bans revoke existing matches as well as future joins.
+setInterval(()=>{
+  for(const live of liveRooms.values())for(const socket of live.sockets.values())if(accounts.needsCheck(socket)){
+    accounts.recheck(socket).then(result=>{if(!result.allowed)rejectAccount(socket,result);});
+  }
+},5000);
+
 Deno.serve((request: Request) => {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return Response.json({
       service: 'Aetherfall authoritative co-op',
-      release: '2.60.8',
+      release: '2.61.0',
       protocol: PROTOCOL_VERSION,
       tickRate: TICK_RATE,
       snapshotRate: SNAPSHOT_RATE,
@@ -380,9 +404,11 @@ Deno.serve((request: Request) => {
     }
     let message: unknown;
     try { message = JSON.parse(raw); } catch { return; }
-    if (message && typeof message === 'object') handle(socket, message as Record<string, unknown>);
+    if (message && typeof message === 'object') handle(socket, message as Record<string, unknown>).catch(()=>{
+      json(socket,{type:'error',reason:'request_failed'});
+    });
   };
-  socket.onclose = () => detach(socket);
-  socket.onerror = () => detach(socket);
+  socket.onclose = () => {detach(socket);accounts.forget(socket);};
+  socket.onerror = () => {detach(socket);accounts.forget(socket);};
   return response;
 });

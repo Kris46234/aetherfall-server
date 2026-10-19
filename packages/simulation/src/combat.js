@@ -1,8 +1,8 @@
 import { distance, hasLineOfSight, resolveArenaBounds, resolvePillarCollisions } from './geometry.js';
-import { combatTuning } from '../../content/generated/combat-tuning.generated.js';
-import { replaceAbility, classDesign } from '../../content/src/combat-tuning.js';
+import { replaceAbility, classDesign, classExpansion } from '../../content/src/combat-tuning.js';
+import { getClass } from '../../content/src/catalogue.js';
+import {createCombatScaling} from './combat-scaling.js';
 
-const TALENT_EFFECT_NODES = Object.fromEntries(Object.entries(combatTuning.trees).map(([classId,nodes])=>[classId,nodes.filter(node=>node.effects)]));
 
 const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap', 'gouge']);
 const BLADESTORM_CONTROL = new Set([...HARD_CONTROL, 'cheapStun', 'furyStun', 'root', 'slow', 'silence', 'disarm']);
@@ -46,6 +46,13 @@ const SUPPORTED_TYPES = new Set([
 const round = value => Number(value.toFixed(4));
 
 export function createCombatResolver({ state, emit, fixedDt, random }) {
+  const expansionApi={rank:talentRank,get:getEffect,effects:t=>[...t.effects.values()],owned:(e,c)=>e.sourceId===c.id,time:e=>e.remaining,setTime:(e,n)=>{e.remaining=n;},random,
+    add:addEffect,remove:(c,k)=>removeEffect(c,k,'consumed'),resource:(c,n)=>{c.resource=Math.min(c.maxResource,c.resource+n);},
+    reduce:(c,name,n)=>{const ability=getClass(c.classId)?.abilities.find(a=>replaceAbility(c.classId,c.talents,a).name===name);if(ability)c.cooldowns.set(ability.id,Math.max(0,Number(c.cooldowns.get(ability.id)||0)-n));},
+    proc:(c,profile,label,target=c)=>emit({type:'presentation',cue:'classTalentProc',sourceId:c.id,targetId:target.id,profile,label})
+  };
+  let expansionCast=null;
+  function expansionModifierApi(c){return expansionCast?.caster===c?{...expansionApi,get:(u,k)=>u===c&&expansionCast.buffs.has(k)?expansionCast.buffs.get(k):getEffect(u,k)}:expansionApi;}
   const shadowApi={rank:talentRank,get:getEffect,effects:t=>[...t.effects.values()],owned:(e,c)=>e.sourceId===c.id,time:e=>e.remaining,setTime:(e,n)=>{e.remaining=n;},random,
     add:addEffect,remove:(c,k)=>removeEffect(c,k,'consumed'),energy:(c,n)=>{c.resource=Math.min(c.maxResource,c.resource+n);},
     reduce:(c,key,n)=>{const id={viper:'shadow.viper_cut',veil:'shadow.smoke_veil',pounce:'shadow.umbral_pounce'}[key];c.cooldowns.set(id,Math.max(0,Number(c.cooldowns.get(id)||0)-n));},
@@ -303,7 +310,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (ability.id === 'shadow_garrote' || ability.id === 'storm.skybreaker_pulse' || ability.id === 'storm_lava_burst' || ability.id === 'soul.grasping_gloom') ability.offGlobal = true;
     if (['dash', 'interruptProc', 'flameNova', 'iceBlock', 'combustion', 'livingBomb'].includes(ability.type)) ability.offGlobal = true;
     if (['poly', 'sleep', 'fear', 'stormkeeper'].includes(ability.type) && ability.castTime > 0) ability.commitCooldownOnComplete = true;
-    return ability;
+    return classExpansion.modifyAbility(expansionApi,unit,{...ability,cast:ability.castTime});
   }
 
   function commitAbility(unit, ability) {
@@ -325,48 +332,16 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     return SUPPORTED_TYPES.has(ability.type);
   }
 
-  function damageMultiplier(unit, label = '') {
-    const brew = getEffect(unit, 'tigereyeBrew');
-    const avatar = getEffect(unit, 'avatar');
-    const defensive = getEffect(unit, 'defensive');
-    let multiplier = (brew ? 1 + Number(brew.power || 0) : 1)
-      * (avatar ? 1 + Number(avatar.damagePct || .16) : 1)
-      * (defensive?.damagePenalty ? 1 - defensive.damagePenalty : 1);
-    if (unit.classId === 'shadow' && label !== 'Night Slash') multiplier *= 1.10;
-    if (getEffect(unit, 'crimsonVial')) multiplier *= .75;
-    if (getEffect(unit, 'smokePower')) multiplier *= 1.10;
-    if (getEffect(unit, 'darkArchangel')) multiplier *= 1.30;
-    if (getEffect(unit, 'totemMastery')) {
-      multiplier *= 1.05;
-      if (/Flame Shock/i.test(label)) multiplier *= 1.10;
-    }
-    const wings = getEffect(unit, 'avengingWings');
-    if (wings?.damageBonus) multiplier *= 1 + Number(wings.damageBonus);
-    if (getEffect(unit, 'combustion') && random() < .80) multiplier *= 1.5;
-    const genericDamage=(TALENT_EFFECT_NODES[unit.classId]||[]).reduce((sum,node)=>sum+talentRank(unit,node.id)*Number(node.effects.damagePct||0)/100,0);
-    multiplier *= 1 + genericDamage;
-    if (unit.classId === 'warrior' && /Rend|Gushing Wound/i.test(label)) {
-      multiplier *= 1 + talentRank(unit, 'deepwounds') * .05;
-    }
+  const scaling=createCombatScaling({state,getEffect,talentRank});
+  function damageMultiplier(unit,target,label='') {
+    let multiplier=scaling.damageMultiplier(unit,target,label);
+    // These are cast/resolve multipliers in the offline pipeline.
+    if(getEffect(unit,'smokePower'))multiplier*=1.10;
+    if(getEffect(unit,'combustion')&&random()<.80)multiplier*=1.5;
     return multiplier;
   }
-
-  function healingMultiplier(unit, target, label = '') {
-    const wings = getEffect(unit, 'avengingWings');
-    const brew = getEffect(unit, 'tigereyeBrew');
-    const genericHealing=(TALENT_EFFECT_NODES[unit.classId]||[]).reduce((sum,node)=>sum+talentRank(unit,node.id)*Number(node.effects.healingPct||0)/100,0);
-    const radiance = unit.classId === 'pala' && /Holy Shock|Divine Toll/i.test(label)
-      ? 1 + talentRank(unit, 'radiance') * .04 : 1;
-    return (brew ? 1 + Number(brew.power || 0) : 1)
-      * (unit.classId === 'pala' ? 1.16 : 1)
-      * (unit.classId === 'sage' ? 1.045 : 1)
-      * (wings ? 1 + Number(wings.healingBonus || .20) : 1)
-      * (getEffect(unit, 'totemMastery') ? 1.05 : 1)
-      * (getEffect(target, 'ironbark') ? 1.20 : 1)
-      * (getEffect(unit, 'ghanir') && ['Blooming Echo', 'Rejuvenate'].includes(label) ? 1.50 : 1)
-      * (getEffect(unit, 'archangel') && /Atonement/.test(label) ? 1.30 : 1)
-      * (1 + genericHealing)
-      * radiance;
+  function healingMultiplier(unit,target,label='') {
+    return scaling.healingMultiplier(unit,target,label);
   }
 
   function damage(source, target, amount, label, options = {}) {
@@ -398,57 +373,28 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     const twilight = getEffect(source, 'twilightSurge');
     const backdraft = getEffect(source, 'backdraft');
     const holyFavour = getEffect(source, 'crusaderFavour');
-    let outgoing = Number(amount) * (options.exact?1:damageMultiplier(source, label));
+    let outgoing = Number(amount) * (options.exact?1:damageMultiplier(source,target,label));
+    const expansionDamage=options.exact?1:classExpansion.damageMultiplier(expansionModifierApi(source),source,target,label,options);
+    outgoing*=expansionDamage;
     if(source.classId==='warrior'&&label==='Mortal Swing'&&target.hp/target.maxHp<.25&&hasTalent(source,'war_execution_sentence'))outgoing*=1.12;
     const frostMark = getEffect(target, 'frostShockAmp');
     if (frostMark?.sourceId === source.id && /Arc Spark|Forked Current/i.test(String(label))) outgoing *= 1 + Number(frostMark.pct || .10);
     const lightningRod = getEffect(target,'lightningRod');
     if(lightningRod?.sourceId===source.id&&/Arc Spark|Forked Current/i.test(String(label)))outgoing*=1.20;
-    if (source.classId === 'warrior' && /Mortal Swing/i.test(label) && [...target.effects.values()].some(effect => effect.type === 'bleed' && effect.label === 'Rend' && effect.sourceId === source.id)) outgoing *= 1 + talentRank(source, 'executioner') * .06;
-    if (source.classId === 'shadow' && label === 'Shadowstrike') outgoing *= 1 + talentRank(source, 'eviscerate') * .08;
     if(source.classId==='shadow')outgoing*=classDesign.shadowTalents.damageMultiplier(shadowApi,source,target,label);
-    if (source.classId === 'shadow' && label === 'Eviscerate') outgoing *= 1 + talentRank(source, 'eviscerate') * .12;
-    if (source.classId === 'storm' && /Forked Current|Volcanic|Lava|Tempest/i.test(label)) outgoing *= 1 + talentRank(source, 'lavacore') * .04;
-    if (source.classId === 'wind' && /Fists of Fury|Hurricane Strikes/i.test(label) && getEffect(source, 'defensive')) outgoing *= 1 + talentRank(source, 'cyclonetech') * .12;
-    if (source.classId === 'wind' && /Zephyr Palm|Cloudstep Kick|Chi Explosion(?! Cleave)|Rising Sun Kick/i.test(label) && comboReady) outgoing *= 1 + talentRank(source, 'tigerdash') * .25;
-    if (source.classId === 'soul' && /Essence Siphon|Chaos Bolt|Immolate/i.test(label)) outgoing *= 1 + talentRank(source, 'souldrain') * .04;
-    if (source.classId === 'soul' && /Soul Scar|Creeping Torment|Unstable Affliction|Essence Siphon/i.test(label)) {
-      const afflictions = ['soulScar','agony','unstableAffliction'].reduce((count,type)=>count+(getEffect(target,type)?.sourceId===source.id?1:0),0);
-      outgoing *= 1 + afflictions * talentRank(source, 'pandemic') * .03;
-    }
     if (label === 'Chaos Bolt' && backdraft) outgoing *= 1 + talentRank(source, 'souldrain') * .05;
     if (label === 'Mind Spike' && twilight) outgoing *= 1 + Number(twilight.pct || .35);
     if (/Holy Shock/.test(label) && holyFavour) outgoing *= 1 + Number(holyFavour.stacks || 1) * (Number(holyFavour.pct || 0) + talentRank(source,'pala_awakening')*.03);
     const twilightHoly=getEffect(source,'twilightHoly'),twilightShadow=getEffect(source,'twilightShadow');if(source.classId==='disc'&&label==='Mind Spike'&&twilightHoly)outgoing*=1.15;if(source.classId==='disc'&&/Smite|Solace|Penance/.test(label)&&twilightShadow)outgoing*=1.15;
-    const weakness = getEffect(target, 'findWeakness');
-    if (source.classId === 'shadow' && weakness?.sourceId === source.id && /Shadowstrike|Night Slash|Eviscerate/.test(label)) outgoing *= 1 + talentRank(source, 'shadow_find_weakness') * .05;
-    if(source.classId==='flame'&&/Living Bomb|Meteor/.test(label))outgoing*=1+talentRank(source,'flame_living_flame')*.04;
-    if(source.classId==='flame'&&/Meteor Lance|Ember Lance/.test(label))outgoing*=1+talentRank(source,'flame_meteoric_precision')*.15;
-    if(source.classId==='flame'&&label==='Cinder Bolt'&&getEffect(source,'instantBolt'))outgoing*=1+talentRank(source,'flame_temporal_velocity')*.06;
-    if(source.classId==='flame'&&label==='Cinder Bolt'&&getEffect(source,'prismaticFocus'))outgoing*=1+talentRank(source,'flame_prismatic_focus')*.08;
-    if(source.classId==='warrior'&&/Mortal Swing|Warbreaker|Slicing Winds/.test(label))outgoing*=1+talentRank(source,'war_crushing_force')*.04;
-    if(source.classId==='warrior'&&/Rend|Gushing Wound|Internal Bleeding/.test(label))outgoing*=1+talentRank(source,'war_bloodletting')*.05;
-    if(source.classId==='storm'&&/Arc Spark|Forked Current/.test(label)){outgoing*=1+talentRank(source,'storm_conduction')*.03;const rod=getEffect(target,'lightningRod');if(rod?.sourceId===source.id)outgoing*=1+talentRank(source,'storm_supercell')*.03;if(getEffect(source,'elementalEquilibrium'))outgoing*=1+talentRank(source,'storm_elemental_equilibrium')*.08;}
-    if(source.classId==='wind'&&/Zephyr Palm|Cloudstep Kick|Chi Explosion(?! Cleave)|Rising Sun Kick/.test(label)){outgoing*=1+Number(getEffect(source,'comboMomentum')?.stacks||0)*talentRank(source,'wind_hit_combo')*.03;if(comboReady)outgoing*=1+talentRank(source,'wind_meridian_strikes')*.10;}
-    if(source.classId==='wind'&&/Fists of Fury|Hurricane Strikes|Cyclone Barrage/.test(label))outgoing*=1+talentRank(source,'wind_jadefire_fists')*.05;
-    if(source.classId==='soul'&&/Soul Scar|Creeping Torment|Unstable Affliction|Essence Siphon/.test(label))outgoing*=1+talentRank(source,'soul_creeping_death')*.04;
-    if(source.classId==='soul'&&/Essence Siphon/.test(label))outgoing*=1+talentRank(source,'soul_malefic_grasp')*.05+Number(getEffect(source,'inevitableDemise')?.empowered||0);
-    if(source.classId==='soul'&&label==='Chaos Bolt')outgoing*=1+talentRank(source,'soul_ruin')*.05;
-    if(source.classId==='soul'&&/Immolate/.test(label))outgoing*=1+talentRank(source,'soul_demonfire')*.05;
-    if(source.classId==='disc'&&/Smite|Solace|Penance/.test(label)){const atonements=[...state.units.values()].filter(unit=>unit.team===source.team&&getEffect(unit,'atonement')?.sourceId===source.id).length;outgoing*=1+Math.min(3,atonements)*talentRank(source,'disc_many_sins')*.03;}
-    if(source.classId==='disc'&&/Mind Spike|Penance/.test(label))outgoing*=1+talentRank(source,'disc_shadow_covenant')*.05;
-    if(source.classId==='shadow'&&/Poison|Garrote|Internal Bleeding|Viper Cut|Rend/.test(label))outgoing*=1+talentRank(source,'shadow_deadly_brew')*.04;
-    if(source.classId==='shadow'&&getEffect(target,'vendetta')?.sourceId===source.id&&/Garrote|Internal Bleeding|Bleed|Rend/.test(label))outgoing*=1+talentRank(source,'shadow_doomblade')*.03;
-    if(source.classId==='shadow'&&/Shadowstrike|Eviscerate/.test(label))outgoing*=1+talentRank(source,'shadow_deeper_daggers')*.05;
-    if(source.classId==='shadow'&&getEffect(source,'controlledChaos'))outgoing*=1+talentRank(source,'shadow_controlled_chaos')*.04;
-    if(source.classId==='shadow'&&/Poison|Garrote|Internal Bleeding|Viper Cut/.test(label))outgoing*=1+talentRank(source,'shadow_poisoncraft')*.03;
-    if(source.classId==='wind'&&/Fists of Fury|Hurricane Strikes/.test(label))outgoing*=1+talentRank(source,'focusfury')*.04;
     const overheat=source.classId==='flame'&&label==='Cinder Bolt'&&!options.periodic&&getEffect(source,'overheatPower');
     const aftershock=source.classId==='storm'&&!options.periodic&&getEffect(source,'aftershockPower');
     const curseWeaving=source.classId==='soul'&&!options.periodic&&options.school==='shadow'&&getEffect(source,'curseWeavingPower');
     if(overheat)outgoing*=1+Number(overheat.pct||0);
     if(aftershock)outgoing*=1+Number(aftershock.pct||0);
     if(curseWeaving)outgoing*=1+Number(curseWeaving.pct||0);
+    const chance=scaling.criticalChance(source),chaosCritical=label==='Chaos Bolt';
+    const critical=!options.exact&&(chaosCritical||(!/Holy Shock/i.test(label)&&random()<chance));
+    if(critical)outgoing*=chaosCritical?1.5*(1+chance):1.5;
     if (!Number.isFinite(outgoing) || outgoing <= 0) return { hit: false, amount: 0, absorbed: 0 };
     source.combatUntil = Math.max(Number(source.combatUntil) || 0, state.time + 4);
     target.combatUntil = Math.max(Number(target.combatUntil) || 0, state.time + 4);
@@ -461,6 +407,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if (getEffect(target, 'infernalExposure')) outgoing *= 1.10;
     const staticGuard = getEffect(target, 'staticAegisGuard');
     if (staticGuard) outgoing *= 1 - Number(staticGuard.reduction || .20);
+    const mendGuard=getEffect(target,'shadowMendGuard');if(mendGuard)outgoing*=1-Number(mendGuard.reduction||.10);
+    outgoing*=1-Math.min(.08,Number(target.gearStats?.Versatility||0)*.00018);
     if (getEffect(target, 'holdTheLine')) outgoing *= 1 - Number(getEffect(target, 'holdTheLine').reduction || 0);
     if(target.classId==='wind'&&(getEffect(target,'defensive')||getEffect(target,'touchKarma')))outgoing*=1-talentRank(target,'wind_temple_guard')*.03;
     if(getEffect(target,'temperedFocus'))outgoing*=1-Number(getEffect(target,'temperedFocus').reduction||0);
@@ -491,7 +439,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       }
       emit({
         type: 'damage', sourceId: source.id, targetId: target.id,
-        ability: label, amount: actual, absorbed: Math.round(absorbed),
+        ability: label, amount: actual, absorbed: Math.round(absorbed), critical,
         periodic: !!options.periodic
       });
       if (source.classId === 'flame' && label === 'Cinder Bolt' && talentRank(source, 'meteorimpact') > 0 && getEffect(target, 'burn')?.sourceId === source.id) {
@@ -551,19 +499,21 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         }
       }
     }
-    if(actual>0)classFlowHit(source,target,label,options);
+    if(actual>0){classFlowHit(source,target,label,options);classExpansion.onHit(expansionApi,source,target,{label,amount:actual,periodic:!!options.periodic});if(expansionDamage>1)emit({type:'presentation',cue:'classTalentImpact',sourceId:source.id,targetId:target.id,label});}
     return { hit: true, amount: actual, absorbed: Math.round(absorbed) };
   }
 
-  function heal(source, target, amount, label) {
+  function heal(source, target, amount, label, options={}) {
     if(source?.classId==='sage'&&label==='Verdant Mend'&&getEffect(source,'renewalVerdant')){amount*=2.5;removeEffect(source,'renewalVerdant','consumed');}
     if (!source?.alive || !target?.alive) return 0;
-    if(getEffect(target,'smokeBomb'))return 0;
+    if(getEffect(target,'smokeBomb')&&source!==target)return 0;
     const wound = getEffect(target, 'mortalWound');
     const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
     const periodic = /Blooming Echo|Rejuvenate|Spirit Blossom|Atonement|Bloodsteel|Affliction Siphon|Grove Echo|Beacon Mirror|Jade Brawler/i.test(String(label||''));
     const before = target.hp, missing = Math.max(0,target.maxHp-before);
     let adjusted = Number(amount);
+    const expansionPeriodic=!!options.periodic||/Atonement|Spirit Blossom|Healing [Oo]ver Time/.test(label);
+    adjusted*=classExpansion.healMultiplier(expansionModifierApi(source),source,target,label,{periodic:expansionPeriodic});
     if(source.classId==='soul'&&label==='Essence Siphon'&&getEffect(source,'hauntingEcho')){adjusted*=1.25;removeEffect(source,'hauntingEcho','consumed');}
     if(source.classId==='sage'&&label==='Spirit Blossom')adjusted*=1+talentRank(source,'wildgrowth')*.06;
     if(source.classId==='disc'&&/Atonement/.test(label)&&talentRank(source,'disc_archangel')>0)adjusted*=1.10;
@@ -575,15 +525,14 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if(source.classId==='disc'&&/Penance Atonement/.test(label))adjusted*=1+talentRank(source,'disc_penance')*.06;
     if(source.classId==='disc'&&label==='Ultimate Radiance')adjusted*=1+talentRank(source,'disc_radiance')*.06;
     if(source.classId==='disc'&&label==='Shadow Mend')adjusted*=1+talentRank(source,'disc_darklight')*.04;
-    if(source.classId==='soul'&&/Essence Siphon/.test(label))adjusted*=1+talentRank(source,'drainrite')*.04;
-    if(source.classId==='sage'&&periodic)adjusted*=1+talentRank(source,'sage_verdant_tempo')*.03;
-    const requested = adjusted * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
+    const critical=label!=='Reverse Harm'&&!/Holy Shock/i.test(label)&&random()<scaling.criticalChance(source);
+    const requested = adjusted * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * (critical?1.5:1) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
     if (actual) {
       target.hp += actual;
       source.stats.healing += actual;
       source.stats.healingByAbility[label] = (source.stats.healingByAbility[label] || 0) + actual;
-      emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual });
+      emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual, critical });
     }
     if(source.classId==='storm'&&label==='Healing Surge'&&talentRank(source,'grounded')>0){applyShield(source,target,target.maxHp*.05*talentRank(source,'grounded')*(1+talentRank(source,'storm_earthen_harmony')*.15),8);if(hasTalent(source,'storm_resurgence'))source.resource=Math.min(source.maxResource,source.resource+3);if(talentRank(source,'storm_elemental_equilibrium'))addEffect(source,'elementalEquilibrium',10);}
     if(source.classId==='sage'&&label==='Verdant Mend'&&actual>0&&talentRank(source,'wildgrowth')>0&&[...target.effects.values()].some(effect=>effect.type==='hot'&&effect.sourceId===source.id)){
@@ -603,6 +552,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         removeEffect(ally,echo.effectKey||`dreamEcho:${source.id}`,'consumed');if(ally!==target)heal(source,ally,amount*.45,'Dream Echo');
       }
     }
+    classExpansion.onHeal(expansionApi,source,target,{label,periodic:expansionPeriodic,amount:actual,overheal:Math.max(0,requested-missing)});
     return actual;
   }
 
@@ -705,7 +655,11 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     return infernal;
   }
 
-  function resolveAbility(source, ability, target) {
+  function resolveAbility(source,ability,target){
+    const previous=expansionCast;expansionCast={caster:source,buffs:new Map([...source.effects.values()].filter(e=>classExpansion.effectMeta[e.type]).map(e=>[e.type,{...e}]))};
+    try{const result=resolveAbilityCore(source,ability,target);if(source.alive)classExpansion.onResolve(expansionApi,source,target||source,ability);return result;}finally{expansionCast=previous;}
+  }
+  function resolveAbilityCore(source, ability, target) {
     if(ability.type==='discPain'){
       if(getEffect(target,'iceBlock')||getEffect(target,'cloakShadows'))return true;
       addEffect(target,'discPain',12,{sourceId:source.id,value:ability.baseValue,atonementHeal:ability.atonementHeal||28,interval:2,tickRemaining:2,effectKey:`discPain:${source.id}`});
@@ -967,7 +921,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         /* Incapacitate that any damage breaks early. */
       {const applied=applyCrowdControl(target,'gouge',ability.baseValue||3,'incap')>0;if(applied&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);return applied;}
       case 'chaosBolt':
-        projectiles.push({sourceId:source.id,targetId:target.id,x:source.x,z:source.z,value:(ability.baseValue||510)*1.5,life:3});
+        projectiles.push({sourceId:source.id,targetId:target.id,x:source.x,z:source.z,value:ability.baseValue||510,life:3});
         emit({type:'presentation',cue:'chaosBoltLaunch',sourceId:source.id,targetId:target.id});
         return true;
       case 'sharpenBlade':
@@ -1037,7 +991,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         const shots = Math.max(1, Number(ability.shots || 1));
         let landed = false;
         for (let shot = 0; shot < shots; shot += 1) {
-          const critical = random() < .35 + talentRank(source, 'pala_radiant_shock') * .03;
+          const critical = random() < scaling.criticalChance(source,.35);
           const base = target.team === source.team ? ability.baseValue : ability.damageValue || ability.baseValue;
           const value = critical ? Math.round(base * 1.5) : base;
           landed = (target.team === source.team
@@ -1126,7 +1080,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       case 'avatar':
         removeEffect(source, 'root', 'cleansed');
-        addEffect(source, 'avatar', 10, { damagePct: .16 });
+        addEffect(source, 'avatar', 10, { damagePct: .18 });
         emit({ type: 'presentation', cue: 'avatar', sourceId: source.id, duration: 10 });
         return true;
       case 'buff':
@@ -1669,7 +1623,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             const totalTick = [0, 50, 80, 110][stacks];
             damage(source, unit, totalTick, effect.label || type, { school: 'shadow', periodic: true });
           }
-          if (source?.alive && unit.alive && type === 'hot') heal(source, unit, effect.value, effect.label || 'Healing Over Time');
+          if (source?.alive && unit.alive && type === 'hot') heal(source, unit, effect.value, effect.label || 'Healing Over Time',{periodic:true});
           if (unit.alive && (type === 'crimsonVial' || type === 'sharpenRecovery')) {
             /* Percent-of-health recovery that ignores dampening, matching the client. */
             let bonus=0;

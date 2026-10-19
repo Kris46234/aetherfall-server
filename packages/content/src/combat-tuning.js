@@ -1,5 +1,7 @@
 import {combatTuning as data} from '../generated/combat-tuning.generated.js';
 import '../generated/class-design.generated.js';
+import '../generated/class-expansion.generated.js';
+export const classExpansion=globalThis.AETHER_CLASS_EXPANSION;
 export const classDesign=globalThis.AETHER_CLASS_DESIGN;
 export function replaceAbility(classId,talents,ability){const spec=classDesign.replace(classId,talents,{...ability,value:ability.baseValue,cast:ability.castTime,cd:ability.cooldown});return {...ability,...spec,baseValue:spec.value,castTime:spec.cast,cooldown:spec.cd};}
 // Apply shared choice-pool limits to old or stale client builds at the lobby boundary.
@@ -23,7 +25,7 @@ export function normalizedVitals(classId,talents={}){
  const staminaMultiplier=1+(data.trees[classId]||[]).reduce((sum,n)=>sum+(talents[n.id]||0)*(n.effects?.staminaPct||0)/100,0);
  const maxHp=Math.round(((healer?data.balance.healerHP:data.balance.dpsHP)+Math.round(gear.Stamina*.78)+Math.min(300,Math.round(gear.Vitality*.5)))*staminaMultiplier*1.10*1.35);
  const baseResource=energy?100:100+Math.min(60,Math.round(gear.Mana*.18));
- return {maxHp,hp:maxHp,maxResource:classId==='soul'?Math.round(baseResource*1.15):baseResource,
+ return {maxHp,hp:maxHp,gearStats:{...gear},maxResource:classId==='soul'?Math.round(baseResource*1.15):baseResource,
  resourceRegen:energy?data.balance.energyRegen:(classId==='soul'?1.30:classId==='storm'?1.20:1)*(healer?data.balance.healerManaRegen:data.balance.manaRegen)*(1+Math.min(.30,gear.Mana*.00075))*(classId==='disc'?.88:1)};
 }
 export function botBuild(classId,random){

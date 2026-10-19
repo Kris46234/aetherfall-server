@@ -41,8 +41,8 @@
    node('storm_earths_answer','Earth’s Answer','💧','right',['grounded'],'Four damaging Arc Sparks or Forked Currents prepare Healing Surge with 40% reduced mana cost and 20% increased healing for 8 sec. Only one hit counts each second. Progress lasts 20 sec; the empowerment cannot stack.')
   ],
   sage:[
-   node('sage_grove_cadence','Grove Cadence','🌿','left',['wildgrowth'],'Three effective Blooming Echo, Rejuvenate or Spirit Blossom heals prepare your next Verdant Mend: 20% shorter cast time and 25% increased healing for 8 sec. Only one heal counts each second. Can occur once every 10 sec.'),
-   node('sage_canopy_cycle','Canopy Cycle','🌳','left',['sage_grove_cadence'],'Effective Verdant Mend healing on an ally carrying two different healing-over-time effects from you reduces Spirit Blossom cooldown by 2 sec. Can occur once every 4 sec.'),
+   node('sage_grove_cadence','Grove Cadence','🌿','left',['wildgrowth'],'Three effective periodic heals from your HoTs or Spirit Blossom prepare your next Verdant Mend: 20% shorter cast time and 25% increased healing for 8 sec. Only one heal counts each second. Can occur once every 10 sec.'),
+   node('sage_canopy_cycle','Canopy Cycle','🌳','left',['sage_grove_cadence'],'Effective Verdant Mend healing on an ally carrying two different healing-over-time effects from you reduces Spirit Blossom or Dream Breath cooldown by 2 sec. Can occur once every 4 sec.'),
    node('sage_lucid_reservoir','Lucid Reservoir','🦋','right',['barkskin'],'A direct heal that overheals by at least 1% of the target’s maximum health stores one Lucid charge, once each second. Up to three charges increase your next Renewal Tide or Swiftmend by 10% each. Charges last 12 sec.'),
    node('sage_fae_bloom','Fae Bloom','🌺','right',['barkskin'],'Fae Retreat prepares a free Blooming Echo or Dream Echo for 6 sec. Its initial healing is increased by 30%; periodic healing is unchanged. Can occur once every 8 sec.')
   ],
@@ -99,7 +99,7 @@
  const effectName=e=>e.label||e.name||e.type;
  const affliction=e=>['soulScar','agony','unstableAffliction'].includes(e.type);
  const periodicAffliction=label=>['Soul Scar','Creeping Torment','Unstable Affliction'].includes(label);
- const hotLabel=label=>['Blooming Echo','Rejuvenate','Spirit Blossom'].includes(label);
+ const hotLabel=label=>['Blooming Echo','Rejuvenate','Spirit Blossom','Lifebloom','Dream Breath'].includes(label);
  const primaryWind=new Set(['Zephyr Palm','Rising Sun Kick','Cloudstep Kick','Chi Explosion','Strike of the Windlord','Whirling Dragon Punch','Cyclone Barrage']);
  const penance=label=>label==='Penance'||label==='Radiant Penance';
  const holyStrike=label=>label==='Righteous Strike'||label==='Judgment'||label==='Judgement';
@@ -122,7 +122,7 @@
   if(name==='Power Shield')discount('disc_luminous_devotion','expDevotion',.5);
   if(['Smite','Mind Spike'].includes(name)){discount('disc_painful_revelation','expRevelation',0);quicken('disc_painful_revelation','expRevelation',.7);}
   if(['Zephyr Palm','Rising Sun Kick'].includes(name))discount('wind_threefold_path','expThreefold',0);
-  if(name==='Arc Spark'){discount('storm_stone_to_sky','expStoneToSky',0);quicken('storm_stone_to_sky','expStoneToSky',.6);}
+  if(['Arc Spark','Tempest Bolt'].includes(name)){discount('storm_stone_to_sky','expStoneToSky',0);quicken('storm_stone_to_sky','expStoneToSky',.6);}
   if(name==='Healing Surge')discount('storm_earths_answer','expEarthAnswer',.6);
   if(name==='Verdant Mend')quicken('sage_grove_cadence','expGroveCadence',.8);
   if(['Blooming Echo','Dream Echo'].includes(name))discount('sage_fae_bloom','expFaeBloom',0);
@@ -253,7 +253,7 @@
    if(label==='Verdant Mend'){
     spend(api,c,'expGroveCadence');
     const hots=api.effects(t).filter(e=>e.type==='hot'&&api.time(e)>0&&api.owned(e,c));
-    if(amount>0&&has(api,c,'sage_canopy_cycle')&&new Set(hots.map(effectName)).size>=2&&lock(api,c,'expCanopyLock',4)){api.reduce(c,'Spirit Blossom',2);api.proc(c,'grove','Canopy Cycle',c);}
+    if(amount>0&&has(api,c,'sage_canopy_cycle')&&new Set(hots.map(effectName)).size>=2&&lock(api,c,'expCanopyLock',4)){api.reduce(c,has(api,c,'sage_dream_breath')?'Dream Breath':'Spirit Blossom',2);api.proc(c,'grove','Canopy Cycle',c);}
    }
    if(['Renewal Tide','Swiftmend'].includes(label))spend(api,c,'expLucid');
    // Only cast heals can store overhealing. Mirrors, HoTs and proc heals never loop.

@@ -84,7 +84,7 @@ export function createCombatScaling({state,getEffect,talentRank}) {
   const cls=unit.classId;
   let m=talentHealing(unit)*gearMultiplier(unit,'Restoration');
   if(cls==='sage'&&target.hp/target.maxHp<.45)m*=1+rank(unit,'wildgrowth')*.04;
-  if(cls==='sage'&&/Blooming Echo|Rejuvenate|Healing over Time/i.test(label))m*=1+rank(unit,'sage_verdant_tempo')*.03;
+  if(cls==='sage'&&/Blooming Echo|Rejuvenate|Lifebloom|Dream Breath|Healing over Time/i.test(label))m*=1+rank(unit,'sage_verdant_tempo')*.03;
   if(cls==='soul'&&/Essence Siphon/i.test(label))m*=1+rank(unit,'drainrite')*.04;
   if(cls==='pala'&&/Holy Shock|Divine Toll|Light of Dawn/i.test(label))m*=1+rank(unit,'radiance')*.04;
   if(['sage','pala','disc'].includes(cls)){m*=1.15;if(state.mode==='3v3')m*=1.20;}
@@ -92,7 +92,7 @@ export function createCombatScaling({state,getEffect,talentRank}) {
   if(get(unit,'totemMastery'))m*=1.03;
   if(get(unit,'avengingWings'))m*=1.20;
   if(get(target,'ironbark'))m*=1.20;
-  if(get(unit,'ghanir')&&['Blooming Echo','Rejuvenate'].includes(label))m*=1.50;
+  if(get(unit,'ghanir')&&['Blooming Echo','Rejuvenate','Lifebloom','Dream Breath'].includes(label))m*=1.50;
   // healAtonements applies this before Game.heal in the offline pipeline.
   if(get(unit,'archangel')&&/Atonement/.test(label))m*=1.30;
   return m;

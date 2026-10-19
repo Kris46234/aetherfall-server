@@ -157,20 +157,16 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
   function addChi(unit,amount=1){if(hasTalent(unit,'wind_chi_explosion'))addEffect(unit,'chi',20,{stacks:Math.min(4,Number(getEffect(unit,'chi')?.stacks||0)+amount)});}
   function recordMoltenBuilder(unit,label){
-    if(!hasTalent(unit,'storm_lava_surge')||getEffect(unit,'moltenFeedbackReady'))return;
-    const own=label==='Arc Spark'?'moltenSpark':'moltenFork',other=label==='Arc Spark'?'moltenFork':'moltenSpark';
-    if(getEffect(unit,other)){removeEffect(unit,other,'combined');removeEffect(unit,own,'combined');addEffect(unit,'moltenFeedbackReady',8);}
-    else addEffect(unit,own,8);
+    classDesign.stormRotation.onBuilder(stormRotationApi,unit,label);
   }
   function consumeMoltenFeedback(unit){
-    if(!getEffect(unit,'moltenFeedbackReady')||getEffect(unit,'volcanicEruptionReady')||(unit.cooldowns.get('storm_lava_burst')||0)>0)return;
-    removeEffect(unit,'moltenFeedbackReady','consumed');addEffect(unit,'volcanicEruptionReady',10);
+    // Shocks never grant Eruption charges. Successful normal Arc/Fork hits do.
   }
-  function buildMaelstrom(unit,amount){if(getEffect(unit,'tempestBolts')||getEffect(unit,'overload'))return;const total=Number(getEffect(unit,'maelstrom')?.stacks||0)+amount;addEffect(unit,'maelstrom',30,{stacks:total%100});if(total>=100){addEffect(unit,'tempestBolts',10,{stacks:2});addEffect(unit,'overload',10);unit.resource=Math.min(unit.maxResource,unit.resource+10+talentRank(unit,'storm_arc_battery'));emit({type:'presentation',cue:'stormSurge',sourceId:unit.id});}}
+  const stormRotationApi={rank:talentRank,get:getEffect,add:addEffect,remove:(u,key)=>removeEffect(u,key,'consumed'),resource:(u,n)=>{u.resource=Math.min(u.maxResource,u.resource+n);},eruptionReady:u=>hasTalent(u,'storm_lava_burst')&&!(u.cooldowns.get('storm_lava_burst')>0),proc:(u,kind)=>emit({type:'presentation',cue:kind==='surge'?'stormSurge':'moltenFeedback',sourceId:u.id})};
   function classFlowHit(source,target,label,options){
     if(source.classId==='warrior'&&label==='Mortal Swing'&&[...target.effects.values()].some(e=>e.type==='bleed'&&e.label==='Rend'&&e.sourceId===source.id)&&!getEffect(source,'gushingWoundReady')&&!getEffect(source,'battleTranceLock')&&random()<.25){addEffect(source,'gushingWoundReady',8);addEffect(source,'battleTranceLock',10);source.cooldowns.delete('warrior.rend');emit({type:'presentation',cue:'battleTrance',sourceId:source.id});}
     if(source.classId==='wind'&&!options.periodic&&['Zephyr Palm','Rising Sun Kick','Cloudstep Kick','Chi Explosion','Fists of Fury','Hurricane Strikes','Strike of the Windlord','Whirling Dragon Punch','Disrupting Palm','Valley Sweep'].includes(label)){source.palmFlowEligible=source.lastFlowAttack!==label&&source.lastFlowAttack!=='Rising Sun Kick';source.lastFlowAttack=label;}
-    if(source.classId==='storm'&&!options.periodic&&!options.stormkeeperSpark&&['Arc Spark','Forked Current'].includes(label))recordMoltenBuilder(source,label);
+    if(source.classId==='storm'&&!options.periodic&&!options.stormkeeperSpark&&!options.overloadedFork&&['Arc Spark','Forked Current'].includes(label))recordMoltenBuilder(source,label);
     if(source.classId==='wind'){
       if(hasTalent(source,'wind_tigereye_brew')&&!options.periodic&&['Zephyr Palm','Rising Sun Kick','Cloudstep Kick','Fists of Fury','Hurricane Strikes','Chi Explosion','Strike of the Windlord','Whirling Dragon Punch'].includes(label)&&source.lastBrewAbility!==label){source.lastBrewAbility=label;source.tigereyeStacks=Math.min(6,source.tigereyeStacks+1);}
       if(['Cloudstep Kick','Rising Sun Kick','Strike of the Windlord','Fists of Fury'].includes(label)&&(!source.chiGenerationAt||state.time>=source.chiGenerationAt)){addChi(source,1);source.chiGenerationAt=state.time+.8;}
@@ -185,7 +181,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     }
     if(source.classId==='warrior'&&label==='Mortal Swing'&&target.hp/target.maxHp<.25&&hasTalent(source,'war_execution_sentence'))source.resource=Math.min(source.maxResource,source.resource+4);
     if(source.classId==='flame'&&label==='Ember Lance'&&getEffect(target,'livingBomb')?.sourceId===source.id&&hasTalent(source,'flame_controlled_burn')&&(!source.controlledBurnNext||state.time>=source.controlledBurnNext)){source.cooldowns.set('flame_combustion',Math.max(0,Number(source.cooldowns.get('flame_combustion')||0)-2));source.controlledBurnNext=state.time+2;}
-    if(source.classId==='storm'&&label==='Forked Current'&&hasTalent(source,'storm_elemental_cycle')&&(!source.maelstromForkNext||state.time>=source.maelstromForkNext)){buildMaelstrom(source,35);source.maelstromForkNext=state.time+.5;}
   }
 
   function prepareAbility(unit, source) {
@@ -301,7 +296,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       ability.offGlobal = true;
       ability.stormkeeperSpark = true;
     }
-    if (ability.type === 'volcanicEruption') { ability.offGlobal = false; ability.commitCooldownOnComplete = false; }
+    if (ability.type === 'volcanicEruption') { ability.offGlobal = true; ability.commitCooldownOnComplete = false; }
     if (getEffect(unit, 'natureSwiftness') && ['sage.renewal_tide', 'sage.lullaby_bloom'].includes(ability.id)) {
       ability.castTime = 0;
       ability.ignoreCooldown = true;
@@ -332,6 +327,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       || ability.type === 'iceBlock'
       || ability.type === 'livingBomb'
       || ability.type === 'combustion'
+      || (ability.type === 'volcanicEruption' && unit.classId === 'storm')
       || (ability.type === 'dash' && unit.classId === 'flame');
   }
 
@@ -516,7 +512,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if(getEffect(target,'smokeBomb')&&source!==target)return 0;
     const wound = getEffect(target, 'mortalWound');
     const woundMult = wound ? Math.max(0, 1 - Number(wound.pct || .40)) : 1;
-    const periodic = /Blooming Echo|Rejuvenate|Spirit Blossom|Atonement|Bloodsteel|Affliction Siphon|Grove Echo|Beacon Mirror|Jade Brawler/i.test(String(label||''));
+    const periodic = /Blooming Echo|Rejuvenate|Lifebloom|Dream Breath|Spirit Blossom|Atonement|Bloodsteel|Affliction Siphon|Grove Echo|Beacon Mirror|Jade Brawler/i.test(String(label||''));
     const before = target.hp, missing = Math.max(0,target.maxHp-before);
     let adjusted = Number(amount);
     const expansionPeriodic=!!options.periodic||/Atonement|Spirit Blossom|Healing [Oo]ver Time/.test(label);
@@ -666,6 +662,12 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     try{const result=resolveAbilityCore(source,ability,target);if(source.alive)classExpansion.onResolve(expansionApi,source,target||source,ability);return result;}finally{expansionCast=previous;}
   }
   function resolveAbilityCore(source, ability, target) {
+    if(ability.name==='Dream Breath'){
+      for(const ally of state.units.values())if(classDesign.lifesage.inBreath(source,target,ally)&&hasLineOfSight(source,ally,state.arena.pillars,.05)){
+        heal(source,ally,ability.baseValue,'Dream Breath');addEffect(ally,'hot',6,{effectKey:`dreamBreath:${source.id}`,sourceId:source.id,label:'Dream Breath',value:ability.tickValue||45,interval:1,tickRemaining:1});
+      }
+      emit({type:'presentation',cue:'dreamBreath',sourceId:source.id,targetId:target.id,x:target.x,z:target.z});return true;
+    }
     if(target&&target!==source&&target.team!==source.team){
       if(getEffect(target,'iceBlock'))return false;
       if(getEffect(target,'cloakShadows')&&ability.school!=='physical'&&!MELEE_STRIKES.has(ability.name)&&!['Fists of Fury','Bladestorm'].includes(ability.name))return false;
@@ -677,8 +679,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     }
     if(ability.type==='dreamEcho'){heal(source,target,ability.baseValue,'Dream Echo');addEffect(target,'dreamEcho',8,{sourceId:source.id,effectKey:`dreamEcho:${source.id}`});return true;}
     if(ability.type==='swiftmend'){
-      const hot=[...target.effects.values()].find(effect=>effect.type==='hot'&&effect.sourceId===source.id&&effect.remaining>0),extra=hot?Number(hot.value||0)*4:0;
-      if(hot)hot.remaining=Math.max(0,hot.remaining-4);heal(source,target,ability.baseValue+extra,'Swiftmend');addEffect(source,'renewalVerdant',9999,{pct:1.5});return true;
+      const hots=[...target.effects.values()].filter(effect=>effect.type==='hot'&&effect.sourceId===source.id&&effect.remaining>0),hot=hots.find(e=>e.label==='Lifebloom')||hots[0],bloom=hot?.label==='Lifebloom',extra=hot&&!bloom?Number(hot.value||0)*4:0;
+      if(hot){if(bloom){hot.bloomed=true;for(const [key,effect]of target.effects)if(effect===hot)removeEffect(target,key,'consumed');heal(source,target,Number(hot.bloomValue)||180,'Lifebloom Bloom');emit({type:'presentation',cue:'lifebloom',sourceId:source.id,targetId:target.id});}else hot.remaining=Math.max(0,hot.remaining-4);}heal(source,target,ability.baseValue+extra,'Swiftmend');addEffect(source,'renewalVerdant',9999,{pct:1.5});return true;
     }
     if(ability.type==='chiExplosion'){
       const chi=Math.min(4,Number(getEffect(source,'chi')?.stacks||0));if(!chi)return false;removeEffect(source,'chi','consumed');const value=(ability.baseValue+56*chi)*(getEffect(source,'windlordReady')?1.15:1);removeEffect(source,'windlordReady','consumed');
@@ -738,7 +740,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         if (ability.id === 'storm.arc_spark') {
           if(ability.tempestProc){const bolts=getEffect(source,'tempestBolts');if(bolts){bolts.stacks=Math.max(0,Number(bolts.stacks||2)-1);if(!bolts.stacks)removeEffect(source,'tempestBolts','consumed');}}
           if(result.hit){source.resource = Math.min(source.maxResource, source.resource + (ability.tempestProc?5:4));
-          if(!ability.tempestProc&&!ability.stormkeeperSpark){if(hasTalent(source,'storm_elemental_cycle'))buildMaelstrom(source,25+talentRank(source,'surgeflow')*2);else{const ramp=getEffect(source,'stormChance');const chance=Math.min(1,Number(ramp?.chance||.10)+(getEffect(source,'totemMastery')?.05:0));if(random()<chance){removeEffect(source,'stormChance','triggered');addEffect(source,'tempestBolts',10,{stacks:2});addEffect(source,'overload',10);source.resource=Math.min(source.maxResource,source.resource+10+talentRank(source,'storm_arc_battery'));emit({type:'presentation',cue:'stormSurge',sourceId:source.id});}else addEffect(source,'stormChance',16,{chance:Math.min(1,chance+.10+talentRank(source,'surgeflow')*.01)});}}
+          // The successful primary damage event builds Maelstrom once in classFlowHit.
           if (ability.stormkeeperSpark) {
             const keeper = getEffect(source, 'stormkeeper');
             keeper.stacks -= 1;
@@ -1138,6 +1140,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           : ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'root', 'slow', 'burn', 'poison', 'bleed', 'livingBomb', 'soulScar', 'agony', 'unstableAffliction', 'flameShock', 'discPain'];
         const removed = removable.find(type => getEffect(target, type));
         if (removed) removeEffect(target, removed, 'dispelled');
+        if(removed&&source.classId==='sage'&&hasTalent(source,'sage_cleansing_growth'))for(const hot of target.effects.values())if(hot.type==='hot'&&hot.sourceId===source.id&&hot.remaining>0)hot.remaining=classDesign.lifesage.extension(hot.remaining,hot.label);
         if(removed&&source.classId==='sage'&&talentRank(source,'sage_fae_momentum'))addEffect(source,'faeMomentum',2,{speed:1+talentRank(source,'sage_fae_momentum')*.10});
         return !!removed;
       }
@@ -1312,10 +1315,12 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       case 'chain': {
         const overloaded=!!getEffect(source,'overload'),power=overloaded?1.35:1;
         if(overloaded)removeEffect(source,'overload','consumed');
-        let landed = damage(source, target, ability.baseValue*power, label, { school: 'storm' }).hit;
+        let landed = damage(source, target, ability.baseValue*power, label, { school: 'storm', overloadedFork:overloaded }).hit;
+        let arcs=0;
         for (const unit of state.units.values()) {
-          if (!unit.alive || unit === target || unit.team === source.team || distance(target, unit) > 8) continue;
-          landed = damage(source, unit, 64*power, `${label} Arc`, { school: 'storm' }).hit || landed;
+          if (!unit.alive || unit === target || unit.team === source.team || distance(target, unit) > 8 || !hasLineOfSight(target,unit,state.arena.pillars,.05)) continue;
+          if(arcs++>=2)break;
+          landed = damage(source, unit, 64*power, label, { school: 'storm', overloadedFork:overloaded }).hit || landed;
         }
         source.resource=Math.min(source.maxResource,source.resource+(overloaded?10:6));
         if(overloaded)for(const unit of state.units.values()){if(!unit.alive||unit.team===source.team||!hasLineOfSight(source,unit,state.arena.pillars,.05))continue;for(let bolt=1;bolt<=3;bolt++){emit({type:'presentation',cue:'volcanicLavaBurst',sourceId:source.id,targetId:unit.id,bolt});damage(source,unit,45,'Lava Burst',{school:'fire'});}addEffect(unit,'burn',3,{sourceId:source.id,value:8,label:'Lava Burst',interval:1,tickRemaining:1});}
@@ -1332,18 +1337,21 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return landed;
       }
       case 'push': {
-        const enemy = [...state.units.values()].filter(unit => unit.alive && unit.team !== source.team)
-          .sort((a, b) => distance(source, a) - distance(source, b))[0];
-        if (!enemy || distance(source, enemy) > 9) return false;
-        if (getEffect(enemy, 'bladestorm')) return false;
-        const dx = enemy.x - source.x;
-        const dz = enemy.z - source.z;
-        const length = Math.hypot(dx, dz) || 1;
-        enemy.x += dx / length * 6;
-        enemy.z += dz / length * 6;
-        resolvePillarCollisions(enemy, state.arena.pillars, enemy.radius);
-        resolveArenaBounds(enemy, state.arena, enemy.radius);
-        return true;
+        const constrain=unit=>{resolvePillarCollisions(unit,state.arena.pillars,unit.radius);resolveArenaBounds(unit,state.arena,unit.radius);};
+        const enemies=[...state.units.values()].filter(unit=>unit.alive&&unit.team!==source.team&&distance(source,unit)<=9&&hasLineOfSight(source,unit,state.arena.pillars,.05));
+        let landed=false;
+        for(const enemy of enemies){
+          if(getEffect(enemy,'bladestorm')||getEffect(enemy,'iceBlock')||getEffect(enemy,'cloakShadows'))continue;
+          let dx=enemy.x-source.x,dz=enemy.z-source.z,length=Math.hypot(dx,dz);
+          if(length<.01){dx=Math.sin(source.facing||0);dz=Math.cos(source.facing||0);length=1;}
+          classDesign.stormRotation.displace(enemy,dx/length,dz/length,6,constrain);
+          if(!getEffect(enemy,'freedom')&&!getEffect(enemy,'tigersLust'))addEffect(enemy,'slow',3,{pct:.40,sourceId:source.id,label:'Gale Reversal'});landed=true;
+        }
+        if(!enemies.length&&!getEffect(source,'root')){
+          classDesign.stormRotation.displace(source,-Math.sin(source.facing||0),-Math.cos(source.facing||0),5,constrain);landed=true;
+        }
+        emit({type:'presentation',cue:'galeReversal',sourceId:source.id});
+        return landed;
       }
       case 'root':
         return applyCrowdControl(target, 'root', ability.baseValue || 4, 'root') > 0;
@@ -1436,12 +1444,14 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       case 'hot': {
         const direct = heal(source, target, ability.baseValue, label);
         const fast = !!getEffect(source, 'ghanir');
-        addEffect(target, 'hot', 12, {
-          effectKey: `hot:${ability.id}`,
+        const bloom=label==='Lifebloom';
+        if(bloom)for(const ally of state.units.values())for(const [key,effect]of ally.effects)if(effect.type==='hot'&&effect.label==='Lifebloom'&&effect.sourceId===source.id)removeEffect(ally,key,'replaced');
+        addEffect(target, 'hot', bloom?10:12, {
+          effectKey: `hot:${source.id}:${ability.id}`,bloomValue:bloom?180:0,
           sourceId: source.id,
           value: ability.tickValue || (ability.id === 'sage_rejuvenate' ? 28 : 23),
           label,
-          interval: fast ? .5 : 1,
+          interval: 1,
           tickRemaining: fast ? .5 : 1
         });
         return direct > 0;
@@ -1664,7 +1674,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
               applyShield(unit, ally, effect.shield, 1.35);
             }
           }
-          effect.tickRemaining += effect.interval || 1;
+          effect.tickRemaining += type==='hot'&&source?.classId==='sage'&&getEffect(source,'ghanir')?.remaining>0 ? .5 : effect.interval || 1;
           if (effect.remaining <= 0) break;
         }
       }
@@ -1705,6 +1715,9 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         unit.alive = false;
         unit.hp = 0;
         emit({ type: 'death', unitId: unit.id, killerId: null, expired: true });
+      }
+      if(effect.remaining===0&&type==='hot'&&effect.label==='Lifebloom'&&!effect.bloomed&&unit.alive){
+        effect.bloomed=true;const source=state.units.get(effect.sourceId);if(source?.alive){heal(source,unit,Number(effect.bloomValue)||180,'Lifebloom Bloom');emit({type:'presentation',cue:'lifebloom',sourceId:source.id,targetId:unit.id});}
       }
       if (effect.remaining === 0 && type === 'livingBomb') {
         const source = state.units.get(effect.sourceId);

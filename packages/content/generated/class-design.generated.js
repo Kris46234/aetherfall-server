@@ -5,8 +5,8 @@
  const nodes={
   disc:[node('disc_shadow_word_pain','Shadow Word: Pain','🕯️','core',['disc_evangelism'],'Replaces Solace. Apply a 12 sec Shadow damage effect. Every 2 sec it deals 36 damage and triggers 28 Atonement healing. Applying it restores 4 mana, at most once every 6 sec. Solace of the Light also increases this return. You can maintain it on several enemies.')],
   wind:[node('wind_chi_explosion','Chi Explosion','💠','left',['tigerdash'],'Replaces Cloudstep Kick with an 8m Chi Explosion. Palm and your major attacks build up to 4 Chi. Consume all Chi for 90 damage plus 56 per Chi. At 3+ Chi, nearby enemies take 50% damage. At 4 Chi, gain 2 Tigereye stacks. No new button.'),node('wind_hurricane_strikes','Hurricane Strikes','🌪️','right',['cyclonetech'],'Replaces Fists of Fury. Channel four rushing strikes over 1.6 sec while moving at full speed. Each deals 115 damage to your chosen enemy within 8m, and 40% to nearby enemies. Landing the final strike grants 2 Chi. Can be interrupted by crowd control.')],
-  storm:[node('storm_elemental_cycle','Elemental Rhythm','⚡','core',['overloadpath'],'Normal Arc Spark builds 25 Maelstrom; Forked Current builds 35. At 100, gain two Tempest Bolts and one Overload. Spend both rewards before building again. Replaces random Storm Surge.'),node('storm_lava_surge','Molten Feedback','🌋','left',['storm_lava_burst'],'Land a normal Arc Spark and Forked Current within 8 sec. Your next Shock readies one Eruption, if Eruption is ready. Repeated Shocks alone grant nothing.')],
-  sage:[node('sage_swiftmend','Flourishing Mend','🌺','left',['wildgrowth'],'Replaces Renewal Tide with Swiftmend: an 18 sec recovery spell. Heal for 380, plus four ticks of one of your HoTs on the target, shortening that HoT by 4 sec. Empowers your next Verdant Mend just like Renewal Tide. Nature Swiftness lets you use Swiftmend once while it is on cooldown.'),node('sage_dream_echo','Dream Echo','🦋','right',['barkskin'],'Replaces Blooming Echo. Place an 8 sec Echo on an ally. Your next Verdant Mend, Renewal Tide or Swiftmend copies 45% of its base healing to each other Echo ally within 28m and line of sight, consuming those Echoes. Echo does not repeat itself.'),node('sage_emerald_flight','Emerald Flight','🪽','core',['sagepath'],'Fae Retreat prepares an instant Verdant Mend for 6 sec. Heal while repositioning instead of planting your feet.')],
+  storm:[node('storm_elemental_cycle','Elemental Rhythm','⚡','core',['overloadpath'],'Alternating normal Arc Spark and Forked Current within 8 sec generates 10 additional Maelstrom. At 100 Maelstrom, Storm Surge prepares two instant Tempest Bolts and an empowered Forked Current. Spend both rewards before building again.'),node('storm_lava_surge','Molten Feedback','🌋','left',['storm_lava_burst'],'Land a normal Arc Spark and Forked Current within 8 sec to prepare one Volcanic Eruption, if its cooldown is ready. No Shock is required. Empowered bolts and repeated Shocks cannot trigger this effect.')],
+sage:[node('sage_swiftmend','Flourishing Mend','🌺','left',['wildgrowth'],'Replaces Renewal Tide with Swiftmend: an 18 sec recovery spell. Heal for 380, plus four ticks of one of your HoTs on the target, shortening that HoT by 4 sec. Empowers your next Verdant Mend just like Renewal Tide. Nature Swiftness lets you use Swiftmend once while it is on cooldown.'),node('sage_dream_echo','Dream Echo','🦋','right',['barkskin'],'Replaces Blooming Echo. Place an 8 sec Echo on an ally. Your next Verdant Mend, Renewal Tide or Swiftmend copies 45% of its base healing to each other Echo ally within 28m and line of sight, consuming those Echoes. Echo does not repeat itself.'),node('sage_emerald_flight','Emerald Flight','🪽','core',['sagepath'],'Fae Retreat prepares an instant Verdant Mend for 6 sec. Heal while repositioning instead of planting your feet.'),node('sage_dream_breath','Dream Breath','🦋','right',['barkskin'],'Replaces Spirit Blossom. Breathe restorative mist toward your selected ally, healing you and allies in a 16m, 100° cone for 170, then 45 each second for 6 sec. 1.2 sec cast; 18 sec cooldown. Allies behind cover are not affected.'),node('sage_lifebloom','Lifebloom','🌼','left',['sage_rejuvenate'],'Replaces Rejuvenate. Heal for 35, then 32 each second for 10 sec. When the effect expires, it blossoms for 180 healing. Only one ally can carry your Lifebloom. Refreshing or moving it does not trigger the blossom; Swiftmend consumes it to blossom immediately.'),node('sage_cleansing_growth','Cleansing Growth','🍃','core',['cleanhands'],'Successfully dispelling an ally with Purifying Light extends your active healing-over-time effects on them by 2 sec, up to each effect’s normal duration. Does not apply missing effects.')],
   shadow:[
    node('shadow_dance_mastery','Dance of Daggers','🌘','right',['eviscerate'],'Smoke Veil becomes Shadow Dance: a 6 sec offensive window on a 30 sec cooldown. Shadowstrike has no cooldown, costs 14 Energy and generates 2 techniques during Dance. Eviscerate extends Dance by 0.75 sec, up to 3 sec per window. Outside Dance, Shadowstrike generates one technique.'),
    node('shadow_sanguine_blades','Sanguine Blades','🩸','left',['garrote'],'Viper Cut on a target with your Garrote extends Garrote and Internal Bleeding by 2 sec, up to their original durations. Poison/bleed ticks reduce Vendetta cooldown by 0.25 sec, at most once each second.'),
@@ -25,6 +25,8 @@
   pala:[node('pala_hallowed_return','Hallowed Return','🕯️','core',['palpath'],'Successfully cleansing crowd control reduces Holy Shock cooldown by 2 sec and restores 2 mana.')]
  };
  const replacements={
+  sage_dream_breath:{from:'Spirit Blossom',name:'Dream Breath',icon:'🦋',type:'spiritBlossom',school:'nature',range:16,cast:1.2,cd:18,cost:10,value:170,tickValue:45,tip:'Breathe restorative mist toward your selected ally. Heal yourself and allies in a 16m, 100° cone for 170, then 45 each second for 6 sec. Requires line of sight. Replaces Spirit Blossom.'},
+  sage_lifebloom:{from:'Rejuvenate',name:'Lifebloom',icon:'🌼',type:'hot',school:'nature',range:28,cast:0,cd:0,cost:8,value:35,tickValue:32,bloomValue:180,tip:'Heal an ally for 35, then 32 each second for 10 sec. On expiry, bloom for 180 healing. Only one ally can carry your Lifebloom. Refreshing or moving it does not trigger the bloom. Swiftmend consumes it to bloom immediately. Replaces Rejuvenate.'},
   wind_chi_explosion:{from:'Cloudstep Kick',name:'Chi Explosion',icon:'💠',type:'chiExplosion',school:'wind',range:8,cast:0,cd:6,cost:20,value:90,tip:'Consume up to 4 Chi to deal 90 damage plus 56 per Chi. At 3+ Chi, enemies within 5m take 50% damage. At 4 Chi, gain 2 Tigereye Brew stacks. Zephyr Palm, Rising Sun Kick and Strike of the Windlord generate Chi. Replaces Cloudstep Kick.'},
   wind_hurricane_strikes:{from:'Fists of Fury',name:'Hurricane Strikes',icon:'🌪️',type:'hurricaneStrikes',school:'wind',range:8,cast:1.6,cd:18,cost:18,value:115,tip:'Channel four strikes over 1.6 sec while moving at full speed. Each strikes your selected enemy within 8m for 115 damage and nearby enemies for 40% damage. The final strike grants 2 Chi. Crowd control stops the channel. Press again to cancel.'},
   disc_shadow_word_pain:{from:'Solace',name:'Shadow Word: Pain',icon:'🕯️',type:'discPain',school:'shadow',range:25,cast:0,cd:0,cost:0,value:36,atonementHeal:28,tip:'Afflict an enemy for 12 sec, dealing 36 Shadow damage and triggering 28 Atonement healing every 2 sec. Applying it restores 4 mana, at most once every 6 sec. Solace of the Light also increases this return. Selecting an ally attacks that ally’s selected enemy.'},
@@ -36,11 +38,17 @@
   if(cls==='shadow'&&a.name==='Smoke Veil')a.tip='Vanish and gain 10% increased damage for 8 sec. Throughout Veiled Assault, each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Attacking breaks stealth, but does not end Veiled Assault.';
   if(cls==='wind'&&a.name==='Zephyr Palm')a.tip='Strike for 50 damage. Landing Zephyr Palm after a different damaging ability grants one Flow. At three Flow, your next Palm becomes Rising Sun Kick, dealing 271 damage for 12 Energy. Repeating Palm does not generate more Flow. With Chi Explosion, each Palm also generates one Chi.';
   if(cls==='warrior'&&a.name==='Mortal Swing')a.tip='Strike for 104 Physical damage. Pummel and Warbreaker empower this attack; consuming Warbreaker triggers three Slicing Winds. Battle Trance: Mortal Swings against your Rend target have a 25% chance to reset Rend and prepare Gushing Wound for 8 sec. This can occur once every 10 sec.';
-  if(cls==='storm'&&a.type==='volcanicEruption')a={...a,school:'fire',cast:0,cd:12,value:280,offGlobal:false,tip:'Consume one charge to launch 280 Fire damage, followed by two 40-damage embers. Skybreaker Pulse or Molten Feedback prepares a charge for 10 sec. Instant cast. 12 sec cooldown.'};
+  if(cls==='storm'&&a.type==='volcanicEruption')a={...a,school:'fire',cast:0,cd:12,value:280,offGlobal:true,tip:'Consume one charge to launch 280 Fire damage, followed by two 40-damage embers. Skybreaker Pulse or Molten Feedback prepares a charge for 10 sec. Can be used between spells or during a cast without interrupting it. 12 sec cooldown.'};
+  if(cls==='storm'&&a.name==='Arc Spark')a.tip='Deal 124 Storm damage, restore 4 mana and generate 25 Maelstrom. At 100 Maelstrom, gain two instant Tempest Bolts and an empowered Forked Current. Spend these rewards before generating more. Stormkeeper bolts create Lightning Rod but do not generate Maelstrom.';
+  if(cls==='storm'&&a.name==='Forked Current')a.tip='Deal 132 Storm damage and arc to up to two enemies within 8m. Generate 35 Maelstrom once per cast. Storm Surge empowers one cast by 35% and launches three Lava Bursts at visible enemies. Restore 6 mana, or 10 when empowered.';
+  if(cls==='storm'&&a.name==='Gale Reversal')a.tip='Blast all enemies within 9m backwards and slow them by 40% for 3 sec. Enemies behind cover or immune to knockbacks are unaffected. If no enemy is nearby, leap backwards instead.';
+  if(cls==='storm'&&a.name==='Totem Mastery')a.tip='Place empowering totems for 20 sec. Increase damage, healing and shields by 5%, generate 5 additional Maelstrom per normal Arc Spark or Forked Current, and increase Flame Shock damage by 10%.';
   if(cls==='disc'&&['discSmite','discSolace'].includes(a.type)&&!String(a.tip||'').includes('selected enemy'))a.tip=(a.tip||'')+' Selecting an ally attacks that ally’s selected enemy.';
   if(cls==='wind'&&a.name==='Tigereye Brew')a.tip='Alternate successful damaging abilities to build up to 6 stacks. Repeating the same attack does not grant another stack. Consume 2, 4 or 6 stacks for 10%, 20% or 30% more damage and healing for 6 sec.';
   if(cls==='wind'&&Number(talents?.wind_hurricane_strikes)>0&&a.type==='whirlingDragonPunch')a.tip=String(a.tip||'').replaceAll('Fists of Fury','Hurricane Strikes');
   for(const [id,spec] of Object.entries(replacements))if(Number(talents?.[id])>0&&(a.name===spec.from||a.name===spec.name))a={...a,...spec};
+  if(cls==='sage'&&a.name==='Swiftmend'&&Number(talents?.sage_lifebloom)>0)a.tip='Restore 380 health and empower your next Verdant Mend by 150%. If your Lifebloom is present, consume it to trigger its 180 healing bloom. Otherwise, add four ticks of one of your HoTs and shorten it by 4 sec. Nature Swiftness permits one use during cooldown.';
+  if(cls==='sage'&&a.type==='ghanir')a.tip='For 7 sec, Blooming Echo, Rejuvenate, Lifebloom and Dream Breath heal for 50% more and their periodic effects tick twice as often. Their remaining durations are unchanged.';
   if(cls==='storm'&&a.name==='Flame Shock')a={...a,cd:6,tip:'Burn an enemy for 34 Fire damage each second for 12 sec. You do not need this effect to trigger Storm Surge. Icefury replaces this button with Frost Shock instead of adding another Shock.'};
   if(cls==='storm'&&Number(talents?.storm_grounding_aegis)>0&&['Flame Shock','Frost Shock'].includes(a.name))a={...a,from:'Flame Shock',name:'Frost Shock',icon:'❄️',type:'frostShock',school:'storm',range:25,cast:0,cd:6,cost:1,value:90,tip:'Deal 90 Frost damage and slow by 25% for 3 sec, subject to snare diminishing returns. Your Arc Spark and Forked Current deal 10% more damage to this target for 8 sec. Replaces Flame Shock; both never occupy separate buttons.'};
   if(cls==='shadow'&&a.name==='Smoke Veil'&&Number(talents?.shadow_dance_mastery)>0)a={...a,from:'Smoke Veil',name:'Shadow Dance',cd:30,tip:'Enter Shadow Dance for 6 sec. Shadowstrike has no cooldown, costs 14 Energy and builds 2 techniques. Eviscerate extends Dance by 0.75 sec, up to 3 sec. Also grants Veiled Assault for 8 sec: each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Does not reduce damage taken.'};
@@ -94,5 +102,52 @@
    }
   }
  };
- root.AETHER_CLASS_DESIGN={nodes,replacements,replace,shadowTalents};
+ // Geometry is shared so both engines heal the exact same cone at resolution.
+ const lifesage={
+  inBreath(source,target,ally,range=16){
+   if(!ally?.alive||ally.team!==source.team)return false;
+   const dx=ally.x-source.x,dz=ally.z-source.z,d=Math.hypot(dx,dz);
+   if(d>range)return false;if(d<.01)return true;
+   const tx=(target?.x??source.x)-source.x,tz=(target?.z??source.z)-source.z,td=Math.hypot(tx,tz);
+   const facing=Number(source.facing??source.mesh?.rotation?.y??0),fx=td>.1?tx/td:Math.sin(facing),fz=td>.1?tz/td:Math.cos(facing);
+   return (dx*fx+dz*fz)/d>=Math.cos(50*Math.PI/180);
+  },
+  extension(time,label){return Math.max(time,Math.min(label==='Lifebloom'?10:label==='Dream Breath'?6:12,Math.max(0,time)+2));}
+ };
+ // One rotation state machine for both engines. Only successful primary hits
+ // enter here; a short Fork gate prevents cleave from granting extra resources.
+ const stormRotation={
+  displace(unit,dx,dz,distance,constrain){
+   // Check the travelled path, not only the landing point: a knockback must
+   // never tunnel through a pillar that happens to sit between its endpoints.
+   const steps=Math.ceil(distance/.25),step=distance/Math.max(1,steps);
+   for(let i=0;i<steps;i++){unit.x+=dx*step;unit.z+=dz*step;constrain(unit);}
+  },
+  onBuilder(api,c,label){
+   if(!['Arc Spark','Forked Current'].includes(label))return;
+   if(label==='Forked Current'){
+    if(api.get(c,'stormForkGate'))return;
+    api.add(c,'stormForkGate',.5);
+   }
+   if(api.rank(c,'storm_lava_surge')&&!api.get(c,'volcanicEruptionReady')&&api.eruptionReady(c)){
+    const own=label==='Arc Spark'?'moltenSpark':'moltenFork',other=label==='Arc Spark'?'moltenFork':'moltenSpark';
+    if(api.get(c,other)){
+     api.remove(c,own);api.remove(c,other);api.remove(c,'moltenFeedbackReady');
+     api.add(c,'volcanicEruptionReady',10);api.proc(c,'eruption');
+    }else api.add(c,own,8);
+   }
+   if(api.get(c,'tempestBolts')||api.get(c,'overload'))return;
+   const last=api.get(c,'stormRhythmLast'),alternating=last&&last.label!==label;
+   const amount=(label==='Arc Spark'?25+2*api.rank(c,'surgeflow'):35)+(api.get(c,'totemMastery')?5:0)+(alternating&&api.rank(c,'storm_elemental_cycle')?10:0);
+   api.add(c,'stormRhythmLast',8,{label});
+   const total=Number(api.get(c,'maelstrom')?.stacks||0)+amount;
+   api.add(c,'maelstrom',30,{stacks:total%100});
+   if(total>=100){
+    api.remove(c,'stormChance');api.remove(c,'stormRhythmLast');
+    api.add(c,'tempestBolts',10,{stacks:2});api.add(c,'overload',10);
+    api.resource(c,10+api.rank(c,'storm_arc_battery'));api.proc(c,'surge');
+   }
+  }
+ };
+ root.AETHER_CLASS_DESIGN={nodes,replacements,replace,shadowTalents,lifesage,stormRotation};
 })(globalThis);

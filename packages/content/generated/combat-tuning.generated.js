@@ -6435,7 +6435,7 @@ export const combatTuning = {
           "cd": 38,
           "cost": 0,
           "value": 0,
-          "tip": "Vanish into a smoke veil and gain +10% damage for 8 sec. Arms your next Night Slash to Cheap Shot for 3 sec and your next Ribbreaker to deploy Smoke Bomb. Target: yourself or the area around you."
+          "tip": "Vanish into a smoke veil and gain +10% damage for 8 sec. Replaces this button with one optional 3 sec Cheap Shot during Veiled Assault; your attacks do not stun automatically. Your next Ribbreaker deploys Smoke Bomb. Target: yourself or the area around you."
         },
         {
           "name": "Blind",
@@ -11239,7 +11239,7 @@ export const combatTuning = {
         "req": [
           "eviscerate"
         ],
-        "desc": "Replaces Smoke Veil with Shadow Dance. For 6 sec, Shadowstrike costs 14 Energy, has no cooldown, and generates two Shadow Techniques. Eviscerate extends Dance by 0.75 sec, up to 3 additional sec. Retains 8 sec Veiled Assault: Night Slash and Eviscerate can repeatedly Cheap Shot, subject to stun diminishing returns. 30 sec cooldown.",
+        "desc": "Replaces Smoke Veil with Shadow Dance. For 6 sec, Shadowstrike costs 14 Energy, has no cooldown, and generates two Shadow Techniques. Eviscerate extends Dance by 0.75 sec, up to 3 additional sec. For 8 sec, gain 10% increased damage and one optional Cheap Shot on this same button. Normal attacks never stun automatically. 30 sec cooldown.",
         "max": 1,
         "x": 80,
         "y": 90

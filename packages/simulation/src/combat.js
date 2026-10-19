@@ -36,7 +36,7 @@ const SUPPORTED_TYPES = new Set([
   'victoryRush', 'paladinGuard', 'paladinSteed', 'paladinStun', 'sacrifice',
   'bestowFaith', 'cleanse', 'shield', 'blind', 'shieldSelf'
   , 'flameNova', 'dash', 'poly', 'interruptProc', 'iceBlock', 'combustion',
-  'livingBomb', 'flameShield', 'defensive', 'dot', 'singleStun', 'shadowInterrupt',
+  'livingBomb', 'flameShield', 'defensive', 'dot', 'singleStun', 'cheapShot', 'shadowInterrupt',
   'cloak', 'evasion', 'vendetta', 'shiv', 'chain', 'stun', 'push', 'root',
   'interrupt', 'flameShock', 'frostShock', 'totemMastery', 'stormkeeper',
   'soulDot', 'agony', 'unstableAffliction', 'soulDrain', 'fear', 'undyingResolve',
@@ -662,6 +662,12 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     try{const result=resolveAbilityCore(source,ability,target);if(source.alive)classExpansion.onResolve(expansionApi,source,target||source,ability);return result;}finally{expansionCast=previous;}
   }
   function resolveAbilityCore(source, ability, target) {
+    if(ability.type==='cheapShot'){
+      if(!getEffect(source,'cheapReady')||!getEffect(source,'smokePower'))return false;
+      removeEffect(source,'cheapReady','consumed');removeEffect(source,'stealth','attacking');
+      source.combatUntil=Math.max(source.combatUntil||0,state.time+4);target.combatUntil=Math.max(target.combatUntil||0,state.time+4);
+      return applyCrowdControl(target,'cheapStun',3,'stun')>0;
+    }
     if(ability.name==='Dream Breath'){
       for(const ally of state.units.values())if(classDesign.lifesage.inBreath(source,target,ally)&&hasLineOfSight(source,ally,state.arena.pillars,.05)){
         heal(source,ally,ability.baseValue,'Dream Breath');addEffect(ally,'hot',6,{effectKey:`dreamBreath:${source.id}`,sourceId:source.id,label:'Dream Breath',value:ability.tickValue||45,interval:1,tickRemaining:1});
@@ -736,7 +742,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
             addEffect(source, 'venomEdge', 12);
           } else addEffect(source, 'shadowMarks', 12, { stacks: marks });
         }
-        if(ability.id==='shadow.night_slash'&&result.hit&&getEffect(source,'smokePower'))applyCrowdControl(target,'stun',3,'stun');
         if (ability.id === 'storm.arc_spark') {
           if(ability.tempestProc){const bolts=getEffect(source,'tempestBolts');if(bolts){bolts.stacks=Math.max(0,Number(bolts.stacks||2)-1);if(!bolts.stacks)removeEffect(source,'tempestBolts','consumed');}}
           if(result.hit){source.resource = Math.min(source.maxResource, source.resource + (ability.tempestProc?5:4));

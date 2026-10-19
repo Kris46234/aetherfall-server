@@ -283,7 +283,13 @@ export function createSimulation({
     if (!groundTargeted && combat.requiresEnemyTarget(ability) && target.team === unit.team) {
       return rejectAction(unit, action, 'enemy_target_required');
     }
+    // Match offline targeting: do not consume the single optional opener into
+    // a target already inside Ice Block. Other stun immunities still consume it.
+    if (ability.type === 'cheapShot' && combat.getEffect(target, 'iceBlock')) {
+      return rejectAction(unit, action, 'target_immune');
+    }
     unit.targetId = target?.id || null;
+    if(unit.classId==='shadow'&&target&&target.team!==unit.team)combat.removeEffect(unit,'stealth','attacking');
 
     if(unit.mounted){unit.mounted=false;emit({type:'mount',unitId,mounted:false,reason:'casting'});}
     if(target && target!==unit && !combat.canUseWhileCasting(unit,ability))unit.facing=Math.atan2(target.x-unit.x,target.z-unit.z);

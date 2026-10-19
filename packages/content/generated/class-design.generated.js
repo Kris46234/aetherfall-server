@@ -35,7 +35,7 @@ sage:[node('sage_swiftmend','Flourishing Mend','🌺','left',['wildgrowth'],'Rep
  };
  function replace(cls,talents,input){
   let a={...input};
-  if(cls==='shadow'&&a.name==='Smoke Veil')a.tip='Vanish and gain 10% increased damage for 8 sec. Throughout Veiled Assault, each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Attacking breaks stealth, but does not end Veiled Assault.';
+  if(cls==='shadow'&&a.name==='Smoke Veil')a.tip='Vanish and gain 10% increased damage for 8 sec. This button becomes Cheap Shot for one optional 3 sec stun during Veiled Assault. Your attacks do not stun automatically. Your next Ribbreaker deploys Smoke Bomb. Attacking breaks stealth, but does not end Veiled Assault.';
   if(cls==='wind'&&a.name==='Zephyr Palm')a.tip='Strike for 50 damage. Landing Zephyr Palm after a different damaging ability grants one Flow. At three Flow, your next Palm becomes Rising Sun Kick, dealing 271 damage for 12 Energy. Repeating Palm does not generate more Flow. With Chi Explosion, each Palm also generates one Chi.';
   if(cls==='warrior'&&a.name==='Mortal Swing')a.tip='Strike for 104 Physical damage. Pummel and Warbreaker empower this attack; consuming Warbreaker triggers three Slicing Winds. Battle Trance: Mortal Swings against your Rend target have a 25% chance to reset Rend and prepare Gushing Wound for 8 sec. This can occur once every 10 sec.';
   if(cls==='storm'&&a.type==='volcanicEruption')a={...a,school:'fire',cast:0,cd:12,value:280,offGlobal:true,tip:'Consume one charge to launch 280 Fire damage, followed by two 40-damage embers. Skybreaker Pulse or Molten Feedback prepares a charge for 10 sec. Can be used between spells or during a cast without interrupting it. 12 sec cooldown.'};
@@ -51,12 +51,15 @@ sage:[node('sage_swiftmend','Flourishing Mend','🌺','left',['wildgrowth'],'Rep
   if(cls==='sage'&&a.type==='ghanir')a.tip='For 7 sec, Blooming Echo, Rejuvenate, Lifebloom and Dream Breath heal for 50% more and their periodic effects tick twice as often. Their remaining durations are unchanged.';
   if(cls==='storm'&&a.name==='Flame Shock')a={...a,cd:6,tip:'Burn an enemy for 34 Fire damage each second for 12 sec. You do not need this effect to trigger Storm Surge. Icefury replaces this button with Frost Shock instead of adding another Shock.'};
   if(cls==='storm'&&Number(talents?.storm_grounding_aegis)>0&&['Flame Shock','Frost Shock'].includes(a.name))a={...a,from:'Flame Shock',name:'Frost Shock',icon:'❄️',type:'frostShock',school:'storm',range:25,cast:0,cd:6,cost:1,value:90,tip:'Deal 90 Frost damage and slow by 25% for 3 sec, subject to snare diminishing returns. Your Arc Spark and Forked Current deal 10% more damage to this target for 8 sec. Replaces Flame Shock; both never occupy separate buttons.'};
-  if(cls==='shadow'&&a.name==='Smoke Veil'&&Number(talents?.shadow_dance_mastery)>0)a={...a,from:'Smoke Veil',name:'Shadow Dance',cd:30,tip:'Enter Shadow Dance for 6 sec. Shadowstrike has no cooldown, costs 14 Energy and builds 2 techniques. Eviscerate extends Dance by 0.75 sec, up to 3 sec. Also grants Veiled Assault for 8 sec: each Night Slash or Eviscerate attempts a 3 sec Cheap Shot, subject to stun diminishing returns. Your next Ribbreaker deploys Smoke Bomb. Does not reduce damage taken.'};
+  if(cls==='shadow'&&a.name==='Smoke Veil'&&Number(talents?.shadow_dance_mastery)>0)a={...a,from:'Smoke Veil',name:'Shadow Dance',cd:30,tip:'Enter Shadow Dance for 6 sec. Shadowstrike has no cooldown, costs 14 Energy and builds 2 techniques. Eviscerate extends Dance by 0.75 sec, up to 3 sec. Gain 10% increased damage and one optional Cheap Shot on this button for 8 sec. Your attacks do not stun automatically. Your next Ribbreaker deploys Smoke Bomb.'};
   return a;
  }
  // Shared combat decisions; adapters only translate offline/authoritative storage.
  const shadowTalents={
   modifyAbility(api,c,a){
+   // A temporary follow-up shares its parent's identity/slot, not its cooldown.
+   // Both engines derive this from authoritative effects, never a client flag.
+   if(['Smoke Veil','Shadow Dance'].includes(a.name)&&api.get(c,'cheapReady')&&api.get(c,'smokePower'))return {...a,from:a.from||a.name,name:'Cheap Shot',icon:'🔪',type:'cheapShot',school:'physical',range:4.8,cast:0,castTime:0,cd:0,cooldown:0,cost:0,value:0,baseValue:0,offGlobal:false,cheapFollowup:true,ignoreCooldown:true,tip:'Stun an enemy for 3 sec. Shares diminishing returns with Ribbreaker. Consumes your single Veiled Assault follow-up; Smoke Veil or Shadow Dance returns with its remaining cooldown. Optional: your normal attacks never trigger this stun.'};
    if(a.type==='shadowStrike'&&api.get(c,'predatoryRhythm'))a={...a,cost:Math.max(0,a.cost-6)};
    if(a.name==='Viper Cut'&&api.get(c,'toxicOpportunity'))a={...a,cost:0};
    return a;

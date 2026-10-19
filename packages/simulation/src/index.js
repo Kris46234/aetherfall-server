@@ -89,6 +89,7 @@ export function createSimulation({
         stun: { level: 0, until: 0 },
         fear: { level: 0, until: 0 },
         incap: { level: 0, until: 0 },
+        disorient: { level: 0, until: 0 },
         root: { level: 0, until: 0 }
       },
       talents: { ...(entry.talents || {}) },
@@ -162,7 +163,7 @@ export function createSimulation({
   function useTrinket(unitId) {
     const unit = state.units.get(unitId);
     if (!unit?.alive || unit.trinketCooldown > 0) return { ok: false, reason: 'trinket_cooldown' };
-    const removable = ['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap', 'root', 'slow', 'silence'];
+    const removable = ['stun', 'cheapStun', 'furyStun', 'fear', 'poly', 'sleep', 'blind', 'gouge', 'windIncap', 'root', 'slow', 'silence'];
     let removed = 0;
     for (const type of [...unit.effects.keys()]) {
       if (removable.includes(type) || type.startsWith('lock_')) {
@@ -339,10 +340,11 @@ export function createSimulation({
         combat.addEffect(unit, 'bladestorm', 4, { immune: true });
       }
       emit({
-        type: 'castStarted', unitId, abilityId: ability.id, targetId: unit.id,
+        type: 'castStarted', unitId, abilityId: ability.id, targetId: unit.cast.targetId,
         abilityName: ability.name, abilityType: ability.type,
         sequence: action.sequence, channel: true, duration: round(duration),
-        school: ability.school, uninterruptible: !!unit.cast.uninterruptible
+        school: ability.school, uninterruptible: !!unit.cast.uninterruptible,
+        moveSpeedMultiplier: unit.cast.moveSpeedMultiplier
       });
     } else if (castTime > 0) {
       if(unit.classId==='flame'&&Number(unit.talents?.flame_tempered_focus||0)>0&&[...state.units.values()].some(other=>other.alive&&other.team!==unit.team&&distance(unit,other)<8))combat.addEffect(unit,'temperedFocus',2,{reduction:Number(unit.talents.flame_tempered_focus)*.02});
@@ -559,6 +561,7 @@ export function createSimulation({
           duration: unit.cast.duration,
           channel: !!unit.cast.channel,
           uninterruptible: !!unit.cast.uninterruptible,
+          moveSpeedMultiplier: Number(unit.cast.moveSpeedMultiplier) || 0,
           ticks: unit.cast.ticks || 0
         } : null,
         effects: combat.effectSnapshot(unit),

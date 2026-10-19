@@ -4,9 +4,13 @@ import { getClass } from '../../content/src/catalogue.js';
 import {createCombatScaling} from './combat-scaling.js';
 
 
-const HARD_CONTROL = new Set(['stun', 'fear', 'poly', 'sleep', 'blind', 'windIncap', 'gouge']);
+const HARD_CONTROL = new Set(['stun', 'cheapStun', 'furyStun', 'fear', 'poly', 'sleep', 'blind', 'windIncap', 'gouge']);
 const BLADESTORM_CONTROL = new Set([...HARD_CONTROL, 'cheapStun', 'furyStun', 'root', 'slow', 'silence', 'disarm']);
 const BREAKABLE_CONTROL = ['poly', 'sleep', 'blind', 'fear', 'windIncap', 'gouge'];
+// Same direct-strike classification as the client. A Physical DoT is not a
+// melee swing, and a melee ability must not become undodgeable merely because
+// its individual resolver omitted an options flag.
+const MELEE_STRIKES = new Set(['Night Slash','Shadowstrike','Eviscerate','Umbral Pounce','Viper Cut','Ribbreaker','Shadow Kick','Zephyr Palm','Cloudstep Kick','Dawncrest Kick','Cyclone Barrage','Fists of Fury','Hurricane Strikes','Hurricane Cleave','Chi Explosion','Disrupting Palm','Valley Sweep','Mortal Swing','Slicing Winds','Charge','Rend','Gushing Wound','Bladestorm Tick']);
 const SELF_TYPES = new Set([
   'monkDefensive', 'fistsChannel', 'whirlingDragonPunch', 'tigereyeBrew', 'karma', 'tigersLust',
   'healingStreamTotem', 'crimsonVial', 'sharpenBlade', 'reverseHarm',
@@ -191,17 +195,21 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if(unit.classId==='shadow')Object.assign(ability,classDesign.shadowTalents.modifyAbility(shadowApi,unit,ability));
     if(ability.name==='Verdant Mend'&&getEffect(unit,'emeraldFlight'))ability.castTime=0;
     if (ability.id === 'pala_judgement' || ability.type === 'bestowFaith') ability.cost = 0;
-    if(ability.id==='flame.blazing_step')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'swiftstep'));
-    if(ability.id==='flame.prism_hex')ability.castTime=Math.max(.4,ability.castTime-talentRank(unit,'hexmastery')*.10);
-    if(ability.id==='storm.wind_shear')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'windfocus'));
+    if(ability.id==='flame.blazing_step')ability.cooldown=Math.max(.5,ability.cooldown-talentRank(unit,'swiftstep'));
+    if(ability.id==='flame.prism_hex')ability.castTime=Math.max(.6,ability.castTime-talentRank(unit,'hexmastery')*.10);
+    if(ability.id==='storm.wind_shear')ability.cooldown=Math.max(4,ability.cooldown-talentRank(unit,'windfocus'));
     if(ability.id==='soul.grasping_gloom')ability.range+=talentRank(unit,'gloomreach');
-    if(ability.id==='sage.verdant_mend'&&!getEffect(unit,'emeraldFlight'))ability.castTime=Math.max(.45,ability.castTime-talentRank(unit,'quickmend')*.08);
-    if(ability.id==='sage.purifying_light')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'cleanhands')*.5);
-    if(['sage.fae_retreat','sage.lullaby_bloom','sage_natures_grasp'].includes(ability.id))ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'sage_root_warden')*2);
-    if(ability.id==='shadow.umbral_pounce')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'pounceflow'));
+    if(ability.id==='sage.verdant_mend'&&!getEffect(unit,'emeraldFlight'))ability.castTime=Math.max(.8,ability.castTime-talentRank(unit,'quickmend')*.08);
+    if(ability.id==='sage.purifying_light'||ability.id==='pala.cleanse')ability.cooldown=Math.max(6,ability.cooldown-talentRank(unit,'cleanhands')*.5);
+    if(['sage.fae_retreat','sage.lullaby_bloom','sage_natures_grasp'].includes(ability.id))ability.cooldown=Math.max(8,ability.cooldown-talentRank(unit,'sage_root_warden')*2);
+    if(unit.classId==='sage'&&['Fae Retreat','Ironbark'].includes(ability.name))ability.cooldown=Math.max(12,ability.cooldown-talentRank(unit,'barkskin')*2);
+    if(ability.id==='shadow.umbral_pounce')ability.cooldown=Math.max(6,ability.cooldown-talentRank(unit,'pounceflow'));
     if(ability.id==='wind.cloudstep_kick'&&ability.type==='leap')ability.cooldown=Math.max(6,ability.cooldown-talentRank(unit,'longdash')-talentRank(unit,'tigerdash')-talentRank(unit,'wind_nimble_brew'));
-    if(['wind_tigers_lust','wind_disabling_reach','wind_tiger_rush'].includes(ability.id))ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'wind_nimble_brew'));
-    if(ability.type==='painSuppression')ability.cooldown=Math.max(1,ability.cooldown-talentRank(unit,'disc_pain')*3);
+    if(ability.id==='wind_tigers_lust')ability.cooldown=Math.max(6,ability.cooldown-talentRank(unit,'tigerdash')-talentRank(unit,'wind_nimble_brew'));
+    if(['wind_disabling_reach','wind_tiger_rush'].includes(ability.id))ability.cooldown=Math.max(6,ability.cooldown-talentRank(unit,'wind_nimble_brew'));
+    if(ability.type==='painSuppression')ability.cooldown=Math.max(25,ability.cooldown-talentRank(unit,'disc_pain')*3);
+    if(ability.type==='discShield')ability.baseValue=Math.round(ability.baseValue*(1+talentRank(unit,'disc_shielding')*.06));
+    if(ability.type==='discMend')ability.baseValue=Math.round(ability.baseValue*(1+talentRank(unit,'disc_darklight')*.04));
     if(ability.id==='disc.smite'&&hasTalent(unit,'disc_dark_archangel'))Object.assign(ability,{name:'Mind Spike',school:'shadow',castTime:1.30,baseValue:102,atonementHeal:96});
     if(ability.id==='shadow.night_slash'&&getEffect(unit,'eviscerateReady'))ability.name='Eviscerate';
     if(getEffect(unit,'borrowedTime')&&['disc.smite','disc.shadow_mend'].includes(ability.id)){ability.castTime=Math.max(.45,ability.castTime*.80);ability.borrowedTime=true;}
@@ -259,7 +267,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     }
     if (ability.id === 'pala.holy_light' && getEffect(unit, 'infusion')) {
       ability.castTime = .75;
-      ability.cost = 0;
       ability.infused = true;
     }
     if (ability.id === 'pala.holy_light' && !ability.infused) {
@@ -314,7 +321,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
 
   function commitAbility(unit, ability) {
-    if (ability.infused) removeEffect(unit, 'infusion', 'consumed');
+    if (ability.infused) {removeEffect(unit, 'infusion', 'consumed');unit.resource=Math.min(unit.maxResource,unit.resource+6);}
     if (ability.natureSwift) removeEffect(unit, 'natureSwiftness', 'consumed');
     if (ability.radiant) removeEffect(unit, 'radiantPenanceProc', 'consumed');
   }
@@ -361,14 +368,14 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       return { hit: redirected.hit, amount: 0, absorbed: 0, redirected: redirected.amount };
     }
     const reflection = getEffect(target, 'reflect');
-    const melee = /mortal swing|charge|rend|pummel|zephyr palm|cloudstep|rising sun|fists of fury|valley sweep|disrupting palm/i.test(String(label));
+    const melee = !!options.melee || MELEE_STRIKES.has(label);
     if (reflection && !options.cannotReflect && options.school !== 'physical' && !melee) {
       removeEffect(target, 'reflect', 'triggered');
       emit({ type: 'spellReflected', sourceId: target.id, targetId: source.id, ability: label });
       return damage(target, source, amount, `${label} (Reflected)`, { ...options, cannotReflect: true });
     }
-    if (getEffect(target, 'cloakShadows') && options.school !== 'physical' && !options.melee) return { hit: false, amount: 0, absorbed: 0, immune: true };
-    if (getEffect(target, 'evasion') && options.melee && random() < Number(getEffect(target, 'evasion').pct || .50)) return { hit: false, amount: 0, absorbed: 0, dodged: true };
+    if (getEffect(target, 'cloakShadows') && (options.periodic || (options.school !== 'physical' && !melee))) return { hit: false, amount: 0, absorbed: 0, immune: true };
+    if (getEffect(target, 'evasion') && melee && random() < Number(getEffect(target, 'evasion').pct || .50)) return { hit: false, amount: 0, absorbed: 0, dodged: true };
     const comboReady = getEffect(source, 'comboMasteryReady');
     const twilight = getEffect(source, 'twilightSurge');
     const backdraft = getEffect(source, 'backdraft');
@@ -524,7 +531,6 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     if(source.classId==='disc'&&/Penance Atonement/.test(label))adjusted*=1+talentRank(source,'disc_contrition')*.06;
     if(source.classId==='disc'&&/Penance Atonement/.test(label))adjusted*=1+talentRank(source,'disc_penance')*.06;
     if(source.classId==='disc'&&label==='Ultimate Radiance')adjusted*=1+talentRank(source,'disc_radiance')*.06;
-    if(source.classId==='disc'&&label==='Shadow Mend')adjusted*=1+talentRank(source,'disc_darklight')*.04;
     const critical=label!=='Reverse Harm'&&!/Holy Shock/i.test(label)&&random()<scaling.criticalChance(source);
     const requested = adjusted * (label==='Reverse Harm'?1:healingMultiplier(source, target, label)) * (critical?1.5:1) * woundMult * (label==='Reverse Harm'?1:1 - state.dampening);
     const actual = Math.max(0, Math.min(target.maxHp - target.hp, Math.round(requested)));
@@ -532,7 +538,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
       target.hp += actual;
       source.stats.healing += actual;
       source.stats.healingByAbility[label] = (source.stats.healingByAbility[label] || 0) + actual;
-      emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual, critical });
+      emit({ type: 'healing', sourceId: source.id, targetId: target.id, ability: label, amount: actual, critical, periodic: expansionPeriodic });
     }
     if(source.classId==='storm'&&label==='Healing Surge'&&talentRank(source,'grounded')>0){applyShield(source,target,target.maxHp*.05*talentRank(source,'grounded')*(1+talentRank(source,'storm_earthen_harmony')*.15),8);if(hasTalent(source,'storm_resurgence'))source.resource=Math.min(source.maxResource,source.resource+3);if(talentRank(source,'storm_elemental_equilibrium'))addEffect(source,'elementalEquilibrium',10);}
     if(source.classId==='sage'&&label==='Verdant Mend'&&actual>0&&talentRank(source,'wildgrowth')>0&&[...target.effects.values()].some(effect=>effect.type==='hot'&&effect.sourceId===source.id)){
@@ -559,8 +565,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   function applyShield(source, target, amount, duration, label='') {
     const soulBonus=source.classId==='soul'?1+talentRank(source,'soul_barrier_rites')*.03:1;
     const palaBonus=source.classId==='pala'?1+talentRank(source,'guardianlight')*.04:1;
-    const discBonus=source.classId==='disc'&&/Power Shield/i.test(label||'')?1+talentRank(source,'disc_shielding')*.06:1;
-    const value = Math.round(Number(amount) * soulBonus * palaBonus * discBonus * (getEffect(source, 'totemMastery') ? 1.05 : 1) * (1 - state.dampening));
+    const value = Math.round(Number(amount) * soulBonus * palaBonus * (getEffect(source, 'totemMastery') ? 1.05 : 1) * (1 - state.dampening));
     target.shield = Math.max(target.shield, value);
     addEffect(target, 'shield', duration, { value });
     source.stats.absorb += value;
@@ -568,6 +573,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
 
   function applyCrowdControl(target, type, duration, category) {
+    if (getEffect(target, 'iceBlock')) return 0;
     if (getEffect(target, 'freedom') && (type === 'root' || type === 'slow')) return 0;
     if (getEffect(target, 'bladestorm') && (BLADESTORM_CONTROL.has(type) || type.startsWith('lock_'))) {
       emit({ type: 'crowdControlImmune', unitId: target.id, effect: type, category, reason: 'bladestorm' });
@@ -660,6 +666,10 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
     try{const result=resolveAbilityCore(source,ability,target);if(source.alive)classExpansion.onResolve(expansionApi,source,target||source,ability);return result;}finally{expansionCast=previous;}
   }
   function resolveAbilityCore(source, ability, target) {
+    if(target&&target!==source&&target.team!==source.team){
+      if(getEffect(target,'iceBlock'))return false;
+      if(getEffect(target,'cloakShadows')&&ability.school!=='physical'&&!MELEE_STRIKES.has(ability.name)&&!['Fists of Fury','Bladestorm'].includes(ability.name))return false;
+    }
     if(ability.type==='discPain'){
       if(getEffect(target,'iceBlock')||getEffect(target,'cloakShadows'))return true;
       addEffect(target,'discPain',12,{sourceId:source.id,value:ability.baseValue,atonementHeal:ability.atonementHeal||28,interval:2,tickRemaining:2,effectKey:`discPain:${source.id}`});
@@ -1135,7 +1145,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         applyShield(source, target, ability.baseValue, 7);
         return true;
       case 'blind':
-      {const applied=applyCrowdControl(target,'blind',ability.baseValue||3,'incap')>0;if(applied&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);return applied;}
+      {const applied=applyCrowdControl(target,'blind',ability.baseValue||3,'disorient')>0;if(applied&&hasTalent(source,'shadow_controlled_chaos'))addEffect(source,'controlledChaos',4);return applied;}
       case 'shieldSelf':
         applyShield(source, source, ability.id === 'soul_dark_pact' ? source.maxHp * .30 : ability.baseValue, 6);
         if (source.classId === 'soul' && ability.id !== 'soul_dark_pact') addEffect(source, 'interruptWard', 6);
@@ -1180,6 +1190,10 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
         return true;
       }
       case 'iceBlock':
+        removeEffect(source, 'gouge', 'cleansed');
+        removeEffect(source, 'windIncap', 'cleansed');
+        removeEffect(source, 'cheapStun', 'cleansed');
+        removeEffect(source, 'furyStun', 'cleansed');
         removeEffect(source, 'stun', 'cleansed');
         removeEffect(source, 'fear', 'cleansed');
         removeEffect(source, 'poly', 'cleansed');

@@ -322,7 +322,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
 
   function canUseWhileCasting(unit, ability) {
-    return ability.type === 'interruptProc'
+    return !!ability.canUseWhileCasting
+      || ability.type === 'interruptProc'
       || ability.type === 'interrupt'
       || ability.type === 'iceBlock'
       || ability.type === 'livingBomb'
@@ -663,8 +664,8 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
   }
   function resolveAbilityCore(source, ability, target) {
     if(ability.type==='cheapShot'){
-      if(!getEffect(source,'cheapReady')||!getEffect(source,'smokePower'))return false;
-      removeEffect(source,'cheapReady','consumed');removeEffect(source,'stealth','attacking');
+      const mode=classDesign.shadowTalents.followupMode(shadowApi,source);if(!mode)return false;
+      if(mode==='veil')removeEffect(source,'cheapReady','consumed');removeEffect(source,'stealth','attacking');
       source.combatUntil=Math.max(source.combatUntil||0,state.time+4);target.combatUntil=Math.max(target.combatUntil||0,state.time+4);
       return applyCrowdControl(target,'cheapStun',3,'stun')>0;
     }
@@ -1238,7 +1239,7 @@ return (1 - Math.min(.95, slow?.pct || 0)) * (speed?.speed || 1) * (pounce?.spee
           const veilDuration=8+talentRank(source,'shadow_veil_training')*.25;
           if(hasTalent(source,'shadow_dance_mastery'))addEffect(source,'shadowDance',6,{extended:0});
           addEffect(source, 'smokePower', veilDuration);
-          addEffect(source, 'cheapReady', veilDuration);
+          if(!hasTalent(source,'shadow_dance_mastery'))addEffect(source, 'cheapReady', veilDuration);
           addEffect(source, 'smokeBombReady', veilDuration);
           addEffect(source, 'stealth', veilDuration);
           if(hasTalent(source,'eviscerate')){

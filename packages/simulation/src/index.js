@@ -142,7 +142,7 @@ export function createSimulation({
     if (Number.isFinite(input.facing)) unit.facing = Math.atan2(Math.sin(input.facing),Math.cos(input.facing));
     if (Number.isSafeInteger(input.jumpSequence) && input.jumpSequence > (unit.jumpSequence||0)) {
       unit.jumpSequence=input.jumpSequence;
-      if (!locked && !unit.jumpY && !unit.jumpVel) { unit.jumpY=.01;unit.jumpVel=unit.mounted?5.25:5.75;if(unit.cast&&!unit.cast.channel)unit.cast=null; }
+      if (!locked && !unit.jumpY && !unit.jumpVel) { unit.jumpY=.01;unit.jumpVel=unit.mounted?5.25:5.75;if(unit.cast&&!unit.cast.channel&&!unit.cast.moveCast)unit.cast=null; }
     }
     const length = Math.hypot(x, z);
     unit.input = {
@@ -363,13 +363,16 @@ export function createSimulation({
         duration: castTime,
         school: ability.school,
         channel: false,
-        uninterruptible: false
+        uninterruptible: false,
+        moveCast: !!ability.moveCast,
+        moveSpeedMultiplier: ability.moveCast ? 1 : 0
       };
       emit({
         type: 'castStarted', unitId, abilityId: ability.id, targetId: target?.id || null,
         abilityName: ability.name, abilityType: ability.type,
         sequence: action.sequence, channel: false, duration: round(castTime),
-        school: ability.school, uninterruptible: false
+        school: ability.school, uninterruptible: false,
+        moveCast: !!ability.moveCast, moveSpeedMultiplier: ability.moveCast ? 1 : 0
       });
     } else {
       emit({ type: 'actionComplete', unitId, abilityId: ability.id, abilityName: ability.name, abilityType: ability.type, targetId: target?.id || null, sequence: action.sequence });
@@ -429,7 +432,7 @@ export function createSimulation({
       const moveLength = Math.hypot(unit.input.x, unit.input.z);
       if(unit.id.startsWith('bot')||unit.summonKind){const focus=state.units.get(unit.targetId);if(focus?.alive)unit.facing=Math.atan2(focus.x-unit.x,focus.z-unit.z);else if(moveLength>0)unit.facing=Math.atan2(unit.input.x,unit.input.z);}
       const moveMultiplier = combat.movementMultiplier(unit);
-      if (unit.cast && !unit.cast.channel && moveLength > 0 && moveMultiplier > 0) {
+      if (unit.cast && !unit.cast.channel && !unit.cast.moveCast && moveLength > 0 && moveMultiplier > 0) {
         emit({ type: 'castCancelled', unitId: unit.id, abilityId: unit.cast.abilityId, reason: 'movement' });
         unit.cast = null;
       }
@@ -567,6 +570,7 @@ export function createSimulation({
           duration: unit.cast.duration,
           channel: !!unit.cast.channel,
           uninterruptible: !!unit.cast.uninterruptible,
+          moveCast: !!unit.cast.moveCast,
           moveSpeedMultiplier: Number(unit.cast.moveSpeedMultiplier) || 0,
           ticks: unit.cast.ticks || 0
         } : null,

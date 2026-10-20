@@ -81,13 +81,16 @@
   expAshenLance:['Ashen Lance','🔥','ash',['Ember Lance']],expFallingStar:['Falling Star','☄️','ash',['Cinder Bolt']],expFlashfire:['Flashfire','✨','chrono',['Ember Lance']],expBorrowedFlame:['Borrowed Flame','⏳','chrono',['Cinder Bolt']],
   expNightfall:['Nightfall','🌑','affliction',['Unstable Affliction']],expMalice:['Malice','🧫','affliction',['Pandemic Bloom']],expCinderwake:['Cinderwake','💚','chaos',['Chaos Bolt']],expSiphonedFlame:['Siphoned Flame','🔥','chaos',['Immolate']],
   expDevotion:['Luminous Devotion','✦','penance',['Power Shield']],expPenitentShelter:['Penitent Shelter','🪽','penance',['Penance']],expRevelation:['Painful Revelation','🕯️','twilight',['Smite','Mind Spike']],expReparation:['Twilight Reparation','🌓','twilight',['Shadow Mend']],
+  expRadiantPurpose:['Radiant Purpose','🌠','penance',['Smite','Mind Spike','Penance','Solace','Shadow Word: Pain']],expUmbralReprieve:['Umbral Reprieve','🌒','twilight',['Shadow Mend']],
+  expCloudstepRise:['Cloudstep Ascendance','🌅','combo',['Zephyr Palm','Rising Sun Kick']],
   expThreefold:['Threefold Path','☯️','combo',['Zephyr Palm','Rising Sun Kick']],expWillowCounter:['Willow Counter','🥊','jade',['Fists of Fury','Hurricane Strikes']],
-  expClosedCircuit:['Closed Circuit','⚡','tempest',['Forked Current']],expStoneToSky:['Stone to Sky','🪨','earth',['Arc Spark']],expEarthAnswer:['Earth’s Answer','💧','earth',['Healing Surge']],
+  expClosedCircuit:['Closed Circuit','⚡','tempest',['Forked Current']],expStoneToSky:['Stone to Sky','🪨','earth',['Arc Spark']],expEarthAnswer:['Earth’s Answer','💧','earth',['Healing Surge']],expStormRebound:['Storm Rebound','⛈️','tempest',['Arc Spark']],
   expGroveCadence:['Grove Cadence','🌿','grove',['Verdant Mend']],expLucid:['Lucid Reservoir','🦋','dream',['Renewal Tide','Swiftmend']],expFaeBloom:['Fae Bloom','🌺','dream',['Blooming Echo','Dream Echo']],
   expBeaconMercy:['Beacon’s Mercy','🕯️','beacon',['Holy Shock']],expRadiantRiposte:['Radiant Riposte','⚔️','avenger',['Holy Light']],expCrusaderReprieve:['Crusader’s Reprieve','🔔','avenger',['Righteous Strike']],
   expSuddenExecution:['Sudden Execution','💀','steel',['Mortal Swing']],expWeightSteel:['Weight of Steel','⚔️','steel',['Mortal Swing']],expBloodReservoir:['Blood Reservoir','🩸','blood',['Rend','Gushing Wound']]
  };
  const effectMeta=Object.fromEntries(Object.entries(buffDefs).map(([key,[label,icon]])=>[key,{label,icon,buff:true}]));
+ effectMeta.expCloudstepRise.description='Your next Rising Sun Kick deals 12% more damage and costs half as much Energy. Cloudstep Kick prepared this follow-up by completing an alternating attack sequence.';
  const actionHighlights=Object.fromEntries(Object.entries(buffDefs).map(([key,[,,profile,abilities]])=>[key,{abilities,profile}]));
  const cls=c=>c?.cls||c?.classId;
  const unitId=u=>u?.id??u?.netId;
@@ -121,8 +124,11 @@
   if(name==='Immolate')discount('soul_siphoned_flame','expSiphonedFlame',0);
   if(name==='Power Shield')discount('disc_luminous_devotion','expDevotion',.5);
   if(['Smite','Mind Spike'].includes(name)){discount('disc_painful_revelation','expRevelation',0);quicken('disc_painful_revelation','expRevelation',.7);}
+  if(name==='Shadow Mend')quicken('disc_umbral_reprieve','expUmbralReprieve',.6);
+  if(name==='Rising Sun Kick'&&ready(api,c,'tigerdash','expCloudstepRise'))cost*=.5;
   if(['Zephyr Palm','Rising Sun Kick'].includes(name))discount('wind_threefold_path','expThreefold',0);
   if(['Arc Spark','Tempest Bolt'].includes(name)){discount('storm_stone_to_sky','expStoneToSky',0);quicken('storm_stone_to_sky','expStoneToSky',.6);}
+  if(cls(c)==='storm'&&name==='Arc Spark'&&!live(api,c,'tempestBolts')&&!live(api,c,'stormkeeper')&&live(api,c,'expStormRebound'))a=castScale(a,.6);
   if(name==='Healing Surge')discount('storm_earths_answer','expEarthAnswer',.6);
   if(name==='Verdant Mend')quicken('sage_grove_cadence','expGroveCadence',.8);
   if(['Blooming Echo','Dream Echo'].includes(name))discount('sage_fae_bloom','expFaeBloom',0);
@@ -140,6 +146,7 @@
   if(label==='Immolate'&&!options.periodic)bonus('soul_siphoned_flame','expSiphonedFlame',1.25);
   if(penance(label))bonus('disc_penitent_shelter','expPenitentShelter',1.12);
   if(['Zephyr Palm','Rising Sun Kick'].includes(label))bonus('wind_threefold_path','expThreefold',1.20);
+  if(label==='Rising Sun Kick'&&ready(api,c,'tigerdash','expCloudstepRise'))value*=1.12;
   if(label==='Fists of Fury'||label==='Hurricane Strikes')bonus('wind_willow_counter','expWillowCounter',1.12);
   if(label==='Forked Current')bonus('storm_closed_circuit','expClosedCircuit',1.20);
   if(['Arc Spark','Tempest Bolt','Stormkeeper Arc Spark'].includes(label))bonus('storm_stone_to_sky','expStoneToSky',1.15);
@@ -152,6 +159,8 @@
   label=canonicalLabel(label);
   let value=1;const bonus=(id,key,n)=>{if(ready(api,c,id,key))value*=n;};
   if(/Penance Atonement/.test(label))bonus('disc_penitent_shelter','expPenitentShelter',1.12);
+  if(/Atonement/.test(label))bonus('disc_radiant_purpose','expRadiantPurpose',1.15);
+  if(label==='Penance Direct Heal'&&has(api,c,'disc_guiding_grace'))value*=1.15;
   if(label==='Shadow Mend')bonus('disc_twilight_reparation','expReparation',1.20);
   if(label==='Healing Surge')bonus('storm_earths_answer','expEarthAnswer',1.20);
   if(label==='Verdant Mend')bonus('sage_grove_cadence','expGroveCadence',1.25);
@@ -192,6 +201,10 @@
    if(label==='Immolate'&&!periodic)spend(api,c,'expSiphonedFlame');
   }
   if(id==='disc'){
+   if(!periodic&&['Smite','Mind Spike'].includes(label)&&has(api,c,'disc_painkeeper')){
+    const pain=api.effects(t).find(e=>e.type==='discPain'&&api.owned(e,c)&&api.time(e)>0);
+    if(pain&&lock(api,c,'expPainkeeperLock',3)){api.setTime(pain,Math.min(12,api.time(pain)+2));api.proc(c,'twilight','Painkeeper',t);}
+   }
    if(label==='Shadow Word: Pain'&&periodic)maybeProcCounter(api,c,'disc_painful_revelation','expRevelationCount',3,20,'expRevelation',8);
    if(['Smite','Mind Spike'].includes(label)&&has(api,c,'disc_twilight_reparation')&&live(api,c,'expMendOpportunity')&&lock(api,c,'expReparationLock',8)){spend(api,c,'expMendOpportunity');grant(api,c,'expReparation',8);}
    if(has(api,c,'disc_duality')){
@@ -200,6 +213,14 @@
    }
   }
   if(id==='wind'){
+   if(!periodic&&primaryWind.has(label)){
+    const previous=live(api,c,'expCloudstepSequence')?.label;
+    if(label==='Rising Sun Kick')spend(api,c,'expCloudstepRise');
+    if(label==='Cloudstep Kick'&&previous&&previous!==label&&has(api,c,'tigerdash')&&lock(api,c,'expCloudstepLock',8)){
+     set(api,c,'risingSunReady',8);grant(api,c,'expCloudstepRise',8);
+    }
+    set(api,c,'expCloudstepSequence',8,{label});
+   }
    if(!periodic&&primaryWind.has(label)){
     if(['Zephyr Palm','Rising Sun Kick'].includes(label)&&live(api,c,'expThreefold'))spend(api,c,'expThreefold');
     else if(has(api,c,'wind_threefold_path')&&!live(api,c,'expThreefold')&&!live(api,c,'expThreefoldLock')){
@@ -212,6 +233,12 @@
    if(['Fists of Fury','Hurricane Strikes'].includes(label)&&has(api,c,'wind_jade_reservoir')&&lock(api,c,'expJadeLock',12)){api.resource(c,6);api.proc(c,'jade','Jade Reservoir',c);}
   }
   if(id==='storm'){
+   // Baseline Surge payoff, once per landed single-target bolt. No Shock,
+   // cleave or periodic effect can generate this mobility preparation.
+   if(label==='Tempest Bolt'&&!periodic&&lock(api,c,'expReboundBoltGate',.20)){
+    api.reduce(c,'Forked Current',1);
+    if(counter(api,c,'expReboundCount',2,10)>=2){spend(api,c,'expReboundCount');grant(api,c,'expStormRebound',8);}
+   }
    const rod=owns(api,c,t,e=>e.type==='lightningRod');
    if(['Arc Spark','Tempest Bolt','Stormkeeper Arc Spark'].includes(label)){
     spend(api,c,'expStoneToSky');
@@ -240,6 +267,10 @@
  function onHeal(api,c,t,event){
   const label=canonicalLabel(event.label),amount=Number(event.amount)||0,id=cls(c),periodic=!!event.periodic;
   if(id==='disc'){
+   if(amount>0&&label==='Penance Direct Heal'&&has(api,c,'disc_guiding_grace')){
+    const mark=api.effects(t).find(e=>e.type==='atonement'&&api.owned(e,c)&&api.time(e)>0);
+    if(mark)api.setTime(mark,Math.min(17,api.time(mark)+1));
+   }
    if(amount>0&&/Atonement/.test(label))maybeProcCounter(api,c,'disc_luminous_devotion','expDevotionCount',3,20,'expDevotion',8);
    if(label==='Shadow Mend'){
     spend(api,c,'expReparation');
@@ -279,12 +310,16 @@
   }
   if(id==='soul'){if(name==='Unstable Affliction')spend(api,c,'expNightfall');if(name==='Chaos Bolt')spend(api,c,'expCinderwake');}
   if(id==='disc'){
+   if(name==='Ultimate Radiance'&&has(api,c,'disc_radiant_purpose'))grant(api,c,'expRadiantPurpose',6);
+   if(['Smite','Mind Spike'].includes(name)&&live(api,c,'expRevelation')&&has(api,c,'disc_umbral_reprieve')&&lock(api,c,'expUmbralLock',10))grant(api,c,'expUmbralReprieve',8);
+   if(name==='Shadow Mend')spend(api,c,'expUmbralReprieve');
    if(name==='Power Shield'){spend(api,c,'expDevotion');if(has(api,c,'disc_penitent_shelter')&&lock(api,c,'expShelterLock',10))grant(api,c,'expPenitentShelter',6);}
    if(['Smite','Mind Spike'].includes(name))spend(api,c,'expRevelation');
    if(name==='Shadow Mend'&&has(api,c,'disc_enduring_covenant')&&live(api,c,'expCovenantMend')?.targetId===unitId(t)){spend(api,c,'expCovenantMend');const atonement=api.effects(t).find(e=>e.type==='atonement'&&api.owned(e,c)&&api.time(e)>0);if(atonement&&lock(api,c,'expCovenantLock',6)){api.setTime(atonement,Math.min(17,api.time(atonement)+3));api.proc(c,'penance','Enduring Covenant',t);}}
   }
   if(id==='wind'&&name==='Willow Guard'&&has(api,c,'wind_willow_counter'))grant(api,c,'expWillowCounter',6);
   if(id==='storm'&&name==='Healing Surge'&&has(api,c,'storm_stone_to_sky')&&lock(api,c,'expStoneSkyLock',8))grant(api,c,'expStoneToSky',8);
+  if(id==='storm'&&name==='Arc Spark'&&!a.stormkeeperSpark&&!a.tempestProc&&!live(api,c,'stormkeeper'))spend(api,c,'expStormRebound');
   if(id==='sage'&&name==='Fae Retreat'&&has(api,c,'sage_fae_bloom')&&lock(api,c,'expFaeBloomLock',8))grant(api,c,'expFaeBloom',6);
   if(id==='pala'&&name==='Holy Light')spend(api,c,'expRadiantRiposte');
   if(id==='warrior'&&name==='Charge'&&has(api,c,'war_weight_of_steel'))grant(api,c,'expWeightSteel',6);
